@@ -22,34 +22,36 @@ Personal backup tool for cold storage drives. Mac mini, 4TB SSD → two 8TB HDDs
 
 ## Status
 
-**Design phase: complete.** All v1 design decisions are locked. Implementation has not started.
+**Implementation in progress.** Design phase complete; milestones 1–5 done.
 
 **Stack**: TypeScript + Bun, Hono (HTTP), React + Vite (UI), `bun:sqlite`, BLAKE3, SSE for progress.
 
 **Scale baseline measured**: 177K files / 3.5TB on the source SSD. Standard SQLite indices are sufficient.
 
+**Test suite**: `bun run test` in `apps/api/` — 56 tests across 4 files.
+
 ---
 
-## Next session: implementation planning
+## Milestone map
 
-The brief's section 7 sketches a milestone order; refine it for the chosen stack. Recommended order (subject to revisiting):
+| # | Name | Status |
+|---|---|---|
+| 1 | Project skeleton (monorepo, Hono boot, Vite dev proxy, healthcheck) | ✅ Done |
+| 2 | SQLite + migrations (WAL, migration runner, full schema) | ✅ Done |
+| 3 | Disk identity & registration (dotfile UUID, `df` polling, disk registry API) | ✅ Done |
+| 4 | Locking primitive (per-disk write lock, DB-mirrored, unit tested) | ✅ Done |
+| 5 | Job framework (status machine, pause/resume/cancel, SSE progress stream) | ✅ Done |
+| 6 | **Scan job** ← *next* — resumable walk queue, BLAKE3 sampled hash, batched writes | 🔲 |
+| 7 | Web UI shell (disk list, job list, live SSE progress) | 🔲 |
+| 8 | Tree view (virtualized disk explorer, materialized aggregates) | 🔲 |
+| 9 | Diff (source vs. dest comparison, diff_cache) | 🔲 |
+| 10 | Copy job (temp→rename, dual inline hashing, resume-safe) | 🔲 |
+| 11 | Backup composite (scan→scan→diff→copy pipeline, pause-as-unit) | 🔲 |
+| 12 | Verify job (re-hash files, surface mismatches) | 🔲 |
+| 13 | Quarantine & cleanup (orphan temp files → .waypoint-quarantine/) | 🔲 |
+| 14 | Polish (ETAs, exclude editor, error review UI, SMART data) | 🔲 |
 
-1. **Skeleton** — repo layout (server `apps/api`, frontend `apps/web` or similar), Bun + Hono boot, `/healthz`, dev script with Vite + API hot reload.
-2. **SQLite + migrations** — `bun:sqlite` setup, WAL pragmas, migration runner using `PRAGMA user_version`. Implement the schema in `schema.md`.
-3. **Disk identity & registration** — mount-point polling, `.waypoint-disk-id` dotfile, `disks` table population.
-4. **Locking primitive** — in-memory R/W lock per disk, mirrored to `disk_locks`, stale-lock cleanup on startup.
-5. **Job framework** — `jobs` table, status transitions, pause/resume primitives, SSE progress channel, `job_events` log.
-6. **Scan job** — the keystone. Persisted walk queue, sampled BLAKE3 hashing, mtime+size shortcut on re-scan, batched DB writes (~500-1000 per tx), permission errors logged not fatal, directory aggregates recomputed at end.
-7. **Web UI shell** — list disks, trigger scans, observe jobs (SSE), per-job tabs (overview / tree / excluded / errors / events).
-8. **Tree view** — virtualized list backed by `directories` aggregates. Must be fast at any scale.
-9. **Diff** — synchronous SQL query + `diff_cache` materialization. Tree-view rendering of the diff.
-10. **Copy job** — temp→rename pattern, inline both-hashes, batched item updates, orphan-temp detection.
-11. **Backup composite** — orchestrates scan → scan → diff → copy with phase tracking.
-12. **Verify job** — sampled re-hash from disk.
-13. **Quarantine** — orphan-temp cleanup action.
-14. **Polish** — ETAs, error UX, exclude editor, retention policy for `*_items`.
-
-The scan job (step 6) is the architectural keystone. If its resumability is wrong, everything else is wrong.
+The scan job (M6) is the architectural keystone — if its resumability is wrong, everything else is wrong.
 
 ---
 

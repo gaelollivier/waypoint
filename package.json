@@ -1,0 +1,10 @@
+{
+  "name": "waypoint",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["apps/*"],
+  "scripts": {
+    "dev": "bun run --cwd apps/api dev & bun run --cwd apps/web dev",
+    "build": "bun run --cwd apps/web build && bun run --cwd apps/api build"
+  }
+}
