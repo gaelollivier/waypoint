@@ -3,6 +3,8 @@ import { getDb } from "../db/client";
 import { ensureDiskId } from "../disks/identity";
 import { registerDisk, getAllDisks, getDiskById, updateDisk } from "../disks/registry";
 import { getLockManager } from "../locks";
+import { getJobManager, registerRunner, unregisterRunner } from "../jobs";
+import { ScanJobRunner } from "../jobs/scan/scan-job";
 
 
 export const disksRouter = new Hono();
@@ -98,6 +100,48 @@ disksRouter.patch("/:id", async (c) => {
   });
 
   return c.json(formatDisk(updated!));
+});
+
+// Start a scan job for a disk
+disksRouter.post("/:id/scan", async (c) => {
+  const id = Number(c.req.param("id"));
+  const db = getDb();
+  const disk = getDiskById(db, id);
+  if (!disk) return c.json({ error: "Disk not found" }, 404);
+  if (!disk.is_connected || !disk.mount_path) {
+    return c.json({ error: "Disk is not connected" }, 409);
+  }
+
+  // Only one active/paused scan per disk at a time
+  const activeScan = db
+    .prepare(
+      `SELECT id FROM jobs
+       WHERE target_disk_id = ? AND type = 'scan'
+         AND status IN ('queued', 'running', 'paused')
+       LIMIT 1`
+    )
+    .get(id);
+  if (activeScan) {
+    return c.json({ error: "A scan is already active for this disk" }, 409);
+  }
+
+  const jm = getJobManager();
+  const job = jm.createJob({ type: "scan", targetDiskId: id });
+
+  const runner = new ScanJobRunner({
+    jobId: job.id,
+    jobManager: jm,
+    db,
+    diskId: id,
+    mountPath: disk.mount_path,
+  });
+
+  registerRunner(job.id, runner);
+
+  // Fire and forget — client polls/streams via SSE
+  runner.start().finally(() => unregisterRunner(job.id));
+
+  return c.json({ jobId: job.id }, 202);
 });
 
 // Lock state for a disk
