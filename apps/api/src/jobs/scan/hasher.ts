@@ -30,9 +30,6 @@ export async function computeSampledHash(filePath: string, sizeBytes: number): P
   }
 
   const file = Bun.file(filePath);
-  const buf = await file.arrayBuffer();
-  const data = new Uint8Array(buf);
-
   const hasher = new _BLAKE3(32, {});
 
   // Size prefix: 8 bytes little-endian (BigInt for > 32-bit sizes)
@@ -41,18 +38,25 @@ export async function computeSampledHash(filePath: string, sizeBytes: number): P
   view.setBigUint64(0, BigInt(sizeBytes), true);
   hasher.update(sizeBuf);
 
+  // Read only the byte ranges we need — never load the whole file.
+  // Bun.file().slice(start, end) reads lazily on .arrayBuffer().
+  const feed = async (start: number, end: number): Promise<void> => {
+    const buf = await file.slice(start, end).arrayBuffer();
+    hasher.update(new Uint8Array(buf));
+  };
+
   // Header
-  hasher.update(data.subarray(0, HEADER_SIZE));
+  await feed(0, HEADER_SIZE);
 
   // 4 interior samples, evenly distributed
   for (let i = 1; i <= 4; i++) {
     const offset = Math.floor((sizeBytes / 5) * i) - Math.floor(SAMPLE_SIZE / 2);
     const start = Math.max(HEADER_SIZE, Math.min(offset, sizeBytes - FOOTER_SIZE - SAMPLE_SIZE));
-    hasher.update(data.subarray(start, start + SAMPLE_SIZE));
+    await feed(start, start + SAMPLE_SIZE);
   }
 
   // Footer
-  hasher.update(data.subarray(Math.max(0, sizeBytes - FOOTER_SIZE)));
+  await feed(Math.max(0, sizeBytes - FOOTER_SIZE), sizeBytes);
 
   return bytesToHex(hasher.digest());
 }

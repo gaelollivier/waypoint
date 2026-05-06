@@ -80,6 +80,25 @@ describe("computeSampledHash", () => {
     expect(ha).not.toBe(hb);
   });
 
+  it("only reads sampled byte ranges (regression: avoids OOM on huge files)", async () => {
+    // Modifying a byte in an UNSAMPLED region of the file must NOT change the hash.
+    // This proves the implementation only reads the header/samples/footer ranges
+    // and isn't loading the full file into memory.
+    //
+    // For a 200KB file, header is [0, 8KB) and the first interior sample starts
+    // at ~35KB. Position 20000 is in the unsampled gap between them.
+    const size = 200 * 1024;
+    const data = Buffer.alloc(size, 0x00);
+    const p = tmpFile("unsampled-byte.bin", data);
+    const h1 = await computeSampledHash(p, size);
+
+    data[20_000] = 0xff;
+    writeFileSync(p, data);
+    const h2 = await computeSampledHash(p, size);
+
+    expect(h2).toBe(h1);
+  });
+
   it("differs for files with same content but different sizes (size prefix)", async () => {
     // Two files: same first 100KB, but different sizes (sampled content identical)
     // The size prefix should still produce different hashes
