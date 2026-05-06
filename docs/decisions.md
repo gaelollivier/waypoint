@@ -24,11 +24,11 @@ Settled decisions from the research phase. These are not up for re-discussion un
 
 ## Scale baseline (source SSD)
 
-Measured 2026-05-05 on the user's actual T7_Shield SSD:
+Measured on the source SSD (photo/video-heavy personal library):
 
-- 177,457 files, 3,769 directories
-- 3.50 TiB used
-- File size profile: bulk in 1-10MB range (~104K files), 508 files ≥1GB, ~22K files <100KB
+- ~177K files, ~3,800 directories
+- ~3.5 TiB used
+- File size profile: bulk in 1-10MB range (~104K files), ~500 files ≥1GB, ~22K files <100KB
 - Average file ~20MB; video/photo-heavy
 
 **Implication for schema:** all sizing is comfortable for SQLite. ~180K rows × ~5 disks × a few scans worth of state = well under 10M rows total. Standard B-tree indices, no partitioning, no JSONB tricks needed.

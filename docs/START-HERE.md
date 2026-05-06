@@ -1,6 +1,6 @@
 # Waypoint — Start Here
 
-Personal backup tool for cold storage drives. Mac mini, 4TB SSD → two 8TB HDDs (one connected at a time, manually rotated). Custom build — no existing tool covers all requirements.
+Personal backup tool for cold storage drives. SSD source → multiple HDDs (one connected at a time, manually rotated). Custom build — no existing tool covers all requirements.
 
 **Safety is the top priority.** The tool never calls `unlink`/`rm` on user files. All "cleanup" operations move files to a quarantine directory; the user does final deletions themselves. All write/move/rename operations are gated by an existence check and covered by tests asserting no-overwrite.
 
@@ -26,7 +26,7 @@ Personal backup tool for cold storage drives. Mac mini, 4TB SSD → two 8TB HDDs
 
 **Stack**: TypeScript + Bun, Hono (HTTP), React + Vite (UI), `bun:sqlite`, BLAKE3, SSE for progress.
 
-**Scale baseline measured**: 177K files / 3.5TB on the source SSD. Standard SQLite indices are sufficient.
+**Scale baseline measured**: ~177K files / ~3.5TB on the source SSD. Standard SQLite indices are sufficient.
 
 **Test suite**: `bun run test` in `apps/api/` — 56 tests across 4 files.
 

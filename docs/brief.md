@@ -6,9 +6,9 @@ This document is the full context of the design conversation that led to buildin
 
 ## 1. Hardware and operational context
 
-- **Host:** Mac mini, sitting on a desk. Everything connected via USB-C.
-- **Source drive:** 1× 4TB SSD, ~1 year old, already nearly full.
-- **Backup destinations:** 2× 8TB HDDs, 5,400rpm (slow). Only one external enclosure available, so only one HDD is ever connected at a time. Space on the desk is also limited; this constraint is durable, not temporary.
+- **Host:** Desktop Mac, sitting on a desk. Everything connected via USB.
+- **Source drive:** 1× large SSD, already nearly full.
+- **Backup destinations:** 2× large HDDs, 5,400rpm (slow). Only one external enclosure available, so only one HDD is ever connected at a time. Space on the desk is also limited; this constraint is durable, not temporary.
 - **Usage model:** Each HDD acts as an independent **cold-storage copy** of the SSD. Not a live mirror. Not a NAS (a proper NAS is a future, separate project). The user rotates HDDs manually — connect HDD-A, run a backup, disconnect; later connect HDD-B, run a backup, disconnect.
 - **Implication:** The system must treat each HDD as its own backup destination with its own state, and must be able to compare state across destinations (HDD-A vs HDD-B vs SSD) even when they aren't all connected at once.
 

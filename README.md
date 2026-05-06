@@ -1,8 +1,8 @@
 # Waypoint
 
-A personal backup tool for rotating cold-storage USB drives on a Mac mini.
+A personal backup tool for rotating cold-storage USB drives.
 
-**Hardware context:** 1× Mac mini (4TB SSD source, ~177K files / 3.5TB) → 2× 8TB HDDs (5,400 RPM, USB-C, manually rotated — only one connected at a time).
+**Use case:** SSD source → multiple HDDs (cold storage, manually rotated — only one connected at a time).
 
 ---
 
@@ -11,7 +11,7 @@ A personal backup tool for rotating cold-storage USB drives on a Mac mini.
 - Scans disks and builds a queryable SQLite file index
 - Compares source vs. destination to identify what needs copying
 - Copies files atomically (temp→rename, inline BLAKE3 verification)
-- Everything is pausable and resumable mid-operation — copying 4TB to a slow HDD takes hours
+- Everything is pausable and resumable mid-operation — copying terabytes to a slow HDD takes hours
 - Rich web UI for disk inspection, backup state, and job monitoring
 - SQLite database is independently queryable with any standard tool
 
