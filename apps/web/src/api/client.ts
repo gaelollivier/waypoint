@@ -1,4 +1,4 @@
-import type { Disk, Job, JobEvent } from "./types";
+import type { Disk, Job, JobEvent, TreeResponse } from "./types";
 
 const BASE = "/api";
 
@@ -14,8 +14,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-// ── Disks ────────────────────────────────────────────────────────────────────
-
 export const api = {
   disks: {
     list: () => request<Disk[]>("/disks"),
@@ -30,9 +28,22 @@ export const api = {
       request<{ jobId: number }>(`/disks/${id}/scan`, { method: "POST" }),
   },
 
+  tree: {
+    get: (diskId: number, parentId?: number | null): Promise<TreeResponse> => {
+      const qs = parentId != null ? `?parentId=${parentId}` : "";
+      return request<TreeResponse>(`/disks/${diskId}/tree${qs}`);
+    },
+  },
+
   jobs: {
     list: (params?: { status?: string; type?: string; limit?: number }) => {
-      const qs = params ? "?" + new URLSearchParams(Object.entries(params).filter(([, v]) => v !== undefined).map(([k, v]) => [k, String(v)])).toString() : "";
+      const qs = params
+        ? "?" + new URLSearchParams(
+            Object.entries(params)
+              .filter(([, v]) => v !== undefined)
+              .map(([k, v]) => [k, String(v)])
+          ).toString()
+        : "";
       return request<Job[]>(`/jobs${qs}`);
     },
 

@@ -7,6 +7,7 @@ import { initLockManager } from "./locks";
 import { initJobManager } from "./jobs";
 import { disksRouter } from "./routes/disks";
 import { jobsRouter } from "./routes/jobs";
+import { treeRouter } from "./routes/tree";
 
 // Initialize DB (runs migrations + clears stale locks) at startup
 const db = getDb();
@@ -31,6 +32,7 @@ app.use(
 app.get("/healthz", (c) => c.json({ ok: true }));
 app.route("/api/disks", disksRouter);
 app.route("/api/jobs", jobsRouter);
+app.route("/api/disks/:id/tree", treeRouter);
 
 const PORT = Number(process.env.PORT ?? 3000);
 

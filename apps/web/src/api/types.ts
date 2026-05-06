@@ -36,6 +36,27 @@ export interface Job {
   completedAt: string | null;
 }
 
+export interface TreeEntry {
+  kind: "directory" | "file";
+  id: number;
+  name: string;
+  path: string;
+  sizeBytes: number;
+  fileCount?: number;
+  directFileCount?: number;
+  mtime?: string;
+  sampledHash?: string | null;
+}
+
+export interface TreeResponse {
+  diskId: number;
+  parentId: number | null;
+  parentPath: string | null;
+  breadcrumb: Array<{ id: number | null; name: string; path: string }>;
+  totalSizeBytes: number;
+  entries: TreeEntry[];
+}
+
 export interface JobEvent {
   id: number;
   jobId: number;

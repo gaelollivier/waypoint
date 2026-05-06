@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "../api/client";
 import type { Disk } from "../api/types";
-import { Link } from "../components/Router";
+import { navigate } from "../components/Router";
 
 function formatBytes(n: number | null): string {
   if (n === null) return "—";
@@ -39,14 +39,24 @@ function DiskCard({ disk, onScan }: { disk: Disk; onScan: (id: number) => void }
             {disk.mountPath && <><span>·</span><span className="font-mono">{disk.mountPath}</span></>}
           </div>
         </div>
-        {disk.isConnected && (
-          <button
-            onClick={() => onScan(disk.id)}
-            className="shrink-0 rounded bg-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-700 hover:text-white transition-colors"
-          >
-            Scan
-          </button>
-        )}
+        <div className="flex items-center gap-2 shrink-0">
+          {disk.lastScanAt && (
+            <button
+              onClick={() => navigate(`/disks/${disk.id}/explore`)}
+              className="rounded bg-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-700 hover:text-white transition-colors"
+            >
+              Explore
+            </button>
+          )}
+          {disk.isConnected && (
+            <button
+              onClick={() => onScan(disk.id)}
+              className="rounded bg-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-700 hover:text-white transition-colors"
+            >
+              Scan
+            </button>
+          )}
+        </div>
       </div>
 
       {disk.capacityBytes && (
