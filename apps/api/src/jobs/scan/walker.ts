@@ -1,13 +1,26 @@
 import type { Database } from "bun:sqlite";
+import { readdir } from "fs/promises";
 import path from "path";
 import { computeSampledHash, HASH_ALGO_VERSION } from "./hasher";
 import type { JobManager } from "../job-manager";
+import { trace } from "../../diag/trace";
 
 // SF_DATALESS flag — macOS iCloud stub files that haven't been downloaded.
 // Reading them would trigger a network fetch. Detect and skip.
 const SF_DATALESS = 0x40000000;
 
-const BATCH_SIZE = 500; // rows per transaction
+// How many files to stat+hash in parallel within a single directory.
+//
+// Hashing is BLAKE3 in pure JS (sync CPU). With concurrency too high, all
+// workers return from their tiny I/O slice in the same tick and queue a long
+// run of synchronous hash+update + DB writes back-to-back, starving the HTTP
+// event loop.
+//
+// HDDs will likely want even less (1) to avoid head thrash.
+// TODO: tune by `disk.kind` once we benchmark an HDD.
+// TODO: move BLAKE3 hashing into a Worker thread so the main loop only handles
+// DB+HTTP. See docs/open-questions.md → "Worker-based hashing".
+const SCAN_CONCURRENCY = 4;
 
 export interface WalkQueueRow {
   id: number;
@@ -59,11 +72,17 @@ export async function processNextQueueEntry(
 
   let filesIndexed = 0;
   let bytesIndexed = 0;
+  const t0 = performance.now();
+  const timings: Record<string, number> = {};
 
   try {
+    const tA = performance.now();
     const dirId = await upsertDirectory(db, diskId, scanJobId, entry.path, entry.parent_directory_id);
+    timings.upsert_dir_ms = Math.round(performance.now() - tA);
 
-    const dirEntries = await readDir(entry.path, scanJobId, jobManager);
+    const tB = performance.now();
+    const dirEntries = await readDirEntries(entry.path, scanJobId, jobManager);
+    timings.readdir_ms = Math.round(performance.now() - tB);
     if (dirEntries === null) {
       // Permission denied or similar — already logged, mark done and move on
       markQueueEntryDone(db, entry.id);
@@ -73,6 +92,7 @@ export async function processNextQueueEntry(
     // Enqueue subdirectories
     const subdirs = dirEntries.filter((e) => e.isDirectory());
     if (subdirs.length > 0) {
+      const tC = performance.now();
       db.transaction(() => {
         const stmt = db.prepare(
           `INSERT OR IGNORE INTO scan_walk_queue
@@ -83,26 +103,45 @@ export async function processNextQueueEntry(
           stmt.run(scanJobId, diskId, path.join(entry.path, subdir.name), dirId);
         }
       })();
+      timings.enqueue_subdirs_ms = Math.round(performance.now() - tC);
     }
 
-    // Process files in batches
+    // Process files in this directory (concurrent stat+hash, single batched DB write)
     const files = dirEntries.filter((e) => e.isFile());
-    for (let i = 0; i < files.length; i += BATCH_SIZE) {
-      const batch = files.slice(i, i + BATCH_SIZE);
-      const { count, bytes } = await upsertFileBatch(
+    if (files.length > 0) {
+      const tD = performance.now();
+      const { count, bytes, hashPoolMs, upsertMs, selectMs } = await upsertFileBatch(
         db,
         diskId,
         dirId,
         entry.path,
         scanJobId,
-        batch,
+        files,
         jobManager
       );
+      timings.files_total_ms = Math.round(performance.now() - tD);
+      timings.files_select_ms = selectMs;
+      timings.files_hash_pool_ms = hashPoolMs;
+      timings.files_upsert_ms = upsertMs;
       filesIndexed += count;
       bytesIndexed += bytes;
     }
 
     markQueueEntryDone(db, entry.id);
+
+    const totalMs = Math.round(performance.now() - t0);
+    // Log every directory that took >100ms or had >500 files. Cheap directories
+    // are silenced so the trace stays readable.
+    if (totalMs > 100 || dirEntries.length > 500) {
+      trace("dir_done", {
+        path: entry.path,
+        files: files.length,
+        subdirs: subdirs.length,
+        total_ms: totalMs,
+        ...timings,
+      });
+    }
+
     return { filesIndexed, bytesIndexed };
   } catch (err) {
     db.prepare(
@@ -117,14 +156,13 @@ export async function processNextQueueEntry(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-async function readDir(
+async function readDirEntries(
   dirPath: string,
   scanJobId: number,
   jobManager: JobManager
 ): Promise<import("fs").Dirent[] | null> {
   try {
-    const { readdirSync } = await import("fs");
-    return readdirSync(dirPath, { withFileTypes: true });
+    return await readdir(dirPath, { withFileTypes: true });
   } catch (err: any) {
     if (err.code === "EACCES" || err.code === "EPERM") {
       jobManager.logEvent(
@@ -148,7 +186,6 @@ async function upsertDirectory(
   parentId: number | null
 ): Promise<number> {
   const name = path.basename(dirPath) || dirPath;
-  const now = new Date().toISOString();
 
   const existing = db
     .prepare("SELECT id FROM directories WHERE disk_id = ? AND path = ?")
@@ -179,21 +216,37 @@ async function upsertFileBatch(
   scanJobId: number,
   entries: import("fs").Dirent[],
   jobManager: JobManager
-): Promise<{ count: number; bytes: number }> {
-  let count = 0;
-  let bytes = 0;
+): Promise<{ count: number; bytes: number; selectMs: number; hashPoolMs: number; upsertMs: number }> {
+  // Single batched lookup of existing rows, instead of one SELECT per file.
+  const tSelect = performance.now();
+  const placeholders = entries.map(() => "?").join(",");
+  const names = entries.map((e) => e.name);
+  const existingRows = db
+    .prepare(
+      `SELECT name, mtime, size_bytes, sampled_hash
+       FROM files
+       WHERE disk_id = ? AND directory_id = ? AND name IN (${placeholders})`
+    )
+    .all(diskId, directoryId, ...names) as Array<{
+    name: string;
+    mtime: string;
+    size_bytes: number;
+    sampled_hash: string | null;
+  }>;
+  const existingMap = new Map(existingRows.map((r) => [r.name, r]));
+  const selectMs = Math.round(performance.now() - tSelect);
 
-  // Collect file stats + hashes (outside transaction — I/O)
-  const fileData: Array<{
+  type FileRecord = {
     name: string;
     filePath: string;
     sizeBytes: number;
     mtime: string;
     sampledHash: string | null;
     skipped: boolean;
-  }> = [];
+  };
+  const fileData: FileRecord[] = [];
 
-  for (const entry of entries) {
+  async function processOne(entry: import("fs").Dirent): Promise<void> {
     const filePath = path.join(dirPath, entry.name);
     try {
       const stat = await Bun.file(filePath).stat();
@@ -208,34 +261,22 @@ async function upsertFileBatch(
           { path: filePath }
         );
         fileData.push({ name: entry.name, filePath, sizeBytes: 0, mtime: "", sampledHash: null, skipped: true });
-        continue;
+        return;
       }
 
       const mtime = new Date(stat.mtime).toISOString();
       const sizeBytes = stat.size;
-
-      // mtime+size shortcut: check if we already have this file with matching values
-      const existing = db
-        .prepare(
-          `SELECT id, mtime, size_bytes, sampled_hash
-           FROM files
-           WHERE disk_id = ? AND directory_id = ? AND name = ?`
-        )
-        .get(diskId, directoryId, entry.name) as
-        | { id: number; mtime: string; size_bytes: number; sampled_hash: string | null }
-        | null;
+      const existing = existingMap.get(entry.name);
 
       let sampledHash: string | null = null;
       if (existing && existing.mtime === mtime && existing.size_bytes === sizeBytes && existing.sampled_hash) {
-        // Unchanged — reuse stored hash
+        // mtime+size unchanged — reuse stored hash, skip I/O
         sampledHash = existing.sampled_hash;
       } else {
         sampledHash = await computeSampledHash(filePath, sizeBytes);
       }
 
       fileData.push({ name: entry.name, filePath, sizeBytes, mtime, sampledHash, skipped: false });
-      bytes += sizeBytes;
-      count++;
     } catch (err: any) {
       jobManager.logEvent(
         scanJobId,
@@ -247,9 +288,33 @@ async function upsertFileBatch(
     }
   }
 
-  // Batch upsert (single transaction)
+  // Worker pool: SCAN_CONCURRENCY workers drain a shared queue.
+  // JS is single-threaded, so queue.shift() between awaits is race-free.
+  //
+  // After each file, we yield to the macrotask queue via setImmediate.
+  // Without this, large directories (10k+ files) keep the worker pool busy on
+  // microtasks for seconds — the HTTP server never gets a turn and the whole
+  // API appears frozen. setImmediate explicitly hands control to I/O/timer
+  // callbacks, including pending HTTP requests.
+  const tHash = performance.now();
+  const queue = [...entries];
+  async function worker(): Promise<void> {
+    while (queue.length > 0) {
+      await processOne(queue.shift()!);
+      await new Promise<void>((r) => setImmediate(r));
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(SCAN_CONCURRENCY, entries.length) }, worker)
+  );
+  const hashPoolMs = Math.round(performance.now() - tHash);
+
+  let count = 0;
+  let bytes = 0;
+
+  // Single transaction for all upserts in this directory
+  const tUpsert = performance.now();
   db.transaction(() => {
-    const now = new Date().toISOString();
     const upsertStmt = db.prepare(
       `INSERT INTO files
          (disk_id, directory_id, name, path, size_bytes, mtime, sampled_hash,
@@ -276,10 +341,13 @@ async function upsertFileBatch(
         HASH_ALGO_VERSION,
         scanJobId
       );
+      count++;
+      bytes += f.sizeBytes;
     }
   })();
+  const upsertMs = Math.round(performance.now() - tUpsert);
 
-  return { count, bytes };
+  return { count, bytes, selectMs, hashPoolMs, upsertMs };
 }
 
 function markQueueEntryDone(db: Database, entryId: number): void {
@@ -292,34 +360,137 @@ function markQueueEntryDone(db: Database, entryId: number): void {
  * Recomputes materialized aggregates for all directories on this disk.
  * Called once at the end of each scan job.
  *
- * Uses path-prefix matching: a directory at /foo/bar contributes to all
- * ancestor directories whose path is a prefix of /foo/bar. This is O(dirs²)
- * in the worst case but is a one-time end-of-scan operation over at most a few
- * thousand directories — well within budget.
+ * Algorithm: O(files + dirs), all I/O delegated to SQLite, roll-up done in JS.
+ *
+ *   1. Single GROUP BY on `files` → direct (count, bytes) per directory.
+ *      Uses the (disk_id, directory_id) index. Returns one row per directory,
+ *      not per file — memory cost is O(dirs) regardless of file count.
+ *   2. Load (id, parent_id) for every directory on the disk — O(dirs).
+ *   3. Sort directories by depth descending, accumulate each dir's running
+ *      totals into its parent. By the time a parent is processed, all
+ *      descendants have already contributed. O(dirs × max_depth).
+ *   4. Single transaction writes back the three aggregate columns. Yields to
+ *      the event loop every YIELD_EVERY rows so HTTP/SSE can run during the
+ *      writeback (~thousands of small UPDATEs).
+ *
+ * This replaces a previous correlated-subquery UPDATE that ran ~670M LIKE
+ * comparisons synchronously and froze the API for ~3 minutes on the source
+ * dataset (177K files / 3.7K dirs). See docs/open-questions.md → freeze.
  */
-export function recomputeAggregates(db: Database, diskId: number): void {
-  const now = new Date().toISOString();
-  db
+const YIELD_EVERY = 500;
+
+export async function recomputeAggregates(db: Database, diskId: number): Promise<void> {
+  const t0 = performance.now();
+
+  // 1. Direct (count, bytes) per directory — single grouped scan.
+  const tGroup = performance.now();
+  const directRows = db
     .prepare(
-      `UPDATE directories
-       SET
-         direct_file_count = (
-           SELECT COUNT(*) FROM files f
-           WHERE f.disk_id = directories.disk_id
-             AND f.directory_id = directories.id
-         ),
-         file_count = (
-           SELECT COUNT(*) FROM files f
-           WHERE f.disk_id = directories.disk_id
-             AND f.path LIKE directories.path || '/%'
-         ),
-         total_size_bytes = (
-           SELECT COALESCE(SUM(f.size_bytes), 0) FROM files f
-           WHERE f.disk_id = directories.disk_id
-             AND f.path LIKE directories.path || '/%'
-         ),
-         aggregates_computed_at = ?
-       WHERE disk_id = ?`
+      `SELECT directory_id AS id, COUNT(*) AS direct_n, COALESCE(SUM(size_bytes), 0) AS direct_b
+         FROM files
+        WHERE disk_id = ?
+        GROUP BY directory_id`
     )
-    .run(now, diskId);
+    .all(diskId) as Array<{ id: number; direct_n: number; direct_b: number }>;
+  const groupMs = Math.round(performance.now() - tGroup);
+
+  // 2. Load directory tree (id + parent_id) for this disk.
+  const tDirs = performance.now();
+  const dirRows = db
+    .prepare("SELECT id, parent_id FROM directories WHERE disk_id = ?")
+    .all(diskId) as Array<{ id: number; parent_id: number | null }>;
+  const dirsLoadMs = Math.round(performance.now() - tDirs);
+
+  // Build per-dir state, seeded with direct totals.
+  type Acc = { directN: number; directB: number; totalN: number; totalB: number; parentId: number | null; depth: number };
+  const acc = new Map<number, Acc>();
+  for (const d of dirRows) {
+    acc.set(d.id, { directN: 0, directB: 0, totalN: 0, totalB: 0, parentId: d.parent_id, depth: 0 });
+  }
+  for (const r of directRows) {
+    const a = acc.get(r.id);
+    if (!a) continue; // file pointing to a missing directory — defensive
+    a.directN = r.direct_n;
+    a.directB = r.direct_b;
+    a.totalN = r.direct_n;
+    a.totalB = r.direct_b;
+  }
+
+  // 3. Compute depth via memoized parent walk, then sort deepest-first.
+  const tDepth = performance.now();
+  function depth(id: number): number {
+    const a = acc.get(id);
+    if (!a) return 0;
+    if (a.depth !== 0) return a.depth;
+    let d = 0;
+    let cur: number | null = id;
+    // Walk up; cap at the directory count to defend against accidental cycles.
+    let safety = acc.size + 1;
+    while (cur !== null && safety-- > 0) {
+      const node = acc.get(cur);
+      if (!node || node.parentId === null) break;
+      cur = node.parentId;
+      d++;
+    }
+    a.depth = d;
+    return d;
+  }
+  const sorted = [...acc.entries()].sort((a, b) => depth(b[0]) - depth(a[0]));
+  const depthMs = Math.round(performance.now() - tDepth);
+
+  // 4. Roll up: each dir contributes its totals to its parent. Deepest first
+  //    means parents see fully-aggregated children.
+  const tRollup = performance.now();
+  for (const [, node] of sorted) {
+    if (node.parentId == null) continue;
+    const parent = acc.get(node.parentId);
+    if (!parent) continue;
+    parent.totalN += node.totalN;
+    parent.totalB += node.totalB;
+  }
+  const rollupMs = Math.round(performance.now() - tRollup);
+
+  // 5. Write back. One transaction, yielding every YIELD_EVERY rows so the
+  //    event loop can serve HTTP requests during the writeback.
+  const tWrite = performance.now();
+  const now = new Date().toISOString();
+  const stmt = db.prepare(
+    `UPDATE directories
+        SET direct_file_count = ?,
+            file_count        = ?,
+            total_size_bytes  = ?,
+            aggregates_computed_at = ?
+      WHERE id = ?`
+  );
+
+  // We can't yield inside a sync db.transaction(), so we open the txn manually
+  // and chunk in batches separated by setImmediate yields.
+  db.exec("BEGIN");
+  try {
+    let i = 0;
+    for (const [id, a] of acc) {
+      stmt.run(a.directN, a.totalN, a.totalB, now, id);
+      i++;
+      if (i % YIELD_EVERY === 0) {
+        await new Promise<void>((r) => setImmediate(r));
+      }
+    }
+    db.exec("COMMIT");
+  } catch (e) {
+    db.exec("ROLLBACK");
+    throw e;
+  }
+  const writeMs = Math.round(performance.now() - tWrite);
+
+  trace("aggregates_done", {
+    disk_id: diskId,
+    dirs: acc.size,
+    direct_groups: directRows.length,
+    total_ms: Math.round(performance.now() - t0),
+    group_ms: groupMs,
+    dirs_load_ms: dirsLoadMs,
+    depth_ms: depthMs,
+    rollup_ms: rollupMs,
+    write_ms: writeMs,
+  });
 }

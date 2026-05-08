@@ -1,16 +1,21 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
-import { getJobManager, getRunner } from "../jobs";
+import { getDb } from "../db/client";
+import { getJobManager, getRunner, registerRunner, unregisterRunner } from "../jobs";
 import { sseRegistry } from "../jobs/sse";
+import { ScanJobRunner } from "../jobs/scan/scan-job";
+import { getDiskById } from "../disks/registry";
 
 export const jobsRouter = new Hono();
 
-// List jobs (optional ?status=, ?type=, ?limit= query params)
+// List jobs (optional ?status=, ?type=, ?targetDiskId=, ?limit= query params)
 jobsRouter.get("/", (c) => {
   const status = c.req.query("status") as any;
   const type = c.req.query("type") as any;
+  const targetDiskIdRaw = c.req.query("targetDiskId");
+  const targetDiskId = targetDiskIdRaw ? Number(targetDiskIdRaw) : undefined;
   const limit = c.req.query("limit") ? Number(c.req.query("limit")) : undefined;
-  const jobs = getJobManager().listJobs({ status, type, limit });
+  const jobs = getJobManager().listJobs({ status, type, targetDiskId, limit });
   return c.json(jobs.map(formatJob));
 });
 
@@ -85,31 +90,73 @@ jobsRouter.post("/:id/pause", (c) => {
   return c.json({ ok: true });
 });
 
-// Resume a paused job
+// Resume a paused job. If no in-process runner exists (e.g. after a server
+// restart), rehydrate one — `JobRunner.start()` accepts the paused→running
+// transition and the scan walker resumes from its persisted walk queue.
 jobsRouter.post("/:id/resume", (c) => {
   const id = Number(c.req.param("id"));
-  const job = getJobManager().getJob(id);
+  const jm = getJobManager();
+  const job = jm.getJob(id);
   if (!job) return c.json({ error: "Job not found" }, 404);
   if (job.status !== "paused") {
     return c.json({ error: `Job is ${job.status}, not paused` }, 409);
   }
-  const runner = getRunner(id);
-  if (!runner) return c.json({ error: "Job is not active in this process" }, 409);
-  runner.resume();
-  return c.json({ ok: true });
+
+  const existing = getRunner(id);
+  if (existing) {
+    existing.resume();
+    return c.json({ ok: true });
+  }
+
+  // Rehydrate. Currently only scan jobs are rehydratable — copy/verify don't
+  // exist yet; backup composite rehydration is a v1.x concern.
+  if (job.type !== "scan") {
+    return c.json({ error: `Cannot rehydrate ${job.type} jobs yet` }, 501);
+  }
+
+  const db = getDb();
+  if (job.target_disk_id == null) {
+    return c.json({ error: "Scan job has no target disk" }, 500);
+  }
+  const disk = getDiskById(db, job.target_disk_id);
+  if (!disk) return c.json({ error: "Target disk no longer exists" }, 410);
+  if (!disk.is_connected || !disk.mount_path) {
+    return c.json({ error: "Target disk is not connected" }, 409);
+  }
+
+  const runner = new ScanJobRunner({
+    jobId: job.id,
+    jobManager: jm,
+    db,
+    diskId: disk.id,
+    mountPath: disk.mount_path,
+  });
+
+  registerRunner(job.id, runner);
+  runner.start().finally(() => unregisterRunner(job.id));
+
+  return c.json({ ok: true, rehydrated: true });
 });
 
-// Cancel a job
+// Cancel a job. If an in-process runner exists, signal it (so it cleans up).
+// Otherwise (paused job that survived a restart) just transition the DB row.
 jobsRouter.post("/:id/cancel", (c) => {
   const id = Number(c.req.param("id"));
-  const job = getJobManager().getJob(id);
+  const jm = getJobManager();
+  const job = jm.getJob(id);
   if (!job) return c.json({ error: "Job not found" }, 404);
   if (["completed", "failed", "cancelled"].includes(job.status)) {
     return c.json({ error: `Job is already ${job.status}` }, 409);
   }
+
   const runner = getRunner(id);
-  if (!runner) return c.json({ error: "Job is not active in this process" }, 409);
-  runner.cancel();
+  if (runner) {
+    runner.cancel();
+  } else {
+    // Detached paused/queued job — only the DB row exists.
+    jm.transition(id, "cancelled");
+    sseRegistry.publish(id, "status", { id, status: "cancelled" });
+  }
   return c.json({ ok: true });
 });
 

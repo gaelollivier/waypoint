@@ -1,22 +1,10 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "../api/client";
-import type { Disk } from "../api/types";
+import type { Disk, Volume } from "../api/types";
 import { navigate } from "../components/Router";
+import { formatBytes, formatDate } from "../lib/format";
 
-function formatBytes(n: number | null): string {
-  if (n === null) return "—";
-  if (n >= 1e12) return (n / 1e12).toFixed(1) + " TB";
-  if (n >= 1e9) return (n / 1e9).toFixed(1) + " GB";
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + " MB";
-  return (n / 1e3).toFixed(0) + " KB";
-}
-
-function formatDate(s: string | null): string {
-  if (!s) return "never";
-  return new Date(s).toLocaleString();
-}
-
-function DiskCard({ disk, onScan }: { disk: Disk; onScan: (id: number) => void }) {
+function DiskCard({ disk }: { disk: Disk }) {
   const usedBytes = disk.capacityBytes && disk.freeBytes !== null
     ? disk.capacityBytes - disk.freeBytes
     : null;
@@ -25,7 +13,10 @@ function DiskCard({ disk, onScan }: { disk: Disk; onScan: (id: number) => void }
     : null;
 
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-5 flex flex-col gap-4">
+    <button
+      onClick={() => navigate(`/disks/${disk.id}`)}
+      className="text-left rounded-lg border border-zinc-800 bg-zinc-900 p-5 flex flex-col gap-4 hover:border-zinc-700 hover:bg-zinc-900/80 transition-colors"
+    >
       <div className="flex items-start justify-between gap-4">
         <div>
           <div className="flex items-center gap-2">
@@ -34,29 +25,10 @@ function DiskCard({ disk, onScan }: { disk: Disk; onScan: (id: number) => void }
           </div>
           <div className="mt-1 flex gap-3 text-xs text-zinc-500">
             <span className="uppercase">{disk.kind}</span>
-            <span>·</span>
-            <span>{disk.role}</span>
             {disk.mountPath && <><span>·</span><span className="font-mono">{disk.mountPath}</span></>}
           </div>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
-          {disk.lastScanAt && (
-            <button
-              onClick={() => navigate(`/disks/${disk.id}/explore`)}
-              className="rounded bg-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-700 hover:text-white transition-colors"
-            >
-              Explore
-            </button>
-          )}
-          {disk.isConnected && (
-            <button
-              onClick={() => onScan(disk.id)}
-              className="rounded bg-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-700 hover:text-white transition-colors"
-            >
-              Scan
-            </button>
-          )}
-        </div>
+        <span className="text-xs text-zinc-600 group-hover:text-zinc-400">→</span>
       </div>
 
       {disk.capacityBytes && (
@@ -77,26 +49,37 @@ function DiskCard({ disk, onScan }: { disk: Disk; onScan: (id: number) => void }
       <div className="text-xs text-zinc-600">
         Last scan: {formatDate(disk.lastScanAt)}
       </div>
-    </div>
+    </button>
   );
 }
 
 function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
-  const [form, setForm] = useState({
-    mountPath: "",
-    label: "",
-    kind: "hdd" as "ssd" | "hdd",
-    role: "destination" as "source" | "destination",
-  });
+  const [volumes, setVolumes] = useState<Volume[] | null>(null);
+  const [selected, setSelected] = useState<Volume | null>(null);
+  const [label, setLabel] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
+  useEffect(() => {
+    api.disks.volumes()
+      .then((vols) => {
+        setVolumes(vols);
+        const firstUnregistered = vols.find((v) => !v.isWaypointDisk);
+        if (firstUnregistered) {
+          setSelected(firstUnregistered);
+          setLabel(firstUnregistered.name);
+        }
+      })
+      .catch((err) => setError(err.message));
+  }, []);
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!selected) return;
     setError(null);
     setLoading(true);
     try {
-      await api.disks.register(form);
+      await api.disks.register({ mountPath: selected.mountPath, label });
       onDone();
     } catch (err: any) {
       setError(err.message);
@@ -114,53 +97,62 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
       >
         <h2 className="text-base font-semibold text-white">Register a disk</h2>
 
-        <label className="block space-y-1">
-          <span className="text-xs text-zinc-400">Mount path</span>
-          <input
-            className="w-full rounded bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm text-white font-mono focus:outline-none focus:border-blue-500"
-            placeholder="/Volumes/My-HDD"
-            value={form.mountPath}
-            onChange={(e) => setForm((f) => ({ ...f, mountPath: e.target.value }))}
-            required
-          />
-        </label>
+        <div className="space-y-1">
+          <p className="text-xs text-zinc-400">Volume</p>
+          {volumes === null ? (
+            <p className="text-xs text-zinc-500">Loading volumes…</p>
+          ) : volumes.length === 0 ? (
+            <p className="text-xs text-zinc-500">No volumes mounted under <code>/Volumes</code>.</p>
+          ) : (
+            <div className="space-y-1 max-h-64 overflow-y-auto rounded border border-zinc-800">
+              {volumes.map((v) => {
+                const isSelected = selected?.mountPath === v.mountPath;
+                return (
+                  <button
+                    type="button"
+                    key={v.mountPath}
+                    disabled={v.isWaypointDisk}
+                    onClick={() => {
+                      setSelected(v);
+                      if (!label) setLabel(v.name);
+                    }}
+                    className={`w-full flex items-center justify-between gap-3 px-3 py-2 text-left text-sm transition-colors ${
+                      v.isWaypointDisk
+                        ? "opacity-40 cursor-not-allowed"
+                        : isSelected
+                          ? "bg-blue-900/40 text-white"
+                          : "hover:bg-zinc-800 text-zinc-300"
+                    }`}
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate font-medium">{v.name}</div>
+                      <div className="font-mono text-xs text-zinc-500 truncate">{v.mountPath}</div>
+                    </div>
+                    <div className="text-xs text-zinc-500 shrink-0 text-right">
+                      {v.capacityBytes != null && <div>{formatBytes(v.capacityBytes)}</div>}
+                      {v.isWaypointDisk && <div className="text-zinc-600">already registered</div>}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
 
         <label className="block space-y-1">
           <span className="text-xs text-zinc-400">Label</span>
           <input
             className="w-full rounded bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
-            placeholder="HDD-A"
-            value={form.label}
-            onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))}
+            placeholder="My SSD"
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
             required
           />
         </label>
 
-        <div className="flex gap-4">
-          <label className="block flex-1 space-y-1">
-            <span className="text-xs text-zinc-400">Kind</span>
-            <select
-              className="w-full rounded bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
-              value={form.kind}
-              onChange={(e) => setForm((f) => ({ ...f, kind: e.target.value as "ssd" | "hdd" }))}
-            >
-              <option value="hdd">HDD</option>
-              <option value="ssd">SSD</option>
-            </select>
-          </label>
-
-          <label className="block flex-1 space-y-1">
-            <span className="text-xs text-zinc-400">Role</span>
-            <select
-              className="w-full rounded bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
-              value={form.role}
-              onChange={(e) => setForm((f) => ({ ...f, role: e.target.value as "source" | "destination" }))}
-            >
-              <option value="destination">Destination</option>
-              <option value="source">Source</option>
-            </select>
-          </label>
-        </div>
+        <p className="text-xs text-zinc-600">
+          Disk type (SSD/HDD) is auto-detected via <code>diskutil</code>.
+        </p>
 
         {error && <p className="text-xs text-red-400">{error}</p>}
 
@@ -170,7 +162,7 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
           </button>
           <button
             type="submit"
-            disabled={loading}
+            disabled={loading || !selected || !label}
             className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50 transition-colors"
           >
             {loading ? "Registering…" : "Register"}
@@ -185,7 +177,6 @@ export function DisksPage() {
   const [disks, setDisks] = useState<Disk[]>([]);
   const [loading, setLoading] = useState(true);
   const [showRegister, setShowRegister] = useState(false);
-  const [scanMessage, setScanMessage] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -197,30 +188,16 @@ export function DisksPage() {
 
   useEffect(() => { load(); }, [load]);
 
-  const handleScan = async (diskId: number) => {
-    try {
-      const { jobId } = await api.disks.scan(diskId);
-      setScanMessage(`Scan started — job #${jobId}`);
-      setTimeout(() => setScanMessage(null), 4000);
-    } catch (err: any) {
-      setScanMessage(`Error: ${err.message}`);
-      setTimeout(() => setScanMessage(null), 4000);
-    }
-  };
-
   return (
     <div className="max-w-3xl mx-auto space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-lg font-semibold text-white">Disks</h1>
-        <div className="flex items-center gap-3">
-          {scanMessage && <span className="text-xs text-zinc-400">{scanMessage}</span>}
-          <button
-            onClick={() => setShowRegister(true)}
-            className="rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-500 transition-colors"
-          >
-            + Register disk
-          </button>
-        </div>
+        <button
+          onClick={() => setShowRegister(true)}
+          className="rounded bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-500 transition-colors"
+        >
+          + Register disk
+        </button>
       </div>
 
       {loading ? (
@@ -233,7 +210,7 @@ export function DisksPage() {
       ) : (
         <div className="grid gap-4">
           {disks.map((d) => (
-            <DiskCard key={d.id} disk={d} onScan={handleScan} />
+            <DiskCard key={d.id} disk={d} />
           ))}
         </div>
       )}

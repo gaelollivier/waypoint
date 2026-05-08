@@ -14,8 +14,7 @@ Physical disks the user has registered with the tool.
 | `id` | Internal autoincrement |
 | `disk_uuid` | UUID written to `.waypoint-disk-id` on the disk; stable identity across reconnects |
 | `label` | User-friendly name ("HDD-A", "Photos SSD") |
-| `kind` | `ssd` / `hdd` — drives concurrency tuning |
-| `role` | `source` / `destination` (informational; not enforced) |
+| `kind` | `ssd` / `hdd` — auto-detected via `diskutil info` at registration; drives concurrency tuning |
 | `capacity_bytes` / `free_bytes` | From last connection |
 | `mount_path` | Last-known mount point. Nullable when offline. |
 | `is_connected` | Derived/cached |

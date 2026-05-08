@@ -1,7 +1,23 @@
 import type { JobManager } from "./job-manager";
 import { sseRegistry } from "./sse";
+import { trace } from "../diag/trace";
 
 const FLUSH_INTERVAL_MS = 250;
+
+// Speed sampling: capture cumulative (items, bytes) at every flush so the UI
+// can show instant rate (last few samples), average rate (since start), and
+// later render a chart. Keep a bounded ring buffer — old samples are dropped.
+//
+// 240 samples × 250ms cadence = the most recent 60 seconds of fine-grained
+// history. For scans that run longer, this is enough for "instant" math; the
+// chart can roll up older points if we ever add full-history visualization.
+const MAX_SPEED_SAMPLES = 240;
+
+interface SpeedSample {
+  t: number;          // unix ms
+  items: number;      // cumulative
+  bytes: number;      // cumulative
+}
 
 interface PendingProgress {
   bytesProcessed: number;
@@ -37,6 +53,7 @@ export abstract class JobRunner {
 
   private _pending: PendingProgress = this._zeroPending();
   private _flushTimer: ReturnType<typeof setInterval> | null = null;
+  private _speedSamples: SpeedSample[] = [];
 
   constructor(jobId: number, jobManager: JobManager) {
     this.jobId = jobId;
@@ -205,12 +222,46 @@ export abstract class JobRunner {
 
     if (!hasWork) return;
 
-    this.jobManager.incrementProgress(this.jobId, p);
+    const tStart = performance.now();
+
+    // Compute cumulative totals (pre-update value + this flush's delta) so we
+    // can append a fresh speed sample without an extra SELECT.
+    const before = this.jobManager.getJob(this.jobId);
+    if (!before) return;
+
+    const cumItems = before.items_processed + p.itemsProcessed;
+    const cumBytes = before.bytes_processed + p.bytesProcessed;
+
+    this._speedSamples.push({ t: Date.now(), items: cumItems, bytes: cumBytes });
+    if (this._speedSamples.length > MAX_SPEED_SAMPLES) {
+      this._speedSamples.splice(0, this._speedSamples.length - MAX_SPEED_SAMPLES);
+    }
+
+    const existingJson = before.progress_json ? safeParse(before.progress_json) : {};
+    const subclassJson = p.progressJson !== undefined ? (p.progressJson as Record<string, unknown>) : null;
+    const mergedJson = {
+      ...existingJson,
+      ...(subclassJson ?? {}),
+      speedSamples: this._speedSamples,
+    };
+
+    this.jobManager.incrementProgress(this.jobId, { ...p, progressJson: mergedJson });
     this._pending = this._zeroPending();
 
-    // Broadcast current job state over SSE
-    const job = this.jobManager.getJob(this.jobId);
-    if (job) sseRegistry.publish(this.jobId, "progress", formatJobForSse(job));
+    // Broadcast the freshly-updated job state over SSE.
+    const updated = this.jobManager.getJob(this.jobId);
+    if (updated) sseRegistry.publish(this.jobId, "progress", formatJobForSse(updated));
+
+    const totalMs = Math.round(performance.now() - tStart);
+    if (totalMs > 50) {
+      trace("flush_slow", {
+        job_id: this.jobId,
+        ms: totalMs,
+        samples: this._speedSamples.length,
+        json_bytes: JSON.stringify(mergedJson).length,
+        items_delta: p.itemsProcessed,
+      });
+    }
   }
 
   private _broadcastStatus(): void {
@@ -228,6 +279,10 @@ export abstract class JobRunner {
       this._flushTimer = null;
     }
   }
+}
+
+function safeParse(s: string): Record<string, unknown> {
+  try { return JSON.parse(s) ?? {}; } catch { return {}; }
 }
 
 function formatJobForSse(job: ReturnType<JobManager["getJob"]>) {

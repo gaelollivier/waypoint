@@ -8,6 +8,7 @@ import { initJobManager } from "./jobs";
 import { disksRouter } from "./routes/disks";
 import { jobsRouter } from "./routes/jobs";
 import { treeRouter } from "./routes/tree";
+import { startLoopStallDetector, trace } from "./diag/trace";
 
 // Initialize DB (runs migrations + clears stale locks) at startup
 const db = getDb();
@@ -20,6 +21,11 @@ initJobManager(db);
 
 // Start disk poller (fires immediately, then every 10s)
 startDiskPoller(db);
+
+// Diagnostic: detect main-loop stalls so we can correlate freezes with the
+// walker / flush traces.
+startLoopStallDetector();
+trace("api_start", { pid: process.pid });
 
 const app = new Hono();
 

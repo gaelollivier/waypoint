@@ -3,7 +3,6 @@ export interface Disk {
   diskUuid: string;
   label: string | null;
   kind: "ssd" | "hdd";
-  role: "source" | "destination";
   capacityBytes: number | null;
   freeBytes: number | null;
   mountPath: string | null;
@@ -12,6 +11,14 @@ export interface Disk {
   lastScanAt: string | null;
   lastBackupAt: string | null;
   lastVerifyAt: string | null;
+}
+
+export interface Volume {
+  mountPath: string;
+  name: string;
+  capacityBytes: number | null;
+  freeBytes: number | null;
+  isWaypointDisk: boolean;
 }
 
 export interface Job {

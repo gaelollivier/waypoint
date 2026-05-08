@@ -20,7 +20,6 @@ export function insertDisk(
   overrides: Partial<{
     disk_uuid: string;
     kind: "ssd" | "hdd";
-    role: "source" | "destination";
     label: string;
     mount_path: string;
     is_connected: number;
@@ -29,7 +28,6 @@ export function insertDisk(
   const opts = {
     disk_uuid: crypto.randomUUID(),
     kind: "hdd" as const,
-    role: "destination" as const,
     label: null,
     mount_path: null,
     is_connected: 0,
@@ -37,10 +35,10 @@ export function insertDisk(
   };
   const result = db
     .prepare(
-      `INSERT INTO disks (disk_uuid, kind, role, label, mount_path, is_connected)
-       VALUES (?, ?, ?, ?, ?, ?) RETURNING id`
+      `INSERT INTO disks (disk_uuid, kind, label, mount_path, is_connected)
+       VALUES (?, ?, ?, ?, ?) RETURNING id`
     )
-    .get(opts.disk_uuid, opts.kind, opts.role, opts.label, opts.mount_path, opts.is_connected) as { id: number };
+    .get(opts.disk_uuid, opts.kind, opts.label, opts.mount_path, opts.is_connected) as { id: number };
   return result.id;
 }
 

@@ -5,7 +5,6 @@ export interface DiskRow {
   disk_uuid: string;
   label: string | null;
   kind: "ssd" | "hdd";
-  role: "source" | "destination";
   capacity_bytes: number | null;
   free_bytes: number | null;
   mount_path: string | null;
@@ -29,7 +28,6 @@ export function registerDisk(
     diskUuid: string;
     label: string;
     kind: "ssd" | "hdd";
-    role: "source" | "destination";
     mountPath: string;
     capacityBytes: number | null;
     freeBytes: number | null;
@@ -38,13 +36,12 @@ export function registerDisk(
   const now = new Date().toISOString();
   db.prepare(
     `INSERT INTO disks
-       (disk_uuid, label, kind, role, mount_path, capacity_bytes, free_bytes, is_connected, last_seen_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`
+       (disk_uuid, label, kind, mount_path, capacity_bytes, free_bytes, is_connected, last_seen_at)
+     VALUES (?, ?, ?, ?, ?, ?, 1, ?)`
   ).run(
     opts.diskUuid,
     opts.label,
     opts.kind,
-    opts.role,
     opts.mountPath,
     opts.capacityBytes,
     opts.freeBytes,
@@ -69,7 +66,7 @@ export function markDiskConnected(
     `UPDATE disks
      SET is_connected = 1, mount_path = ?, capacity_bytes = ?, free_bytes = ?, last_seen_at = ?
      WHERE disk_uuid = ?`
-  ).run(capacityBytes, freeBytes, now, diskUuid, mountPath);
+  ).run(mountPath, capacityBytes, freeBytes, now, diskUuid);
 }
 
 /**
@@ -82,18 +79,17 @@ export function markDiskDisconnected(db: Database, diskUuid: string): void {
 }
 
 /**
- * Update user-settable fields (label, kind, role).
+ * Update user-settable fields (label, kind).
  */
 export function updateDisk(
   db: Database,
   id: number,
-  fields: Partial<{ label: string; kind: "ssd" | "hdd"; role: "source" | "destination" }>
+  fields: Partial<{ label: string; kind: "ssd" | "hdd" }>
 ): DiskRow | null {
   const sets: string[] = [];
   const values: unknown[] = [];
   if (fields.label !== undefined) { sets.push("label = ?"); values.push(fields.label); }
   if (fields.kind !== undefined) { sets.push("kind = ?"); values.push(fields.kind); }
-  if (fields.role !== undefined) { sets.push("role = ?"); values.push(fields.role); }
   if (sets.length === 0) return getDiskById(db, id);
   values.push(id);
   db.prepare(`UPDATE disks SET ${sets.join(", ")} WHERE id = ?`).run(...values);

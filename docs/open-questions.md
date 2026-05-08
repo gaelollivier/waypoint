@@ -42,3 +42,75 @@ These weren't blockers for design alignment but will need decisions during build
 - **Disk polling cadence**: how often to poll `df` for connect/disconnect events. Likely 2-5s.
 - **Schema migration tooling**: pick a lightweight pattern. fit's `PRAGMA user_version` + structured upgrade scripts is the reference.
 - **Frontend state management**: React + Vite chosen, but no opinion yet on Zustand / Jotai / React Query / etc. Decide when the first real cross-component state appears.
+
+---
+
+## Surfaced during manual testing — 2026-05-07
+
+First UI-driven test scan run on the source SSD. Surfaced the following items, captured here so we don't lose them:
+
+### Job rehydration after server restart — DONE
+
+- Bug surfaced when resuming a scan that was paused before a server restart: the in-memory runner registry is gone, so the resume endpoint returned 409 "Job is not active in this process".
+- Fix in `routes/jobs.ts`: resume now constructs a fresh `ScanJobRunner` for the same `jobId` when no in-process runner exists. `JobRunner.start()` accepts `paused → running` (the transition table allows it, and `started_at` is preserved), and the walker's `initOrResumeQueue()` already handles a non-empty walk queue.
+- Cancel was hit by the same problem; fix is simpler — just transition the DB row to `cancelled` since there's no runner to clean up.
+- Currently only scan jobs are rehydratable. Copy/verify don't exist yet. Backup composite rehydration is a v1.x concern (it tracks an active sub-job by id; the rehydration logic will need to recurse).
+- This aligns with `decisions.md` → Jobs: "Crash mid-job is treated the same as pause."
+
+### Performance — DONE (waiting on benchmark)
+
+- Walker rewritten in `apps/api/src/jobs/scan/walker.ts`: (1) async `readdir`, (2) one batched `SELECT … IN (?, ?, …)` per directory for the mtime+size shortcut, (3) worker-pool concurrency for the per-file stat+hash phase.
+- Backwards compatible with paused scans (no schema or `scan_walk_queue` changes).
+- **Open**: SCAN_CONCURRENCY is hardcoded at 8 (was 32, lowered after the freeze incident below). Should be tuned by `disk.kind` once we benchmark — HDDs will likely want concurrency=1 or 2 to avoid thrash. Defer until we actually scan an HDD.
+
+### `recomputeAggregates` end-of-scan freeze — DONE 2026-05-08
+
+- Symptom: walker phase finished cleanly (~13s for 177K files / 3.7K dirs, ~12.8k files/sec) but the API was wedged for **179s** afterwards before the job flipped to `completed`. `loop_stall` trace fired with `drift_ms ≈ 179687`.
+- Root cause: the old `recomputeAggregates` ran a single synchronous SQL UPDATE with two correlated `LIKE 'dir/%'` subqueries per directory, scanning the whole files table for every directory: ~3,769 × 177,459 ≈ 670M comparisons in one sync `bun:sqlite` call. The original doc comment estimated O(dirs²) "well within budget" — the estimate ignored the per-directory file scan and underweighted bun:sqlite's main-loop blocking.
+- Fix: O(files + dirs) algorithm. (1) `SELECT directory_id, COUNT(*), SUM(size_bytes) FROM files GROUP BY directory_id` for direct totals; (2) load `(id, parent_id)` for all dirs; (3) compute depth, sort deepest-first, accumulate each dir's totals into its parent in JS; (4) write back in one transaction yielding to the event loop every 500 rows.
+- Memory cost is O(dirs) — the GROUP BY result is one row per directory, not per file. At ~10x file count (~37K dirs) this is ~13 MB; at ~100x (~370K dirs) ~130 MB. Comfortable up to a few hundred thousand directories before chunking would be worth considering.
+- Result: aggregates phase went from 179,691ms → 25ms (~7,200x). API stayed responsive throughout the scan (no `loop_stall` events).
+- Instrumentation kept: `apps/api/src/diag/trace.ts` writes JSONL trace events to `/tmp/waypoint-trace.log`. Logs include `scan_*`, `aggregates_done` with phase breakdown (group/depth/rollup/write ms), and a `loop_stall` detector that fires when the main loop blocks >250ms. Trace is gated by `WAYPOINT_TRACE` env var (set to `0` to disable).
+
+### Event-loop starvation during fast scans — 2026-05-07
+
+- Symptom: with SCAN_CONCURRENCY=32 the SSD scan hit ~12k files/sec, then the API stopped responding to **any** HTTP request (healthz timed out, jobs list timed out). Once the scan finished the API became responsive again. Process was alive throughout — pure event-loop starvation.
+- Root cause: bun:sqlite is sync, `@noble/hashes/blake3` is sync pure JS. Each "worker" returns from its tiny `await file.slice().arrayBuffer()` in roughly the same tick, then runs a long synchronous tail (BLAKE3 update + the batched `INSERT … ON CONFLICT` transaction). With 32 of those interleaved, the loop never yielded long enough for Hono to accept connections.
+- **Cheap fix applied**:
+  - `SCAN_CONCURRENCY` 32 → 8 (less back-to-back sync work piling up).
+  - Added `await new Promise(r => setImmediate(r))` between directories in `scan-job.ts::execute` so the loop breathes after each batched DB write.
+- **Proper fix — DEFERRED**: move BLAKE3 hashing into a `Worker` thread (or a small pool) so the main event loop only handles DB writes and HTTP. The walker would `postMessage` `{ filePath, sizeBytes }` and `await` the resulting hex hash. This decouples CPU-bound work from the loop entirely and would let us push concurrency back up. Notes:
+  - Bun supports Web Workers — `new Worker(new URL("./hash-worker.ts", import.meta.url))`.
+  - File reading should stay on the main side (Bun.file slice + arrayBuffer) and the bytes posted into the worker as a transferable, OR (preferred) the worker reads the file itself by path.
+  - Need to size the pool — likely `navigator.hardwareConcurrency - 1`.
+  - Until this lands, do not raise `SCAN_CONCURRENCY` above ~8 even on fast SSDs; throughput is fine, responsiveness regresses.
+
+### Job progress sampling — 2026-05-07
+
+- `JobRunner._flush` now appends a `(t, items, bytes)` sample to a bounded ring buffer (`MAX_SPEED_SAMPLES=240`, ~60s at 250ms cadence) and persists it to `progress_json.speedSamples`. The frontend computes an "instant" rate from the last ~5s window and falls back to the since-start average when there aren't enough samples yet.
+- Future: render the buffer as a sparkline in `JobProgressPanel` and a full chart on the job detail page. The data is already there — UI work only.
+
+### Disk registration — DONE
+
+- **Dropped the `role` (source/destination) field.** Migration `0002_drop_disk_role.sql`. The intent ("don't copy onto a source disk") is better served by real, data-driven checks at copy time (still TODO when the copy job lands):
+  - Free-space check at the destination before starting a copy.
+  - Existence check per file at the destination — never overwrite (already a hard safety constraint, see `decisions.md`).
+- **Auto-detect `kind` (ssd/hdd).** Implemented in `apps/api/src/disks/detect.ts` via `diskutil info <mountPoint>`. Falls back to `hdd` (more conservative for I/O concurrency tuning) on any failure.
+- **Volume picker for "Register disk".** Implemented: `GET /api/disks/volumes` lists `/Volumes/*` mounts with capacity and a flag indicating if the volume already has a `.waypoint-disk-id` dotfile. Frontend `RegisterModal` uses it; manual path entry is no longer needed.
+
+### Job UI — DONE
+
+- **Speed metrics on the scan job overview**: files/sec and bytes/sec, plus elapsed and ETA. ETA projected against disk used-bytes (`capacity − free`) since total file count is unknown until scan completes — caveat shown inline. All packaged in `JobProgressPanel`.
+
+### Disk view — DONE
+
+- New `DiskDetailPage` at `/disks/:id` with three tabs: **Overview** (header card + active job panel + history tiles + recent jobs list), **Tree** (embeds `TreeExplorer`), **Events** (live events from the active job — historical event aggregation across past jobs is a future feature).
+- Reusable components extracted to avoid duplication:
+  - `components/JobProgressPanel.tsx` — speed/ETA/throughput tile grid + progress bar. Used by both `JobDetailPage` and the disk detail Overview tab.
+  - `lib/useLiveJob.ts` — initial fetch + SSE stream + 1Hz tick + optional event polling. One hook used by both pages.
+  - `components/TreeExplorer.tsx` — virtualized tree explorer extracted from the old `DiskExplorerPage`. Standalone explorer page deleted; tree is reachable only through the disk detail Tree tab now.
+  - `lib/format.ts` — shared formatting (bytes, rates, durations, dates).
+
+### User collaboration preferences
+
+- Testing flow is **UI-only**. Do not give curl commands as testing instructions. Curl is only acceptable for backend-state debugging when explicitly asked.

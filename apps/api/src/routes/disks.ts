@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { getDb } from "../db/client";
 import { ensureDiskId } from "../disks/identity";
+import { detectDiskKind, listAvailableVolumes } from "../disks/detect";
 import { registerDisk, getAllDisks, getDiskById, updateDisk } from "../disks/registry";
 import { getLockManager } from "../locks";
 import { getJobManager, registerRunner, unregisterRunner } from "../jobs";
@@ -9,30 +10,33 @@ import { ScanJobRunner } from "../jobs/scan/scan-job";
 
 export const disksRouter = new Hono();
 
+// List currently mounted volumes (used by the registration UI's volume picker)
+disksRouter.get("/volumes", async (c) => {
+  const volumes = await listAvailableVolumes();
+  return c.json(volumes);
+});
+
 // List all registered disks
 disksRouter.get("/", (c) => {
   const disks = getAllDisks(getDb());
   return c.json(disks.map(formatDisk));
 });
 
-// Register a disk at the given mount path.
-// The user supplies the path; the server writes the dotfile and creates the DB row.
-disksRouter.post("/", async (c) => {
-  const body = await c.req.json<{
-    mountPath: string;
-    label: string;
-    kind: "ssd" | "hdd";
-    role: "source" | "destination";
-  }>();
+// Get a single registered disk
+disksRouter.get("/:id", (c) => {
+  const id = Number(c.req.param("id"));
+  const disk = getDiskById(getDb(), id);
+  if (!disk) return c.json({ error: "Disk not found" }, 404);
+  return c.json(formatDisk(disk));
+});
 
-  if (!body.mountPath || !body.label || !body.kind || !body.role) {
-    return c.json({ error: "mountPath, label, kind, role are required" }, 400);
-  }
-  if (!["ssd", "hdd"].includes(body.kind)) {
-    return c.json({ error: "kind must be ssd or hdd" }, 400);
-  }
-  if (!["source", "destination"].includes(body.role)) {
-    return c.json({ error: "role must be source or destination" }, 400);
+// Register a disk at the given mount path.
+// `kind` is auto-detected via diskutil; the user only supplies path + label.
+disksRouter.post("/", async (c) => {
+  const body = await c.req.json<{ mountPath: string; label: string }>();
+
+  if (!body.mountPath || !body.label) {
+    return c.json({ error: "mountPath and label are required" }, 400);
   }
 
   let diskUuid: string;
@@ -59,33 +63,31 @@ disksRouter.post("/", async (c) => {
     );
   }
 
+  const kind = await detectDiskKind(body.mountPath);
+
   const disk = registerDisk(db, {
     diskUuid,
     label: body.label,
-    kind: body.kind,
-    role: body.role,
+    kind,
     mountPath: body.mountPath,
-    capacityBytes: null, // poller will fill this in on first cycle
+    capacityBytes: null, // poller fills these on first cycle
     freeBytes: null,
   });
 
   return c.json(formatDisk(disk), 201);
 });
 
-// Update label / kind / role
+// Update label / kind
 disksRouter.patch("/:id", async (c) => {
   const id = Number(c.req.param("id"));
   if (!Number.isInteger(id) || id <= 0) {
     return c.json({ error: "Invalid disk id" }, 400);
   }
 
-  const body = await c.req.json<Partial<{ label: string; kind: string; role: string }>>();
+  const body = await c.req.json<Partial<{ label: string; kind: string }>>();
 
   if (body.kind && !["ssd", "hdd"].includes(body.kind)) {
     return c.json({ error: "kind must be ssd or hdd" }, 400);
-  }
-  if (body.role && !["source", "destination"].includes(body.role)) {
-    return c.json({ error: "role must be source or destination" }, 400);
   }
 
   const db = getDb();
@@ -96,7 +98,6 @@ disksRouter.patch("/:id", async (c) => {
   const updated = updateDisk(db, id, {
     label: body.label,
     kind: body.kind as "ssd" | "hdd" | undefined,
-    role: body.role as "source" | "destination" | undefined,
   });
 
   return c.json(formatDisk(updated!));
@@ -165,7 +166,6 @@ function formatDisk(disk: any) {
     diskUuid: disk.disk_uuid,
     label: disk.label,
     kind: disk.kind,
-    role: disk.role,
     capacityBytes: disk.capacity_bytes,
     freeBytes: disk.free_bytes,
     mountPath: disk.mount_path,

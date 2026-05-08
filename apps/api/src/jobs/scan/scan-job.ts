@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import { JobRunner } from "../job-runner";
 import type { JobManager } from "../job-manager";
 import { processNextQueueEntry, recomputeAggregates } from "./walker";
+import { trace } from "../../diag/trace";
 
 export class ScanJobRunner extends JobRunner {
   private db: Database;
@@ -22,9 +23,11 @@ export class ScanJobRunner extends JobRunner {
   }
 
   protected async execute(): Promise<void> {
+    trace("scan_start", { job_id: this.jobId, disk_id: this.diskId, mount: this.mountPath });
     this.initOrResumeQueue();
 
     let total = 0;
+    let dirsProcessed = 0;
     while (true) {
       await this.checkPause();
 
@@ -42,10 +45,22 @@ export class ScanJobRunner extends JobRunner {
         bytesProcessed: result.bytesIndexed,
       });
       total += result.filesIndexed;
+      dirsProcessed++;
+
+      // Yield to the event loop between directories so HTTP requests, SSE
+      // writes, and the flush timer can run. Without this, fast scans (>10k
+      // files/sec) starve Hono and the API appears frozen until the scan ends.
+      await new Promise<void>((r) => setImmediate(r));
     }
 
-    // Recompute directory aggregates once at the very end
-    recomputeAggregates(this.db, this.diskId);
+    trace("scan_walker_done", { job_id: this.jobId, dirs: dirsProcessed, files: total });
+
+    // Recompute directory aggregates once at the very end. Async because the
+    // writeback yields to the event loop every YIELD_EVERY rows so HTTP stays
+    // responsive while ~thousands of small UPDATEs run.
+    const tAgg = performance.now();
+    await recomputeAggregates(this.db, this.diskId);
+    trace("scan_aggregates_done", { job_id: this.jobId, ms: Math.round(performance.now() - tAgg) });
 
     // Update the disk's last_scan_at / last_scan_job_id
     this.db
@@ -57,6 +72,7 @@ export class ScanJobRunner extends JobRunner {
       .run(this.jobId, new Date().toISOString(), this.diskId);
 
     this.logEvent("info", "progress_milestone", `Scan complete. ${total} files indexed.`);
+    trace("scan_end", { job_id: this.jobId });
   }
 
   /**

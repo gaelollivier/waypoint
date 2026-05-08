@@ -1,4 +1,4 @@
-import type { Disk, Job, JobEvent, TreeResponse } from "./types";
+import type { Disk, Job, JobEvent, TreeResponse, Volume } from "./types";
 
 const BASE = "/api";
 
@@ -18,10 +18,14 @@ export const api = {
   disks: {
     list: () => request<Disk[]>("/disks"),
 
-    register: (body: { mountPath: string; label: string; kind: "ssd" | "hdd"; role: "source" | "destination" }) =>
+    get: (id: number) => request<Disk>(`/disks/${id}`),
+
+    volumes: () => request<Volume[]>("/disks/volumes"),
+
+    register: (body: { mountPath: string; label: string }) =>
       request<Disk>("/disks", { method: "POST", body: JSON.stringify(body) }),
 
-    update: (id: number, body: Partial<{ label: string; kind: "ssd" | "hdd"; role: "source" | "destination" }>) =>
+    update: (id: number, body: Partial<{ label: string; kind: "ssd" | "hdd" }>) =>
       request<Disk>(`/disks/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
 
     scan: (id: number) =>
@@ -36,7 +40,7 @@ export const api = {
   },
 
   jobs: {
-    list: (params?: { status?: string; type?: string; limit?: number }) => {
+    list: (params?: { status?: string; type?: string; targetDiskId?: number; limit?: number }) => {
       const qs = params
         ? "?" + new URLSearchParams(
             Object.entries(params)

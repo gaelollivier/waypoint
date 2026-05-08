@@ -22,13 +22,15 @@ Personal backup tool for cold storage drives. SSD source → multiple HDDs (one 
 
 ## Status
 
-**Implementation in progress.** Design phase complete; milestones 1–5 done.
+**Implementation in progress.** Design phase complete; milestones 1–8 done. Manual testing started 2026-05-07 — surfaced perf and UX follow-ups (see `open-questions.md`).
 
 **Stack**: TypeScript + Bun, Hono (HTTP), React + Vite (UI), `bun:sqlite`, BLAKE3, SSE for progress.
 
 **Scale baseline measured**: ~177K files / ~3.5TB on the source SSD. Standard SQLite indices are sufficient.
 
-**Test suite**: `bun run test` in `apps/api/` — 56 tests across 4 files.
+**Test suite**: `bun run test` in `apps/api/` — 80 tests across 6 files.
+
+**Diagnostic trace**: when `WAYPOINT_TRACE` is unset or non-zero, the API writes JSONL trace lines to `/tmp/waypoint-trace.log` (path overridable via `WAYPOINT_TRACE_PATH`). Includes `loop_stall` events whenever the main event loop blocks >250ms. Used to root-cause the M6 freeze (correlated-LIKE end-of-scan UPDATE, see `open-questions.md`). Set `WAYPOINT_TRACE=0` to disable.
 
 ---
 
@@ -41,9 +43,9 @@ Personal backup tool for cold storage drives. SSD source → multiple HDDs (one 
 | 3 | Disk identity & registration (dotfile UUID, `df` polling, disk registry API) | ✅ Done |
 | 4 | Locking primitive (per-disk write lock, DB-mirrored, unit tested) | ✅ Done |
 | 5 | Job framework (status machine, pause/resume/cancel, SSE progress stream) | ✅ Done |
-| 6 | **Scan job** ← *next* — resumable walk queue, BLAKE3 sampled hash, batched writes | 🔲 |
-| 7 | Web UI shell (disk list, job list, live SSE progress) | 🔲 |
-| 8 | Tree view (virtualized disk explorer, materialized aggregates) | 🔲 |
+| 6 | Scan job — resumable walk queue, BLAKE3 sampled hash, batched writes | ✅ Done |
+| 7 | Web UI shell (disk list, job list, live SSE progress) | ✅ Done |
+| 8 | Tree view (virtualized disk explorer, materialized aggregates) | ✅ Done |
 | 9 | Diff (source vs. dest comparison, diff_cache) | 🔲 |
 | 10 | Copy job (temp→rename, dual inline hashing, resume-safe) | 🔲 |
 | 11 | Backup composite (scan→scan→diff→copy pipeline, pause-as-unit) | 🔲 |
