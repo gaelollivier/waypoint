@@ -1,28 +1,9 @@
 import type { Database } from "bun:sqlite";
 import { readDiskId } from "./identity";
 import { markDiskConnected, markDiskDisconnected, getAllDisks } from "./registry";
+import { getDiskStats } from "../fs/disk-io";
 
 const POLL_INTERVAL_MS = 5_000;
-
-/**
- * Gets free/capacity bytes for a specific mount path using `df -Pk <path>`.
- * Returns nulls if the path isn't mounted or df fails.
- */
-function getDiskStats(mountPath: string): { capacityBytes: number | null; freeBytes: number | null } {
-  const proc = Bun.spawnSync(["df", "-Pk", mountPath], { stderr: "ignore" });
-  if (proc.exitCode !== 0) return { capacityBytes: null, freeBytes: null };
-
-  const lines = proc.stdout.toString().trim().split("\n");
-  if (lines.length < 2) return { capacityBytes: null, freeBytes: null };
-
-  const parts = lines[1].trim().split(/\s+/);
-  if (parts.length < 4) return { capacityBytes: null, freeBytes: null };
-
-  return {
-    capacityBytes: Number(parts[1]) * 1024,
-    freeBytes: Number(parts[3]) * 1024,
-  };
-}
 
 /**
  * One poll cycle: for each registered disk, check whether its known mount path

@@ -1,13 +1,13 @@
 import { Database } from "bun:sqlite";
 import path from "path";
-import { readdirSync, readFileSync } from "fs";
+import { listDirSync, readTextFileSync } from "../fs/disk-io";
 
 const MIGRATIONS_DIR = path.join(import.meta.dir, "migrations");
 
 export function runMigrations(db: Database): void {
   const currentVersion = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
 
-  const files = readdirSync(MIGRATIONS_DIR)
+  const files = listDirSync(MIGRATIONS_DIR)
     .filter((f) => f.endsWith(".sql"))
     .sort(); // lexicographic — 0001_, 0002_, etc.
 
@@ -20,7 +20,7 @@ export function runMigrations(db: Database): void {
     }
     if (version <= currentVersion) continue;
 
-    const sql = readFileSync(path.join(MIGRATIONS_DIR, file), "utf-8");
+    const sql = readTextFileSync(path.join(MIGRATIONS_DIR, file));
 
     // Foreign key enforcement must be off while we rename/recreate tables
     // (e.g. the jobs table recreation in 0003). The PRAGMA is session-scoped

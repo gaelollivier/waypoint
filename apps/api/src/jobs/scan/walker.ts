@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
-import { readdir } from "fs/promises";
 import path from "path";
+import { readDirectory, statFile } from "../../fs/disk-io";
 import { computeSampledHash, HASH_ALGO_VERSION } from "./hasher";
 import type { JobManager } from "../job-manager";
 import { trace } from "../../diag/trace";
@@ -162,7 +162,7 @@ async function readDirEntries(
   jobManager: JobManager
 ): Promise<import("fs").Dirent[] | null> {
   try {
-    return await readdir(dirPath, { withFileTypes: true });
+    return await readDirectory(dirPath);
   } catch (err: any) {
     if (err.code === "EACCES" || err.code === "EPERM") {
       jobManager.logEvent(
@@ -249,10 +249,10 @@ async function upsertFileBatch(
   async function processOne(entry: import("fs").Dirent): Promise<void> {
     const filePath = path.join(dirPath, entry.name);
     try {
-      const stat = await Bun.file(filePath).stat();
+      const stat = await statFile(filePath);
 
       // iCloud dataless stub — skip to avoid triggering a download
-      if ((stat as any).flags !== undefined && ((stat as any).flags & SF_DATALESS) !== 0) {
+      if (stat.flags !== undefined && (stat.flags & SF_DATALESS) !== 0) {
         jobManager.logEvent(
           scanJobId,
           "warning",
@@ -264,7 +264,7 @@ async function upsertFileBatch(
         return;
       }
 
-      const mtime = new Date(stat.mtime).toISOString();
+      const mtime = stat.mtime.toISOString();
       const sizeBytes = stat.size;
       const existing = existingMap.get(entry.name);
 

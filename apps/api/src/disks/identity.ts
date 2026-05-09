@@ -1,4 +1,5 @@
 import path from "path";
+import { fileExists, readTextFile, writeTextFile } from "../fs/disk-io";
 
 const DISK_ID_FILENAME = ".waypoint-disk-id";
 
@@ -7,9 +8,8 @@ const DISK_ID_FILENAME = ".waypoint-disk-id";
  */
 export async function readDiskId(mountPath: string): Promise<string | null> {
   const dotfilePath = path.join(mountPath, DISK_ID_FILENAME);
-  const file = Bun.file(dotfilePath);
-  if (!(await file.exists())) return null;
-  const text = (await file.text()).trim();
+  if (!(await fileExists(dotfilePath))) return null;
+  const text = (await readTextFile(dotfilePath)).trim();
   return text.length > 0 ? text : null;
 }
 
@@ -20,7 +20,7 @@ export async function readDiskId(mountPath: string): Promise<string | null> {
 export async function writeDiskId(mountPath: string): Promise<string> {
   const uuid = crypto.randomUUID();
   const dotfilePath = path.join(mountPath, DISK_ID_FILENAME);
-  await Bun.write(dotfilePath, uuid + "\n");
+  await writeTextFile(dotfilePath, uuid + "\n");
   return uuid;
 }
 

@@ -1,5 +1,6 @@
 import { _BLAKE3, blake3 } from "@noble/hashes/blake3.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
+import { readFileSlice, readFileAll } from "../../fs/disk-io";
 
 export const HASH_ALGO_VERSION = 1;
 
@@ -29,7 +30,6 @@ export async function computeSampledHash(filePath: string, sizeBytes: number): P
     return computeFullHash(filePath);
   }
 
-  const file = Bun.file(filePath);
   const hasher = new _BLAKE3();
 
   // Size prefix: 8 bytes little-endian (BigInt for > 32-bit sizes)
@@ -39,9 +39,8 @@ export async function computeSampledHash(filePath: string, sizeBytes: number): P
   hasher.update(sizeBuf);
 
   // Read only the byte ranges we need — never load the whole file.
-  // Bun.file().slice(start, end) reads lazily on .arrayBuffer().
   const feed = async (start: number, end: number): Promise<void> => {
-    const buf = await file.slice(start, end).arrayBuffer();
+    const buf = await readFileSlice(filePath, start, end);
     hasher.update(new Uint8Array(buf));
   };
 
@@ -67,8 +66,7 @@ export async function computeSampledHash(filePath: string, sizeBytes: number): P
  * Returns a 64-char hex string.
  */
 export async function computeFullHash(filePath: string): Promise<string> {
-  const file = Bun.file(filePath);
-  const buf = await file.arrayBuffer();
+  const buf = await readFileAll(filePath);
   return bytesToHex(blake3(new Uint8Array(buf)));
 }
 
