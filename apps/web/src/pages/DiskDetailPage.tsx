@@ -283,7 +283,8 @@ function DiffTab({ sourceDiskId, sourceDisk }: { sourceDiskId: number; sourceDis
     queryFn: () => api.disks.list(),
     refetchInterval: 10_000,
   });
-  const destDisks = allDisks.filter((d) => d.id !== sourceDiskId);
+  const destDisks = allDisks;
+  const isSameDisk = selectedDestId === sourceDiskId;
 
   // Past diff jobs for this source disk
   const { data: diffJobs = [], refetch: refetchDiffJobs } = useQuery<DiffJobSummary[]>({
@@ -346,6 +347,7 @@ function DiffTab({ sourceDiskId, sourceDisk }: { sourceDiskId: number; sourceDis
             {destDisks.map((d) => (
               <option key={d.id} value={d.id}>
                 {d.label ?? d.diskUuid.slice(0, 8)}
+                {d.id === sourceDiskId ? " (this disk)" : ""}
                 {!d.isConnected ? " (offline)" : ""}
               </option>
             ))}
@@ -368,6 +370,13 @@ function DiffTab({ sourceDiskId, sourceDisk }: { sourceDiskId: number; sourceDis
           </span>
         )}
       </div>
+
+      {/* Same-disk warning */}
+      {isSameDisk && (
+        <div className="rounded-lg border border-yellow-800/50 bg-yellow-950/30 px-4 py-3 text-xs text-yellow-400">
+          Comparing a disk against itself — results will show all files as "present" with no differences. This is safe but only useful for testing.
+        </div>
+      )}
 
       {/* No dest selected */}
       {!selectedDestId && (

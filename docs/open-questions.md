@@ -149,6 +149,15 @@ Composite backup job (scan→scan→diff→copy as one unit) is deferred to M11.
 
 **Key implementation note:** `diff_entries.path` and `diff_dirs.path` are always **disk-relative** (e.g. `/Documents/file.txt`), not absolute. The diff job strips `disk.mount_path` from both sides before comparing. This is what makes cross-disk diffing work — two disks at different mount points still have the same relative file layout.
 
+**Validated 2026-05-09 — self-diff smoke test (disk diffed against itself):**
+- 177,459 files processed in ~2 seconds (~88K files/sec)
+- Result: 0 added / 0 changed / 0 removed / 177,459 present — correct.
+- Same-disk diff is intentionally allowed by the API (a diff is read-only, so it's always safe). UI shows a warning when source = dest.
+- Same-disk copy must be blocked at the API when the copy job is implemented (makes no sense, unlike diff).
+
+**Migration gotcha — SQLite self-referencing FK declarations survive RENAME:**
+Migration 0003 used the SQLite 12-step schema change (create `jobs_new` → copy → drop old → rename). An early version of the migration was applied to the DB before the intended fix (omitting self-referencing FK declarations) was in the SQL file. After `ALTER TABLE jobs_new RENAME TO jobs`, SQLite bakes the original table name (`jobs_new`) into the stored DDL for self-referencing FK columns. Since `jobs_new` no longer exists, any `db.prepare(INSERT INTO jobs …)` fails with `no such table: main.jobs_new` at prepare time (not execution time) when `foreign_keys = ON`. Fix: migration `0004_fix_jobs_self_fk.sql` repeats the rename with correct DDL (self-referencing FK columns declared as plain `INTEGER`, no FK clause). **Going forward**: whenever the `jobs` table is rebuilt via a rename, always omit self-referencing FK declarations on `parent_job_id` and `active_sub_job_id`.
+
 ### User collaboration preferences
 
 - Testing flow is **UI-only**. Do not give curl commands as testing instructions. Curl is only acceptable for backend-state debugging when explicitly asked.
