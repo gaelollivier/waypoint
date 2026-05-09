@@ -204,4 +204,31 @@ export class JobManager {
       )
       .all(jobId, limit) as JobEventRow[];
   }
+
+  getDiskEvents(
+    diskId: number,
+    opts: { level?: string; jobId?: number; limit?: number; offset?: number } = {}
+  ): JobEventRow[] {
+    const { level, jobId, limit = 200, offset = 0 } = opts;
+    const clauses: string[] = [
+      "j.target_disk_id = ? OR j.source_disk_id = ? OR j.dest_disk_id = ?"
+    ];
+    const params: unknown[] = [diskId, diskId, diskId];
+
+    if (level) { clauses.push("e.level = ?"); params.push(level); }
+    if (jobId != null) { clauses.push("e.job_id = ?"); params.push(jobId); }
+
+    params.push(limit, offset);
+
+    return this.db
+      .prepare(
+        `SELECT e.*
+         FROM job_events e
+         JOIN jobs j ON j.id = e.job_id
+         WHERE ${clauses.join(" AND ")}
+         ORDER BY e.timestamp DESC
+         LIMIT ? OFFSET ?`
+      )
+      .all(...params) as JobEventRow[];
+  }
 }

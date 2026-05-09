@@ -6,12 +6,15 @@ const FLUSH_INTERVAL_MS = 250;
 
 // Speed sampling: capture cumulative (items, bytes) at every flush so the UI
 // can show instant rate (last few samples), average rate (since start), and
-// later render a chart. Keep a bounded ring buffer — old samples are dropped.
+// render a chart over the full job lifetime.
 //
-// 240 samples × 250ms cadence = the most recent 60 seconds of fine-grained
-// history. For scans that run longer, this is enough for "instant" math; the
-// chart can roll up older points if we ever add full-history visualization.
-const MAX_SPEED_SAMPLES = 240;
+// Merge-on-overflow: buffer stays at ≤ MAX_SPEED_SAMPLES entries. When full,
+// we halve resolution by keeping only even-indexed entries before appending.
+// Each halving doubles the time-span each sample covers, so the full job
+// history is always represented — a 30s scan stays at full 250ms resolution,
+// a 10-day copy gracefully coarsens to ~25min resolution. All samples remain
+// cumulative totals, so adjacent-pair rate math is always valid.
+const MAX_SPEED_SAMPLES = 500;
 
 interface SpeedSample {
   t: number;          // unix ms
@@ -199,6 +202,19 @@ export abstract class JobRunner {
   // Private helpers
   // ---------------------------------------------------------------------------
 
+  private _appendSpeedSample(sample: SpeedSample): void {
+    if (this._speedSamples.length >= MAX_SPEED_SAMPLES) {
+      // Halve resolution: keep only even-indexed entries, discarding odd ones.
+      // After halving we have ~250 entries; the new sample brings it to ~251.
+      const half: SpeedSample[] = [];
+      for (let i = 0; i < this._speedSamples.length; i += 2) {
+        half.push(this._speedSamples[i]);
+      }
+      this._speedSamples = half;
+    }
+    this._speedSamples.push(sample);
+  }
+
   private _zeroPending(): PendingProgress {
     return {
       bytesProcessed: 0,
@@ -232,10 +248,7 @@ export abstract class JobRunner {
     const cumItems = before.items_processed + p.itemsProcessed;
     const cumBytes = before.bytes_processed + p.bytesProcessed;
 
-    this._speedSamples.push({ t: Date.now(), items: cumItems, bytes: cumBytes });
-    if (this._speedSamples.length > MAX_SPEED_SAMPLES) {
-      this._speedSamples.splice(0, this._speedSamples.length - MAX_SPEED_SAMPLES);
-    }
+    this._appendSpeedSample({ t: Date.now(), items: cumItems, bytes: cumBytes });
 
     const existingJson = before.progress_json ? safeParse(before.progress_json) : {};
     const subclassJson = p.progressJson !== undefined ? (p.progressJson as Record<string, unknown>) : null;

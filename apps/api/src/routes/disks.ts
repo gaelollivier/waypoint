@@ -145,6 +145,21 @@ disksRouter.post("/:id/scan", async (c) => {
   return c.json({ jobId: job.id }, 202);
 });
 
+// Events log across all jobs for a disk (reverse-chron, filterable)
+disksRouter.get("/:id/events", (c) => {
+  const id = Number(c.req.param("id"));
+  const db = getDb();
+  if (!getDiskById(db, id)) return c.json({ error: "Disk not found" }, 404);
+
+  const level = c.req.query("level") || undefined;
+  const jobId = c.req.query("jobId") ? Number(c.req.query("jobId")) : undefined;
+  const limit = c.req.query("limit") ? Number(c.req.query("limit")) : 200;
+  const offset = c.req.query("offset") ? Number(c.req.query("offset")) : 0;
+
+  const events = getJobManager().getDiskEvents(id, { level, jobId, limit, offset });
+  return c.json(events);
+});
+
 // Lock state for a disk
 disksRouter.get("/:id/lock", (c) => {
   const id = Number(c.req.param("id"));

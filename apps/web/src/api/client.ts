@@ -30,6 +30,20 @@ export const api = {
 
     scan: (id: number) =>
       request<{ jobId: number }>(`/disks/${id}/scan`, { method: "POST" }),
+
+    events: (
+      id: number,
+      params?: { level?: string; jobId?: number; limit?: number; offset?: number }
+    ) => {
+      const qs = params
+        ? "?" + new URLSearchParams(
+            Object.entries(params)
+              .filter(([, v]) => v !== undefined)
+              .map(([k, v]) => [k, String(v)])
+          ).toString()
+        : "";
+      return request<JobEvent[]>(`/disks/${id}/events${qs}`);
+    },
   },
 
   tree: {

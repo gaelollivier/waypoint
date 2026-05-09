@@ -1,10 +1,11 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
-import type { Disk, Volume } from "../api/types";
+import type { Volume } from "../api/types";
 import { navigate } from "../components/Router";
 import { formatBytes, formatDate } from "../lib/format";
 
-function DiskCard({ disk }: { disk: Disk }) {
+function DiskCard({ disk }: { disk: import("../api/types").Disk }) {
   const usedBytes = disk.capacityBytes && disk.freeBytes !== null
     ? disk.capacityBytes - disk.freeBytes
     : null;
@@ -28,7 +29,7 @@ function DiskCard({ disk }: { disk: Disk }) {
             {disk.mountPath && <><span>·</span><span className="font-mono">{disk.mountPath}</span></>}
           </div>
         </div>
-        <span className="text-xs text-zinc-600 group-hover:text-zinc-400">→</span>
+        <span className="text-xs text-zinc-600">→</span>
       </div>
 
       {disk.capacityBytes && (
@@ -53,39 +54,41 @@ function DiskCard({ disk }: { disk: Disk }) {
   );
 }
 
-function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
-  const [volumes, setVolumes] = useState<Volume[] | null>(null);
+function RegisterModal({ onClose }: { onClose: () => void }) {
+  const queryClient = useQueryClient();
   const [selected, setSelected] = useState<Volume | null>(null);
   const [label, setLabel] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+
+  const { data: volumes } = useQuery<Volume[]>({
+    queryKey: ["volumes"],
+    queryFn: api.disks.volumes,
+  });
 
   useEffect(() => {
-    api.disks.volumes()
-      .then((vols) => {
-        setVolumes(vols);
-        const firstUnregistered = vols.find((v) => !v.isWaypointDisk);
-        if (firstUnregistered) {
-          setSelected(firstUnregistered);
-          setLabel(firstUnregistered.name);
-        }
-      })
-      .catch((err) => setError(err.message));
-  }, []);
+    if (!volumes) return;
+    const first = volumes.find((v) => !v.isWaypointDisk);
+    if (first && !selected) {
+      setSelected(first);
+      setLabel(first.name);
+    }
+  }, [volumes]);
 
-  const submit = async (e: React.FormEvent) => {
+  const register = useMutation({
+    mutationFn: ({ mountPath, label }: { mountPath: string; label: string }) =>
+      api.disks.register({ mountPath, label }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["disks"] });
+      onClose();
+    },
+    onError: (err: any) => setError(err.message),
+  });
+
+  const submit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!selected) return;
     setError(null);
-    setLoading(true);
-    try {
-      await api.disks.register({ mountPath: selected.mountPath, label });
-      onDone();
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
+    register.mutate({ mountPath: selected.mountPath, label });
   };
 
   return (
@@ -99,13 +102,13 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
 
         <div className="space-y-1">
           <p className="text-xs text-zinc-400">Volume</p>
-          {volumes === null ? (
+          {!volumes ? (
             <p className="text-xs text-zinc-500">Loading volumes…</p>
           ) : volumes.length === 0 ? (
             <p className="text-xs text-zinc-500">No volumes mounted under <code>/Volumes</code>.</p>
           ) : (
             <div className="space-y-1 max-h-64 overflow-y-auto rounded border border-zinc-800">
-              {volumes.map((v) => {
+              {(volumes ?? []).map((v: Volume) => {
                 const isSelected = selected?.mountPath === v.mountPath;
                 return (
                   <button
@@ -162,10 +165,10 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
           </button>
           <button
             type="submit"
-            disabled={loading || !selected || !label}
+            disabled={register.isPending || !selected || !label}
             className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50 transition-colors"
           >
-            {loading ? "Registering…" : "Register"}
+            {register.isPending ? "Registering…" : "Register"}
           </button>
         </div>
       </form>
@@ -174,19 +177,13 @@ function RegisterModal({ onClose, onDone }: { onClose: () => void; onDone: () =>
 }
 
 export function DisksPage() {
-  const [disks, setDisks] = useState<Disk[]>([]);
-  const [loading, setLoading] = useState(true);
   const [showRegister, setShowRegister] = useState(false);
 
-  const load = useCallback(async () => {
-    try {
-      setDisks(await api.disks.list());
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { load(); }, [load]);
+  const { data: disks = [], isLoading } = useQuery({
+    queryKey: ["disks"],
+    queryFn: api.disks.list,
+    refetchInterval: 5_000,
+  });
 
   return (
     <div className="max-w-3xl mx-auto space-y-6">
@@ -200,7 +197,7 @@ export function DisksPage() {
         </button>
       </div>
 
-      {loading ? (
+      {isLoading ? (
         <p className="text-sm text-zinc-500">Loading…</p>
       ) : disks.length === 0 ? (
         <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-8 text-center space-y-2">
@@ -209,18 +206,13 @@ export function DisksPage() {
         </div>
       ) : (
         <div className="grid gap-4">
-          {disks.map((d) => (
+          {disks.map((d: import("../api/types").Disk) => (
             <DiskCard key={d.id} disk={d} />
           ))}
         </div>
       )}
 
-      {showRegister && (
-        <RegisterModal
-          onClose={() => setShowRegister(false)}
-          onDone={() => { setShowRegister(false); load(); }}
-        />
-      )}
+      {showRegister && <RegisterModal onClose={() => setShowRegister(false)} />}
     </div>
   );
 }

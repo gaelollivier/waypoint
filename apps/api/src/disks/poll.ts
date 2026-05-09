@@ -2,7 +2,7 @@ import type { Database } from "bun:sqlite";
 import { readDiskId } from "./identity";
 import { markDiskConnected, markDiskDisconnected, getAllDisks } from "./registry";
 
-const POLL_INTERVAL_MS = 10_000;
+const POLL_INTERVAL_MS = 5_000;
 
 /**
  * Gets free/capacity bytes for a specific mount path using `df -Pk <path>`.

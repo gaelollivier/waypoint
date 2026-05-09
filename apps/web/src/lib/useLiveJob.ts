@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { Job, JobEvent } from "../api/types";
 
@@ -10,12 +11,11 @@ function isActive(status: Job["status"]): boolean {
 const EVENTS_POLL_INTERVAL_MS = 2000;
 
 /**
- * Subscribes to a job: initial fetch + SSE updates while active. Optionally
- * also polls the events log. Returns the latest job, events, and a 1Hz `now`
- * timestamp for elapsed/ETA recomputation.
+ * Subscribes to a job: React Query for the initial fetch + cache, SSE to keep
+ * it live while active. Optionally polls the events log.
  *
- * Events polling is self-scheduling (one in-flight at a time, with abort on
- * unmount) — never piles up requests if the server is slow.
+ * The job is stored in the React Query cache under ['job', jobId] — other
+ * components can read it via useQuery without re-fetching.
  */
 export function useLiveJob(
   jobId: number | null,
@@ -26,40 +26,37 @@ export function useLiveJob(
   now: number;
   loading: boolean;
 } {
-  const [job, setJob] = useState<Job | null>(null);
+  const queryClient = useQueryClient();
   const [events, setEvents] = useState<JobEvent[]>([]);
-  const [loading, setLoading] = useState(true);
   const [now, setNow] = useState(Date.now());
 
-  // Initial fetch
+  const { data: job = null, isLoading } = useQuery<Job | null>({
+    queryKey: ["job", jobId],
+    queryFn: () => (jobId != null ? api.jobs.get(jobId) : null),
+    enabled: jobId != null,
+    staleTime: 10_000,
+  });
+
+  // Initial events fetch
   useEffect(() => {
-    if (jobId == null) { setJob(null); setEvents([]); setLoading(false); return; }
+    if (jobId == null || !opts.events) return;
     let cancelled = false;
-    setLoading(true);
-
-    const fetches: Promise<unknown>[] = [api.jobs.get(jobId).then((j) => { if (!cancelled) setJob(j); })];
-    if (opts.events) {
-      fetches.push(api.jobs.events(jobId).then((e) => { if (!cancelled) setEvents(e); }));
-    }
-    Promise.all(fetches).catch(() => {}).finally(() => { if (!cancelled) setLoading(false); });
-
+    api.jobs.events(jobId).then((e) => { if (!cancelled) setEvents(e); }).catch(() => {});
     return () => { cancelled = true; };
   }, [jobId, opts.events]);
 
-  // SSE while active
+  // SSE while active — pumps updates into React Query cache
   useEffect(() => {
     if (jobId == null || !job || !isActive(job.status)) return;
     const stop = api.jobs.stream(jobId, (event, data) => {
       if (event === "snapshot" || event === "status" || event === "progress") {
-        setJob(data as Job);
+        queryClient.setQueryData(["job", jobId], data as Job);
       }
     });
     return stop;
-  }, [jobId, job?.status]);
+  }, [jobId, job?.status, queryClient]);
 
-  // Self-scheduling events poll. One request in-flight at a time, aborted on
-  // unmount. After each fetch completes (success OR failure), schedule the
-  // next one with EVENTS_POLL_INTERVAL_MS delay.
+  // Self-scheduling events poll
   const pollAbortRef = useRef<AbortController | null>(null);
   useEffect(() => {
     if (jobId == null || !opts.events || !job || !isActive(job.status)) return;
@@ -75,12 +72,10 @@ export function useLiveJob(
         const evts = await api.jobs.events(jobId);
         if (!stopped) setEvents(evts);
       } catch {
-        // Aborted or network error — ignore; next tick will retry.
+        // ignore
       } finally {
         pollAbortRef.current = null;
-        if (!stopped) {
-          timer = setTimeout(tick, EVENTS_POLL_INTERVAL_MS);
-        }
+        if (!stopped) timer = setTimeout(tick, EVENTS_POLL_INTERVAL_MS);
       }
     };
 
@@ -101,5 +96,5 @@ export function useLiveJob(
     return () => clearInterval(t);
   }, [job?.status]);
 
-  return { job, events, now, loading };
+  return { job, events, now, loading: isLoading };
 }

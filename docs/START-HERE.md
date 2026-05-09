@@ -22,7 +22,7 @@ Personal backup tool for cold storage drives. SSD source → multiple HDDs (one 
 
 ## Status
 
-**Implementation in progress.** Design phase complete; milestones 1–8 done. Manual testing started 2026-05-07 — surfaced perf and UX follow-ups (see `open-questions.md`).
+**Implementation in progress.** Design phase complete; milestones 1–8 done, UI improvements session 2026-05-08 (React Query, speed charts, disk-scoped events, merge-on-overflow speed buffer). See `open-questions.md` for details.
 
 **Stack**: TypeScript + Bun, Hono (HTTP), React + Vite (UI), `bun:sqlite`, BLAKE3, SSE for progress.
 

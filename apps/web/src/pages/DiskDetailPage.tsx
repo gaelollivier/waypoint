@@ -1,8 +1,9 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { Disk, Job, JobEvent } from "../api/types";
 import { StatusBadge } from "../components/StatusBadge";
-import { JobProgressPanel } from "../components/JobProgressPanel";
+import { JobDetails } from "../components/JobDetails";
 import { TreeExplorer } from "../components/TreeExplorer";
 import { Link, navigate } from "../components/Router";
 import { useLiveJob } from "../lib/useLiveJob";
@@ -20,49 +21,33 @@ const LEVEL_COLORS: Record<JobEvent["level"], string> = {
 
 export function DiskDetailPage({ id }: { id: string }) {
   const diskId = Number(id);
-  const [disk, setDisk] = useState<Disk | null>(null);
-  const [diskLoading, setDiskLoading] = useState(true);
-  const [jobs, setJobs] = useState<Job[]>([]);
+  const queryClient = useQueryClient();
   const [tab, setTab] = useState<Tab>("overview");
 
-  const loadDisk = useCallback(async () => {
-    try {
-      setDisk(await api.disks.get(diskId));
-    } catch {
-      setDisk(null);
-    } finally {
-      setDiskLoading(false);
-    }
-  }, [diskId]);
+  const { data: disk, isLoading: diskLoading } = useQuery<Disk>({
+    queryKey: ["disk", diskId],
+    queryFn: () => api.disks.get(diskId),
+    refetchInterval: 5_000,
+  });
 
-  const loadJobs = useCallback(async () => {
-    try {
-      setJobs(await api.jobs.list({ targetDiskId: diskId, limit: 50 }));
-    } catch {}
-  }, [diskId]);
+  const { data: jobs = [] } = useQuery<Job[]>({
+    queryKey: ["jobs", { diskId }],
+    queryFn: () => api.jobs.list({ targetDiskId: diskId, limit: 50 }),
+    refetchInterval: 5_000,
+  });
 
-  useEffect(() => { loadDisk(); loadJobs(); }, [loadDisk, loadJobs]);
-
-  // Refresh jobs every 5s (cheap, doesn't compete with the active job's SSE)
-  useEffect(() => {
-    const t = setInterval(loadJobs, 5000);
-    return () => clearInterval(t);
-  }, [loadJobs]);
-
-  // Find the currently-active job on this disk (running/paused/queued)
   const activeJob = jobs.find((j) => ACTIVE.includes(j.status)) ?? null;
+
+  const scan = useMutation({
+    mutationFn: () => api.disks.scan(diskId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["jobs", { diskId }] });
+    },
+    onError: (err: any) => alert(`Scan failed: ${err.message}`),
+  });
 
   if (diskLoading) return <p className="text-sm text-zinc-500 p-6">Loading…</p>;
   if (!disk) return <p className="text-sm text-red-400 p-6">Disk not found.</p>;
-
-  const startScan = async () => {
-    try {
-      await api.disks.scan(diskId);
-      await loadJobs();
-    } catch (err: any) {
-      alert(`Scan failed: ${err.message}`);
-    }
-  };
 
   return (
     <div className="max-w-4xl mx-auto space-y-6">
@@ -72,9 +57,8 @@ export function DiskDetailPage({ id }: { id: string }) {
         </Link>
       </div>
 
-      <DiskHeader disk={disk} onScan={startScan} hasActiveJob={activeJob != null} />
+      <DiskHeader disk={disk} onScan={() => scan.mutate()} hasActiveJob={activeJob != null} />
 
-      {/* Tabs */}
       <div className="flex gap-1 border-b border-zinc-800">
         {(["overview", "tree", "events"] as Tab[]).map((t) => (
           <button
@@ -92,11 +76,7 @@ export function DiskDetailPage({ id }: { id: string }) {
       </div>
 
       {tab === "overview" && (
-        <OverviewTab
-          disk={disk}
-          activeJob={activeJob}
-          recentJobs={jobs}
-        />
+        <OverviewTab disk={disk} activeJob={activeJob} recentJobs={jobs} diskId={diskId} />
       )}
 
       {tab === "tree" && (
@@ -109,7 +89,7 @@ export function DiskDetailPage({ id }: { id: string }) {
         )
       )}
 
-      {tab === "events" && <EventsTab activeJobId={activeJob?.id ?? null} />}
+      {tab === "events" && <EventsTab diskId={diskId} jobs={jobs} />}
     </div>
   );
 }
@@ -186,41 +166,64 @@ function OverviewTab({
   disk,
   activeJob: activeJobStub,
   recentJobs,
+  diskId,
 }: {
   disk: Disk;
   activeJob: Job | null;
   recentJobs: Job[];
+  diskId: number;
 }) {
-  // Subscribe to live updates for the active job (if any). We pass the job id
-  // through useLiveJob so we get SSE-driven progress without re-fetching.
-  const { job: liveJob, now } = useLiveJob(activeJobStub?.id ?? null, { events: false });
+  const queryClient = useQueryClient();
+  const { job: liveJob, now } = useLiveJob(activeJobStub?.id ?? null);
 
   const completedJobs = recentJobs
     .filter((j) => !ACTIVE.includes(j.status))
     .slice(0, 10);
+
+  const handlePause = async () => {
+    if (!liveJob) return;
+    await api.jobs.pause(liveJob.id);
+    queryClient.invalidateQueries({ queryKey: ["job", liveJob.id] });
+  };
+  const handleResume = async () => {
+    if (!liveJob) return;
+    await api.jobs.resume(liveJob.id);
+    queryClient.invalidateQueries({ queryKey: ["job", liveJob.id] });
+  };
+  const handleCancel = async () => {
+    if (!liveJob) return;
+    if (!confirm("Cancel this job?")) return;
+    await api.jobs.cancel(liveJob.id);
+    queryClient.invalidateQueries({ queryKey: ["job", liveJob.id] });
+    queryClient.invalidateQueries({ queryKey: ["jobs", { diskId }] });
+  };
 
   return (
     <div className="space-y-6">
       {liveJob && (
         <section className="space-y-3">
           <div className="flex items-center justify-between gap-4">
-            <h2 className="text-sm font-semibold text-white">
-              Current job
-            </h2>
-            <Link
-              href={`/jobs/${liveJob.id}`}
-              className="text-xs text-zinc-500 hover:text-white transition-colors"
-            >
-              Full details →
-            </Link>
-          </div>
-          <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-5 space-y-4">
             <div className="flex items-center gap-3">
               <StatusBadge status={liveJob.status} />
               <span className="font-mono text-sm uppercase text-zinc-300">{liveJob.type}</span>
               <span className="text-xs text-zinc-600">#{liveJob.id}</span>
             </div>
-            <JobProgressPanel job={liveJob} now={now} disk={disk} compact />
+            <Link
+              href={`/jobs/${liveJob.id}`}
+              className="text-xs text-zinc-500 hover:text-white transition-colors"
+            >
+              Debug →
+            </Link>
+          </div>
+          <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-5">
+            <JobDetails
+              job={liveJob}
+              now={now}
+              disk={disk}
+              onPause={handlePause}
+              onResume={handleResume}
+              onCancel={handleCancel}
+            />
           </div>
         </section>
       )}
@@ -271,49 +274,86 @@ function HistoryTile({ label, at }: { label: string; at: string | null }) {
   );
 }
 
-// ── Events tab ───────────────────────────────────────────────────────────────
+// ── Events tab (disk-scoped) ──────────────────────────────────────────────────
 
-function EventsTab({ activeJobId }: { activeJobId: number | null }) {
-  // Events on this disk = events from the currently-active job, if any.
-  // (Disk-wide event aggregation across historical jobs is a future feature.)
-  const { events } = useLiveJob(activeJobId, { events: true });
-  const eventsEndRef = useRef<HTMLDivElement>(null);
+function EventsTab({ diskId, jobs }: { diskId: number; jobs: Job[] }) {
+  const [levelFilter, setLevelFilter] = useState("");
+  const [jobFilter, setJobFilter] = useState<number | "">("");
 
-  useEffect(() => {
-    eventsEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [events.length]);
+  const hasActiveJob = jobs.some((j) => ACTIVE.includes(j.status));
 
-  if (activeJobId == null) {
-    return (
-      <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-8 text-center text-sm text-zinc-500">
-        No job is currently active on this disk.
-        <p className="text-xs text-zinc-700 mt-2">
-          Open a past job from the Overview tab to see its events.
-        </p>
-      </div>
-    );
-  }
+  const { data: events = [], isLoading } = useQuery<JobEvent[]>({
+    queryKey: ["diskEvents", diskId, levelFilter, jobFilter],
+    queryFn: () =>
+      api.disks.events(diskId, {
+        level: levelFilter || undefined,
+        jobId: jobFilter !== "" ? Number(jobFilter) : undefined,
+        limit: 500,
+      }),
+    refetchInterval: hasActiveJob ? 3_000 : false,
+  });
+
+  // Jobs with events — all completed + active, most recent first
+  const jobOptions = [...jobs].sort((a, b) => b.id - a.id);
 
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900 overflow-hidden">
-      {events.length === 0 ? (
-        <p className="p-4 text-sm text-zinc-600">No events yet.</p>
-      ) : (
-        <div className="divide-y divide-zinc-800 max-h-[60vh] overflow-y-auto">
-          {events.map((evt) => (
-            <div key={evt.id} className="flex gap-3 px-4 py-2.5 hover:bg-zinc-800/50">
-              <span className="font-mono text-xs text-zinc-700 shrink-0 pt-0.5">
-                {new Date(evt.timestamp).toLocaleTimeString()}
-              </span>
-              <span className={`text-xs shrink-0 pt-0.5 w-16 ${LEVEL_COLORS[evt.level]}`}>
-                {evt.level}
-              </span>
-              <span className="text-xs text-zinc-300 break-all">{evt.message}</span>
-            </div>
+    <div className="space-y-3">
+      {/* Filters */}
+      <div className="flex gap-3 flex-wrap">
+        <select
+          value={levelFilter}
+          onChange={(e) => setLevelFilter(e.target.value)}
+          className="rounded bg-zinc-800 border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 focus:outline-none focus:border-blue-500"
+        >
+          <option value="">All levels</option>
+          <option value="error">Errors</option>
+          <option value="warning">Warnings</option>
+          <option value="info">Info</option>
+        </select>
+
+        <select
+          value={jobFilter}
+          onChange={(e) => setJobFilter(e.target.value === "" ? "" : Number(e.target.value))}
+          className="rounded bg-zinc-800 border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 focus:outline-none focus:border-blue-500"
+        >
+          <option value="">All jobs</option>
+          {jobOptions.map((j) => (
+            <option key={j.id} value={j.id}>
+              #{j.id} {j.type} ({j.status})
+            </option>
           ))}
-          <div ref={eventsEndRef} />
-        </div>
-      )}
+        </select>
+
+        <span className="text-xs text-zinc-600 self-center">
+          {isLoading ? "Loading…" : `${events.length} events`}
+        </span>
+      </div>
+
+      {/* Events list */}
+      <div className="rounded-lg border border-zinc-800 bg-zinc-900 overflow-hidden">
+        {events.length === 0 ? (
+          <p className="p-4 text-sm text-zinc-600">
+            {isLoading ? "Loading…" : "No events found."}
+          </p>
+        ) : (
+          <div className="divide-y divide-zinc-800 max-h-[60vh] overflow-y-auto">
+            {events.map((evt) => (
+              <div key={evt.id} className="flex gap-3 px-4 py-2.5 hover:bg-zinc-800/50">
+                <span className="font-mono text-xs text-zinc-700 shrink-0 pt-0.5 w-32 truncate">
+                  {new Date(evt.timestamp).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                </span>
+                <span className={`text-xs shrink-0 pt-0.5 w-16 ${LEVEL_COLORS[evt.level]}`}>
+                  {evt.level}
+                </span>
+                <span className="text-xs text-zinc-600 shrink-0 pt-0.5 w-10">
+                  #{evt.jobId}
+                </span>
+                <span className="text-xs text-zinc-300 break-all">{evt.message}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

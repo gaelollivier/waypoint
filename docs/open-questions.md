@@ -79,16 +79,13 @@ First UI-driven test scan run on the source SSD. Surfaced the following items, c
 - **Cheap fix applied**:
   - `SCAN_CONCURRENCY` 32 → 8 (less back-to-back sync work piling up).
   - Added `await new Promise(r => setImmediate(r))` between directories in `scan-job.ts::execute` so the loop breathes after each batched DB write.
-- **Proper fix — DEFERRED**: move BLAKE3 hashing into a `Worker` thread (or a small pool) so the main event loop only handles DB writes and HTTP. The walker would `postMessage` `{ filePath, sizeBytes }` and `await` the resulting hex hash. This decouples CPU-bound work from the loop entirely and would let us push concurrency back up. Notes:
-  - Bun supports Web Workers — `new Worker(new URL("./hash-worker.ts", import.meta.url))`.
-  - File reading should stay on the main side (Bun.file slice + arrayBuffer) and the bytes posted into the worker as a transferable, OR (preferred) the worker reads the file itself by path.
-  - Need to size the pool — likely `navigator.hardwareConcurrency - 1`.
-  - Until this lands, do not raise `SCAN_CONCURRENCY` above ~8 even on fast SSDs; throughput is fine, responsiveness regresses.
+- **Won't do**: Worker thread pool for hashing. Scan is already fast enough on SSD (a few seconds). Adding complexity not justified.
 
-### Job progress sampling — 2026-05-07
+### Job progress sampling — DONE 2026-05-08
 
-- `JobRunner._flush` now appends a `(t, items, bytes)` sample to a bounded ring buffer (`MAX_SPEED_SAMPLES=240`, ~60s at 250ms cadence) and persists it to `progress_json.speedSamples`. The frontend computes an "instant" rate from the last ~5s window and falls back to the since-start average when there aren't enough samples yet.
-- Future: render the buffer as a sparkline in `JobProgressPanel` and a full chart on the job detail page. The data is already there — UI work only.
+- `JobRunner._flush` appends `(t, items, bytes)` samples (cumulative) to a bounded buffer (`MAX_SPEED_SAMPLES=500`). Buffer uses **merge-on-overflow**: when full, odd-indexed entries are dropped (halving resolution) before appending. This keeps the full job history at ≤500 entries regardless of duration — a 30s scan stays at ~250ms resolution, a 10-day copy coarsens gracefully to ~25min resolution.
+- Frontend derives rates from adjacent sample pairs. `JobDetails` renders both files/sec and bytes/sec as Recharts `AreaChart`s. Charts appear inside the active job panel on `DiskDetailPage` and on `JobDetailPage`.
+- **SCAN_CONCURRENCY tuning per disk.kind**: backlog. Revisit after testing scan on HDD with perf profiling.
 
 ### Disk registration — DONE
 
@@ -98,18 +95,16 @@ First UI-driven test scan run on the source SSD. Surfaced the following items, c
 - **Auto-detect `kind` (ssd/hdd).** Implemented in `apps/api/src/disks/detect.ts` via `diskutil info <mountPoint>`. Falls back to `hdd` (more conservative for I/O concurrency tuning) on any failure.
 - **Volume picker for "Register disk".** Implemented: `GET /api/disks/volumes` lists `/Volumes/*` mounts with capacity and a flag indicating if the volume already has a `.waypoint-disk-id` dotfile. Frontend `RegisterModal` uses it; manual path entry is no longer needed.
 
-### Job UI — DONE
+### Job UI + Disk view — DONE (updated 2026-05-08)
 
-- **Speed metrics on the scan job overview**: files/sec and bytes/sec, plus elapsed and ETA. ETA projected against disk used-bytes (`capacity − free`) since total file count is unknown until scan completes — caveat shown inline. All packaged in `JobProgressPanel`.
-
-### Disk view — DONE
-
-- New `DiskDetailPage` at `/disks/:id` with three tabs: **Overview** (header card + active job panel + history tiles + recent jobs list), **Tree** (embeds `TreeExplorer`), **Events** (live events from the active job — historical event aggregation across past jobs is a future feature).
-- Reusable components extracted to avoid duplication:
-  - `components/JobProgressPanel.tsx` — speed/ETA/throughput tile grid + progress bar. Used by both `JobDetailPage` and the disk detail Overview tab.
-  - `lib/useLiveJob.ts` — initial fetch + SSE stream + 1Hz tick + optional event polling. One hook used by both pages.
-  - `components/TreeExplorer.tsx` — virtualized tree explorer extracted from the old `DiskExplorerPage`. Standalone explorer page deleted; tree is reachable only through the disk detail Tree tab now.
-  - `lib/format.ts` — shared formatting (bytes, rates, durations, dates).
+- **UX architecture**: `DiskDetailPage` is the primary surface. `JobDetailPage` is debug-only. All job details, charts, and controls are accessible from the disk page.
+- **`components/JobDetails.tsx`** — reusable component used in both `DiskDetailPage` (active job section in Overview tab) and `JobDetailPage`. Contains: job controls (pause/resume/cancel), stats grid, progress bar, files/sec chart, bytes/sec chart (Recharts AreaChart).
+- **`DiskDetailPage` Events tab** — now disk-scoped: shows all `job_events` across all jobs on this disk, reverse-chronological. Filterable by level (all/error/warning/info) and by job. Backend: `GET /api/disks/:id/events`. Refreshes every 3s when a job is active.
+- **React Query**: all data fetching uses `@tanstack/react-query`. `useLiveJob` pumps SSE updates into the RQ cache (`queryClient.setQueryData`). Disk list, job list, disk events all use `useQuery` with appropriate `refetchInterval`.
+- **Disk poll cadence**: 10s → 5s (`apps/api/src/disks/poll.ts`).
+- `lib/useLiveJob.ts` — SSE stream + 1Hz tick + optional event polling. Sources job data from React Query cache.
+- `components/TreeExplorer.tsx` — virtualized tree explorer, reachable only through the disk detail Tree tab.
+- `lib/format.ts` — shared formatting (bytes, rates, durations, dates).
 
 ### User collaboration preferences
 
