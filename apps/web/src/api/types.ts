@@ -21,9 +21,63 @@ export interface Volume {
   isWaypointDisk: boolean;
 }
 
+export type DiffKind = "added" | "changed" | "removed" | "present";
+
+export interface DiffEntry {
+  kind: "directory" | "file";
+  name: string;
+  path: string;
+  sizeBytes: number;
+  // files only
+  diffKind?: DiffKind;
+  // directories only
+  addedCount?: number;
+  addedBytes?: number;
+  changedCount?: number;
+  changedBytes?: number;
+  removedCount?: number;
+  removedBytes?: number;
+  presentCount?: number;
+  presentBytes?: number;
+}
+
+export interface DiffTreeResponse {
+  diffJobId: number;
+  sourceDiskId: number;
+  destDiskId: number;
+  parentPath: string;
+  breadcrumb: Array<{ name: string; path: string | null }>;
+  totalAdded: number;
+  totalAddedBytes: number;
+  totalChanged: number;
+  totalChangedBytes: number;
+  totalRemoved: number;
+  totalRemovedBytes: number;
+  totalPresent: number;
+  totalPresentBytes: number;
+  currentDir: {
+    addedCount: number; addedBytes: number;
+    changedCount: number; changedBytes: number;
+    removedCount: number; removedBytes: number;
+    presentCount: number; presentBytes: number;
+  };
+  entries: DiffEntry[];
+}
+
+export interface DiffJobSummary {
+  id: number;
+  status: string;
+  sourceDiskId: number;
+  destDiskId: number;
+  destLabel: string | null;
+  itemsProcessed: number;
+  createdAt: string;
+  completedAt: string | null;
+}
+
 export interface Job {
   id: number;
-  type: "scan" | "copy" | "verify" | "backup";
+  type: "scan" | "copy" | "verify" | "backup" | "diff";
   status: "queued" | "running" | "paused" | "completed" | "failed" | "cancelled";
   phase: string | null;
   parentJobId: number | null;

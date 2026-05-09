@@ -1,4 +1,4 @@
-import type { Disk, Job, JobEvent, TreeResponse, Volume } from "./types";
+import type { Disk, DiffJobSummary, DiffTreeResponse, Job, JobEvent, TreeResponse, Volume } from "./types";
 
 const BASE = "/api";
 
@@ -50,6 +50,28 @@ export const api = {
     get: (diskId: number, parentId?: number | null): Promise<TreeResponse> => {
       const qs = parentId != null ? `?parentId=${parentId}` : "";
       return request<TreeResponse>(`/disks/${diskId}/tree${qs}`);
+    },
+  },
+
+  diff: {
+    start: (sourceDiskId: number, destDiskId: number) =>
+      request<{ jobId: number }>(`/disks/${sourceDiskId}/diff`, {
+        method: "POST",
+        body: JSON.stringify({ destDiskId }),
+      }),
+
+    jobs: (sourceDiskId: number) =>
+      request<DiffJobSummary[]>(`/disks/${sourceDiskId}/diff/jobs`),
+
+    tree: (
+      sourceDiskId: number,
+      destDiskId: number,
+      opts?: { parentPath?: string; diffJobId?: number }
+    ): Promise<DiffTreeResponse> => {
+      const params = new URLSearchParams({ destDiskId: String(destDiskId) });
+      if (opts?.parentPath) params.set("parentPath", opts.parentPath);
+      if (opts?.diffJobId != null) params.set("diffJobId", String(opts.diffJobId));
+      return request<DiffTreeResponse>(`/disks/${sourceDiskId}/diff?${params}`);
     },
   },
 

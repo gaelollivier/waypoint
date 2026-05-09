@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 
-export type JobType = "scan" | "copy" | "verify" | "backup";
+export type JobType = "scan" | "copy" | "verify" | "backup" | "diff";
 export type JobStatus = "queued" | "running" | "paused" | "completed" | "failed" | "cancelled";
 export type JobEventLevel = "info" | "warning" | "error";
 
@@ -87,14 +87,18 @@ export class JobManager {
     status?: JobStatus;
     type?: JobType;
     targetDiskId?: number;
+    sourceDiskId?: number;
+    destDiskId?: number;
     limit?: number;
   } = {}): JobRow[] {
     const conditions: string[] = [];
-    const params: unknown[] = [];
+    const params: (string | number | null)[] = [];
 
     if (filters.status)       { conditions.push("status = ?");         params.push(filters.status); }
     if (filters.type)         { conditions.push("type = ?");           params.push(filters.type); }
     if (filters.targetDiskId) { conditions.push("target_disk_id = ?"); params.push(filters.targetDiskId); }
+    if (filters.sourceDiskId) { conditions.push("source_disk_id = ?"); params.push(filters.sourceDiskId); }
+    if (filters.destDiskId)   { conditions.push("dest_disk_id = ?");   params.push(filters.destDiskId); }
 
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
     params.push(filters.limit ?? 100);
@@ -213,7 +217,7 @@ export class JobManager {
     const clauses: string[] = [
       "j.target_disk_id = ? OR j.source_disk_id = ? OR j.dest_disk_id = ?"
     ];
-    const params: unknown[] = [diskId, diskId, diskId];
+    const params: (string | number | null)[] = [diskId, diskId, diskId];
 
     if (level) { clauses.push("e.level = ?"); params.push(level); }
     if (jobId != null) { clauses.push("e.job_id = ?"); params.push(jobId); }

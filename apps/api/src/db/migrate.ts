@@ -22,10 +22,15 @@ export function runMigrations(db: Database): void {
 
     const sql = readFileSync(path.join(MIGRATIONS_DIR, file), "utf-8");
 
+    // Foreign key enforcement must be off while we rename/recreate tables
+    // (e.g. the jobs table recreation in 0003). The PRAGMA is session-scoped
+    // and must be set outside any transaction.
+    db.exec("PRAGMA foreign_keys = OFF");
     db.transaction(() => {
       db.exec(sql);
       db.exec(`PRAGMA user_version = ${version}`);
     })();
+    db.exec("PRAGMA foreign_keys = ON");
 
     if (!isSilent()) console.log(`Applied migration ${file}`);
     applied++;

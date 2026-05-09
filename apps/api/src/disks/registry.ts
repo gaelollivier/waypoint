@@ -87,7 +87,7 @@ export function updateDisk(
   fields: Partial<{ label: string; kind: "ssd" | "hdd" }>
 ): DiskRow | null {
   const sets: string[] = [];
-  const values: unknown[] = [];
+  const values: (string | number | null)[] = [];
   if (fields.label !== undefined) { sets.push("label = ?"); values.push(fields.label); }
   if (fields.kind !== undefined) { sets.push("kind = ?"); values.push(fields.kind); }
   if (sets.length === 0) return getDiskById(db, id);

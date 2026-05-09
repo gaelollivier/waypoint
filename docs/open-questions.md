@@ -137,6 +137,18 @@ Composite backup job (scan→scan→diff→copy as one unit) is deferred to M11.
 
 **`only_on_dest` (removed)**: shown in the diff tree as red entries. No action taken — safety model means we never delete from dest. Informational only.
 
+### M9 Diff — implemented 2026-05-09
+
+**Implemented:**
+- `apps/api/src/db/migrations/0003_diff_tables.sql` — adds `diff` to `jobs.type` CHECK (via table recreation), drops `diff_cache`/`diff_cache_entries`, creates `diff_dirs` + `diff_entries`. `migrate.ts` wraps each migration in `PRAGMA foreign_keys = OFF/ON` so the `jobs` table recreation works cleanly.
+- `apps/api/src/jobs/diff/diff-job.ts` — `DiffJobRunner`: strips mount-path prefix to compare files by **relative path** (absolute paths differ across disks). Classifies as `added/changed/present/removed`, inserts `diff_entries` in 1000-row batched transactions, rolls up `diff_dirs` bottom-up.
+- `apps/api/src/routes/diff.ts` — `POST /api/disks/:id/diff`, `GET /api/disks/:id/diff` (browse tree), `GET /api/disks/:id/diff/jobs`.
+- `DiffExplorer.tsx` — now reads live data via React Query; `DiffTab` on `DiskDetailPage` includes disk picker, "Run Diff" button, and polls for completion.
+
+**Bug found by type-checker (not tests):** `new _BLAKE3(32, {})` in `hasher.ts` had args backwards — correct signature is `(opts?: Blake3Opts)`. Accidentally produced correct output at runtime because default `dkLen` is 32. Fixed to `new _BLAKE3()`.
+
+**Key implementation note:** `diff_entries.path` and `diff_dirs.path` are always **disk-relative** (e.g. `/Documents/file.txt`), not absolute. The diff job strips `disk.mount_path` from both sides before comparing. This is what makes cross-disk diffing work — two disks at different mount points still have the same relative file layout.
+
 ### User collaboration preferences
 
 - Testing flow is **UI-only**. Do not give curl commands as testing instructions. Curl is only acceptable for backend-state debugging when explicitly asked.

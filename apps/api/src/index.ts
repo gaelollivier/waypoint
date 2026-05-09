@@ -8,6 +8,7 @@ import { initJobManager } from "./jobs";
 import { disksRouter } from "./routes/disks";
 import { jobsRouter } from "./routes/jobs";
 import { treeRouter } from "./routes/tree";
+import { diffRouter } from "./routes/diff";
 import { startLoopStallDetector, trace } from "./diag/trace";
 
 // Initialize DB (runs migrations + clears stale locks) at startup
@@ -39,6 +40,7 @@ app.get("/healthz", (c) => c.json({ ok: true }));
 app.route("/api/disks", disksRouter);
 app.route("/api/jobs", jobsRouter);
 app.route("/api/disks/:id/tree", treeRouter);
+app.route("/api/disks/:id/diff", diffRouter);
 
 const PORT = Number(process.env.PORT ?? 3000);
 

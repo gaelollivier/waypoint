@@ -30,7 +30,7 @@ export async function computeSampledHash(filePath: string, sizeBytes: number): P
   }
 
   const file = Bun.file(filePath);
-  const hasher = new _BLAKE3(32, {});
+  const hasher = new _BLAKE3();
 
   // Size prefix: 8 bytes little-endian (BigInt for > 32-bit sizes)
   const sizeBuf = new Uint8Array(8);
@@ -77,7 +77,7 @@ export async function computeFullHash(filePath: string): Promise<string> {
  * as bytes are read, finalise with .digest() at the end).
  */
 export function createStreamingHasher(): InstanceType<typeof _BLAKE3> {
-  return new _BLAKE3(32, {});
+  return new _BLAKE3();
 }
 
 export function finaliseHash(hasher: InstanceType<typeof _BLAKE3>): string {

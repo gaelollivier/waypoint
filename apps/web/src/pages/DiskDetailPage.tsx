@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
-import type { Disk, Job, JobEvent } from "../api/types";
+import type { Disk, DiffJobSummary, Job, JobEvent } from "../api/types";
 import { StatusBadge } from "../components/StatusBadge";
 import { JobDetails } from "../components/JobDetails";
 import { TreeExplorer } from "../components/TreeExplorer";
@@ -90,7 +90,7 @@ export function DiskDetailPage({ id }: { id: string }) {
         )
       )}
 
-      {tab === "diff" && <DiffExplorer />}
+      {tab === "diff" && <DiffTab sourceDiskId={diskId} sourceDisk={disk} />}
 
       {tab === "events" && <EventsTab diskId={diskId} jobs={jobs} />}
     </div>
@@ -264,6 +264,154 @@ function OverviewTab({
           </div>
         )}
       </section>
+    </div>
+  );
+}
+
+// ── Diff tab ──────────────────────────────────────────────────────────────────
+
+function DiffTab({ sourceDiskId, sourceDisk }: { sourceDiskId: number; sourceDisk: Disk }) {
+  const queryClient = useQueryClient();
+  // Which dest disk the user has selected for the current diff view
+  const [selectedDestId, setSelectedDestId] = useState<number | null>(null);
+  // Track the most-recently-started diff job id so we can poll for completion
+  const [pendingJobId, setPendingJobId] = useState<number | null>(null);
+
+  // All registered disks (to populate the dest picker)
+  const { data: allDisks = [] } = useQuery<Disk[]>({
+    queryKey: ["disks"],
+    queryFn: () => api.disks.list(),
+    refetchInterval: 10_000,
+  });
+  const destDisks = allDisks.filter((d) => d.id !== sourceDiskId);
+
+  // Past diff jobs for this source disk
+  const { data: diffJobs = [], refetch: refetchDiffJobs } = useQuery<DiffJobSummary[]>({
+    queryKey: ["diffJobs", sourceDiskId],
+    queryFn: () => api.diff.jobs(sourceDiskId),
+    refetchInterval: pendingJobId ? 2_000 : false,
+  });
+
+  // Latest completed diff for the selected dest disk
+  const latestCompletedDiff = selectedDestId
+    ? diffJobs.find((j) => j.destDiskId === selectedDestId && j.status === "completed")
+    : null;
+
+  // Pending/running diff for the selected dest
+  const activeDiff = selectedDestId
+    ? diffJobs.find(
+        (j) =>
+          j.destDiskId === selectedDestId &&
+          (j.status === "running" || j.status === "queued" || j.status === "paused")
+      )
+    : null;
+
+  // Stop polling when no active job remains
+  if (pendingJobId && !activeDiff) {
+    setPendingJobId(null);
+    refetchDiffJobs();
+  }
+
+  const startDiff = useMutation({
+    mutationFn: () => api.diff.start(sourceDiskId, selectedDestId!),
+    onSuccess: (res) => {
+      setPendingJobId(res.jobId);
+      queryClient.invalidateQueries({ queryKey: ["diffJobs", sourceDiskId] });
+    },
+    onError: (err: any) => alert(`Diff failed to start: ${err.message}`),
+  });
+
+  const canStartDiff =
+    selectedDestId != null &&
+    !activeDiff &&
+    sourceDisk.lastScanAt != null &&
+    !startDiff.isPending;
+
+  return (
+    <div className="space-y-5">
+      {/* Dest disk picker + action */}
+      <div className="flex items-center gap-3 flex-wrap">
+        <label className="text-xs text-zinc-500">Compare against:</label>
+        {destDisks.length === 0 ? (
+          <span className="text-xs text-zinc-600">No other disks registered.</span>
+        ) : (
+          <select
+            value={selectedDestId ?? ""}
+            onChange={(e) => {
+              setSelectedDestId(e.target.value ? Number(e.target.value) : null);
+            }}
+            className="rounded bg-zinc-800 border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 focus:outline-none focus:border-blue-500"
+          >
+            <option value="">— pick a disk —</option>
+            {destDisks.map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.label ?? d.diskUuid.slice(0, 8)}
+                {!d.isConnected ? " (offline)" : ""}
+              </option>
+            ))}
+          </select>
+        )}
+
+        {selectedDestId && (
+          <button
+            disabled={!canStartDiff}
+            onClick={() => startDiff.mutate()}
+            className="rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {activeDiff ? "Running…" : "Run Diff"}
+          </button>
+        )}
+
+        {activeDiff && (
+          <span className="text-xs text-zinc-500">
+            Job #{activeDiff.id} — {activeDiff.status}…
+          </span>
+        )}
+      </div>
+
+      {/* No dest selected */}
+      {!selectedDestId && (
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-8 text-center text-sm text-zinc-500">
+          Select a destination disk above to view or run a diff.
+        </div>
+      )}
+
+      {/* Source not scanned */}
+      {selectedDestId && !sourceDisk.lastScanAt && (
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-6 text-sm text-yellow-400">
+          This disk hasn't been scanned yet. Run a scan first.
+        </div>
+      )}
+
+      {/* Active job progress placeholder */}
+      {selectedDestId && activeDiff && !latestCompletedDiff && (
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-8 text-center text-sm text-zinc-500">
+          Diff job #{activeDiff.id} is running — results will appear here when it completes.
+        </div>
+      )}
+
+      {/* Diff explorer */}
+      {selectedDestId && latestCompletedDiff && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between text-xs text-zinc-600">
+            <span>
+              Diff #{latestCompletedDiff.id} ·{" "}
+              {latestCompletedDiff.completedAt ? formatDate(latestCompletedDiff.completedAt) : ""}
+            </span>
+            {activeDiff && (
+              <span className="text-zinc-500">Newer diff running — refresh when done</span>
+            )}
+          </div>
+          <DiffExplorer sourceDiskId={sourceDiskId} destDiskId={selectedDestId} />
+        </div>
+      )}
+
+      {/* No completed diff yet */}
+      {selectedDestId && !latestCompletedDiff && !activeDiff && sourceDisk.lastScanAt && (
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-8 text-center text-sm text-zinc-500">
+          No diff results yet. Click "Run Diff" to compare with the selected destination disk.
+        </div>
+      )}
     </div>
   );
 }
