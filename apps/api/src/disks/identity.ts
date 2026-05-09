@@ -1,5 +1,6 @@
 import path from "path";
-import { fileExists, readTextFile, writeTextFile } from "../fs/disk-io";
+import { fileExists, readTextFile } from "../fs/disk-io";
+import { writeDiskIdDotfile } from "../fs/disk-writes";
 
 const DISK_ID_FILENAME = ".waypoint-disk-id";
 
@@ -15,12 +16,11 @@ export async function readDiskId(mountPath: string): Promise<string | null> {
 
 /**
  * Writes a new UUID to a disk's root dotfile. Returns the UUID written.
- * Throws if the disk is not writable.
+ * Throws if the disk is not writable or if the dotfile already exists.
  */
 export async function writeDiskId(mountPath: string): Promise<string> {
   const uuid = crypto.randomUUID();
-  const dotfilePath = path.join(mountPath, DISK_ID_FILENAME);
-  await writeTextFile(dotfilePath, uuid + "\n");
+  await writeDiskIdDotfile(mountPath, uuid);
   return uuid;
 }
 

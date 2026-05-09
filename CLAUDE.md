@@ -1,14 +1,15 @@
 # Waypoint — Claude Code Rules
 
-## RULE: All filesystem I/O must go through `disk-io.ts`
+## RULE: All filesystem I/O must go through the two fs/ gateway files
 
-**File:** `apps/api/src/fs/disk-io.ts`
+**Read operations:** `apps/api/src/fs/disk-io.ts`
+**Write operations:** `apps/api/src/fs/disk-writes.ts`
 
 This is a hard rule with no exceptions (outside of `__tests__/`).
 
 ### What this means
 
-No source file in `apps/api/src/` (other than `disk-io.ts` itself and test files)
+No source file in `apps/api/src/` (other than these two files and test files)
 may directly use any of the following:
 
 - `import ... from "fs"`
@@ -19,22 +20,24 @@ may directly use any of the following:
 - `readdir`, `mkdir`, `copyFile`, `rename`, `unlink` from `fs/promises`
 - `Bun.spawnSync` for disk-related tools (`df`, `diskutil`)
 
-Instead, call the corresponding exported function from `../fs/disk-io`.
+Instead, call the corresponding exported function from `disk-io.ts` (reads)
+or `disk-writes.ts` (writes).
 
 ### Why this rule exists
 
-This tool writes to backup disks that contain irreplaceable personal data.
-The copy job, in particular, must never corrupt or silently lose a file.
-Centralising I/O in one ~200-line file makes it possible to audit every disk
-operation before it runs — a reviewer need only read `disk-io.ts` to understand
-everything the tool can do to a disk.
+This tool writes to backup disks containing irreplaceable personal data.
+Splitting reads and writes into separate files means:
+- To audit what can cause data loss: read only `disk-writes.ts` (~100 lines).
+- To audit all disk access: read both files together (~300 lines total).
+
+A reviewer never has to grep the whole codebase to understand disk exposure.
 
 ### Adding new I/O
 
-If you need a new filesystem operation:
-1. Add it to `disk-io.ts` with a clear docstring.
-2. Mark write operations with a `// WRITE:` comment.
-3. Do NOT inline fs calls anywhere else.
+- New **read** operation → add to `disk-io.ts`.
+- New **write** operation → add to `disk-writes.ts`, with explicit guardrails
+  (validate the target path, refuse to overwrite unless that is the explicit intent).
+- Do NOT inline fs calls anywhere else.
 
 ### Exceptions
 

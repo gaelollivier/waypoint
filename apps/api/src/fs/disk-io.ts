@@ -1,24 +1,21 @@
 /**
- * disk-io.ts — THE SINGLE POINT OF ALL FILESYSTEM AND DISK OPERATIONS.
+ * disk-io.ts — ALL READ-ONLY FILESYSTEM AND DISK OPERATIONS.
  *
- * Every read, write, stat, directory listing, and disk-info spawn in the API
- * must go through this module. No other source file (outside of __tests__)
- * may import from "fs", "fs/promises", or use Bun.file / Bun.write directly.
+ * Every read, stat, directory listing, and disk-info spawn in the API must go
+ * through this module. No other source file (outside of __tests__) may import
+ * from "fs", "fs/promises", or use Bun.file directly for reads.
  *
- * Why this constraint exists:
- *   The copy job writes files to backup disks containing irreplaceable data.
- *   Centralising I/O here means a single, short file can be audited before
- *   any write reaches a backup disk. A reviewer need only read this file to
- *   understand every operation the tool can perform on disk.
+ * WRITE OPERATIONS live in disk-writes.ts. Separating reads from writes makes
+ * it trivial to audit what can modify data on disk — you only need to read
+ * disk-writes.ts.
  *
  * Convention:
  *   READ operations  — cannot cause data loss, safe by default.
- *   WRITE operations — marked with a "// WRITE:" comment, review carefully.
  *   PROCESS ops      — spawn external tools (df, diskutil) for metadata only.
  */
 
-import { appendFileSync, readdirSync, readFileSync } from "fs";
-import { readdir, mkdir, copyFile as fsCopyFile } from "fs/promises";
+import { readdirSync, readFileSync } from "fs";
+import { readdir } from "fs/promises";
 import path from "path";
 import type { Dirent } from "fs";
 
@@ -184,59 +181,4 @@ export async function readFileSlice(
  */
 export async function readFileAll(filePath: string): Promise<ArrayBuffer> {
   return Bun.file(filePath).arrayBuffer();
-}
-
-// ---------------------------------------------------------------------------
-// WRITE OPERATIONS — handle with extreme care.
-// These are the only functions in the codebase that modify files on disk.
-// ---------------------------------------------------------------------------
-
-/**
- * WRITE: Writes a UTF-8 string to a file, replacing any existing content.
- * Currently used only for disk identity dotfiles (.waypoint-disk-id).
- * Do not use for backup data files.
- */
-export async function writeTextFile(
-  filePath: string,
-  content: string
-): Promise<void> {
-  await Bun.write(filePath, content);
-}
-
-/**
- * WRITE: Creates a directory and any missing parent directories.
- * Used by the copy job to recreate source directory structure on the backup disk.
- */
-export async function createDirectory(dirPath: string): Promise<void> {
-  await mkdir(dirPath, { recursive: true });
-}
-
-/**
- * WRITE: Copies a file from srcPath to destPath atomically via the OS copy.
- * This is a direct copy — the copy job must independently verify integrity
- * (e.g. hash comparison) after calling this function.
- *
- * SAFETY NOTES:
- *   - Will overwrite destPath if it already exists.
- *   - Not atomic across filesystems — a crash mid-copy leaves a partial file.
- *   - Callers must verify the copy succeeded before marking it complete in the DB.
- */
-export async function copyFileToDisk(
-  srcPath: string,
-  destPath: string
-): Promise<void> {
-  await fsCopyFile(srcPath, destPath);
-}
-
-/**
- * WRITE: Appends a single text line (plus newline) to a file synchronously.
- * Swallows write errors silently — designed exclusively for diagnostic trace
- * logging. Must never be used for data that matters or backup state.
- */
-export function appendLineSync(filePath: string, line: string): void {
-  try {
-    appendFileSync(filePath, line + "\n");
-  } catch {
-    // Never crash the caller because of a log write failure.
-  }
 }

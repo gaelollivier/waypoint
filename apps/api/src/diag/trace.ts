@@ -9,7 +9,7 @@
  * a stable monotonic reference.
  */
 
-import { appendLineSync } from "../fs/disk-io";
+import { appendToTmpLog } from "../fs/disk-writes";
 
 const TRACE_PATH = process.env.WAYPOINT_TRACE_PATH ?? "/tmp/waypoint-trace.log";
 const ENABLED = process.env.WAYPOINT_TRACE !== "0";
@@ -24,7 +24,7 @@ export function trace(kind: string, payload: Record<string, unknown> = {}): void
     since_start_ms: Math.round(performance.now()),
     kind,
   });
-  appendLineSync(TRACE_PATH, line);
+  appendToTmpLog(TRACE_PATH, line);
 }
 
 /**
