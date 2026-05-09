@@ -115,7 +115,7 @@ Acceptable for v1 given the user's hardware (slow HDD where full verify is hours
 ## Jobs
 
 - Every long-running operation is a **job** with durable state in SQLite.
-- Primitive job types: `scan`, `copy`, `verify`. (`diff` is a synchronous SQL query, not a job — fast at all expected scales.)
+- Primitive job types: `scan`, `diff`, `copy`, `verify`. (`diff` is a job despite being fast — keeps the model consistent, gives it a status, and its output tables (`diff_entries`, `diff_dirs`) are keyed by `diff_job_id`.)
 - Composite job type: `backup` — orchestrates `scan(source) → scan(dest) → diff → copy(missing/changed)`. Sequential phases. Verify is NOT auto-chained (too slow to bundle).
 - **Composite jobs are themselves stateful.** A `backup` job has its own row tracking current phase + reference to the active sub-job. Pause on the composite freezes the whole pipeline at its current point (sub-job pauses, composite remains in its current phase). User can unplug the disk or reboot mid-backup; on resume, the composite continues from the same sub-job + same point within it.
 - Job statuses: `queued → running → paused / completed / failed / cancelled`.

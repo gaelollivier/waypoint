@@ -1,10 +1,8 @@
-import { useState, useEffect, useRef, useCallback } from "react";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import { useState, useEffect, useCallback } from "react";
 import { api } from "../api/client";
 import type { TreeEntry, TreeResponse } from "../api/types";
 import { formatBytes } from "../lib/format";
 
-const ROW_HEIGHT = 44;
 
 function EntryRow({
   entry,
@@ -21,7 +19,7 @@ function EntryRow({
   return (
     <div
       className={`flex items-center gap-3 px-4 group ${isDir ? "cursor-pointer hover:bg-zinc-800/60" : ""}`}
-      style={{ height: ROW_HEIGHT }}
+      style={{ minHeight: 44 }}
       onClick={() => isDir && onEnter(entry)}
     >
       <span className="text-base shrink-0 w-5 text-center select-none">
@@ -90,23 +88,13 @@ function Breadcrumb({
 }
 
 /**
- * Virtualized tree explorer for a disk. Used standalone (DiskExplorerPage)
- * and embedded in the disk detail Tree tab.
- *
- * `heightClass` controls the scroll-area height — pass a Tailwind class.
+ * Virtualized tree explorer for a disk. Uses window scroll so the whole page
+ * scrolls naturally — no inner scrollbar.
  */
-export function TreeExplorer({
-  diskId,
-  heightClass = "h-[calc(100vh-300px)]",
-}: {
-  diskId: number;
-  heightClass?: string;
-}) {
+export function TreeExplorer({ diskId }: { diskId: number }) {
   const [tree, setTree] = useState<TreeResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  const parentRef = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async (dirId: number | null) => {
     setLoading(true);
@@ -123,20 +111,8 @@ export function TreeExplorer({
 
   useEffect(() => { load(null); }, [load]);
 
-  const handleEnter = (entry: TreeEntry) => {
-    if (entry.kind !== "directory") return;
-    load(entry.id);
-  };
-
   const entries = tree?.entries ?? [];
-  const maxBytes = entries[0]?.sizeBytes ?? 0; // already sorted largest-first
-
-  const virtualizer = useVirtualizer({
-    count: entries.length,
-    getScrollElement: () => parentRef.current,
-    estimateSize: () => ROW_HEIGHT,
-    overscan: 10,
-  });
+  const maxBytes = entries[0]?.sizeBytes ?? 0;
 
   return (
     <div className="space-y-4">
@@ -169,30 +145,10 @@ export function TreeExplorer({
         )}
 
         {!loading && !error && entries.length > 0 && (
-          <div
-            ref={parentRef}
-            className={`${heightClass} overflow-y-auto divide-y divide-zinc-800/60`}
-          >
-            <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
-              {virtualizer.getVirtualItems().map((vItem) => {
-                const entry = entries[vItem.index];
-                return (
-                  <div
-                    key={vItem.key}
-                    style={{
-                      position: "absolute",
-                      top: 0,
-                      left: 0,
-                      right: 0,
-                      height: ROW_HEIGHT,
-                      transform: `translateY(${vItem.start}px)`,
-                    }}
-                  >
-                    <EntryRow entry={entry} maxBytes={maxBytes} onEnter={handleEnter} />
-                  </div>
-                );
-              })}
-            </div>
+          <div className="divide-y divide-zinc-800/60">
+            {entries.map((entry) => (
+              <EntryRow key={entry.path} entry={entry} maxBytes={maxBytes} onEnter={(e) => load(e.id)} />
+            ))}
           </div>
         )}
       </div>

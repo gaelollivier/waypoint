@@ -37,11 +37,11 @@ Detect at start of every copy job + via a UI button. The "cleanup" action MOVES 
 These weren't blockers for design alignment but will need decisions during build:
 
 - **`*_items` retention policy**: how long to keep `copy_items` / `verify_items` rows after a job completes. Default for now is "keep indefinitely"; revisit if storage matters.
-- **Backup job pre-flight UI**: how the user reviews the diff tree before kicking off the copy phase, and how excludes are edited at that moment.
+- **Backup job pre-flight UI**: resolved — manual orchestration for now (scan → scan → diff → copy as separate user actions). Composite job in M11.
 - **Resume re-verification semantics**: when resuming a copy after a long pause, do we re-stat/re-hash files in the persisted plan, or trust them? Per-file logic on encounter is the current direction (see `decisions.md` → Concurrency / locking → Resume robustness).
-- **Disk polling cadence**: how often to poll `df` for connect/disconnect events. Likely 2-5s.
+- **Disk polling cadence**: resolved — 5s (2026-05-08).
 - **Schema migration tooling**: pick a lightweight pattern. fit's `PRAGMA user_version` + structured upgrade scripts is the reference.
-- **Frontend state management**: React + Vite chosen, but no opinion yet on Zustand / Jotai / React Query / etc. Decide when the first real cross-component state appears.
+- **Frontend state management**: resolved — React Query adopted, all pages migrated (2026-05-08).
 
 ---
 
@@ -105,6 +105,37 @@ First UI-driven test scan run on the source SSD. Surfaced the following items, c
 - `lib/useLiveJob.ts` — SSE stream + 1Hz tick + optional event polling. Sources job data from React Query cache.
 - `components/TreeExplorer.tsx` — virtualized tree explorer, reachable only through the disk detail Tree tab.
 - `lib/format.ts` — shared formatting (bytes, rates, durations, dates).
+
+### M9 Diff — design locked 2026-05-09
+
+**Flow (manual orchestration, no composite job yet):**
+1. Scan source disk (existing)
+2. Scan dest disk (existing)
+3. Trigger diff from source disk page → "Diff against…" button → pick dest disk → creates a `diff` job
+4. Browse result in the Diff tab on the source disk page
+5. Trigger copy from the diff view (M10)
+
+Composite backup job (scan→scan→diff→copy as one unit) is deferred to M11.
+
+**Diff is a job (`type='diff'`)**. Not a synchronous query — keeping it a job gives it a status, progress, and consistent model with scan/copy/verify. Source/dest scan job ids stored in `payload_json`. "Latest diff" for a pair = most recent completed diff job for `source_disk_id` + `dest_disk_id`.
+
+**Schema: `diff_entries` + `diff_dirs`** (replaces the old `diff_cache` / `diff_cache_entries` design). See `schema.md` for full field list.
+- `kind` values: `added` / `removed` / `changed` / `present` (cleaner than the old `only_on_source` etc.)
+- `path` = source path normally; dest path for `removed` entries. Always populated.
+- `present` entries ARE stored in `diff_entries` (copy job needs them to know what to skip)
+- `diff_dirs` materialized with the same O(files + dirs) bottom-up rollup as `recomputeAggregates` — never correlated LIKE subqueries
+
+**UI: `DiffExplorer` component** (`apps/web/src/components/DiffExplorer.tsx`). Mockup built and iterated. Key design:
+- Mirrors the existing `TreeExplorer` — same breadcrumb navigation, browse one directory at a time
+- File rows: colored by kind (green=added, yellow=changed, red=removed, grey=present)
+- Directory rows: diff pills (`+1,204/38 GB · ~88/3.2 GB`) + before/after (`87,412/168 GB → 88,704/209.2 GB`)
+- Filter bar: All / Added / Changed / Removed with counts + bytes
+- Header summary: `+N · ~N · −N · → total after copy`
+- New "Diff" tab on `DiskDetailPage` (tabs: Overview / Tree / Diff / Events)
+
+**Excludes**: hardcoded for now. Exclude editor deferred to M14 polish.
+
+**`only_on_dest` (removed)**: shown in the diff tree as red entries. No action taken — safety model means we never delete from dest. Informational only.
 
 ### User collaboration preferences
 

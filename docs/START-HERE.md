@@ -22,7 +22,7 @@ Personal backup tool for cold storage drives. SSD source → multiple HDDs (one 
 
 ## Status
 
-**Implementation in progress.** Design phase complete; milestones 1–8 done, UI improvements session 2026-05-08 (React Query, speed charts, disk-scoped events, merge-on-overflow speed buffer). See `open-questions.md` for details.
+**Implementation in progress.** Design phase complete; milestones 1–8 done. UI improvements session 2026-05-08 (React Query, speed charts, disk-scoped events, merge-on-overflow speed buffer). M9 diff design locked 2026-05-09 — ready to implement. See `open-questions.md` for details.
 
 **Stack**: TypeScript + Bun, Hono (HTTP), React + Vite (UI), `bun:sqlite`, BLAKE3, SSE for progress.
 
@@ -46,7 +46,7 @@ Personal backup tool for cold storage drives. SSD source → multiple HDDs (one 
 | 6 | Scan job — resumable walk queue, BLAKE3 sampled hash, batched writes | ✅ Done |
 | 7 | Web UI shell (disk list, job list, live SSE progress) | ✅ Done |
 | 8 | Tree view (virtualized disk explorer, materialized aggregates) | ✅ Done |
-| 9 | Diff (source vs. dest comparison, diff_cache) | 🔲 |
+| 9 | Diff (diff job, diff_entries + diff_dirs, DiffExplorer UI — design complete) | 🔲 |
 | 10 | Copy job (temp→rename, dual inline hashing, resume-safe) | 🔲 |
 | 11 | Backup composite (scan→scan→diff→copy pipeline, pause-as-unit) | 🔲 |
 | 12 | Verify job (re-hash files, surface mismatches) | 🔲 |

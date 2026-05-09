@@ -5,11 +5,12 @@ import type { Disk, Job, JobEvent } from "../api/types";
 import { StatusBadge } from "../components/StatusBadge";
 import { JobDetails } from "../components/JobDetails";
 import { TreeExplorer } from "../components/TreeExplorer";
+import { DiffExplorer } from "../components/DiffExplorer";
 import { Link, navigate } from "../components/Router";
 import { useLiveJob } from "../lib/useLiveJob";
 import { formatBytes, formatDate } from "../lib/format";
 
-type Tab = "overview" | "tree" | "events";
+type Tab = "overview" | "tree" | "diff" | "events";
 
 const ACTIVE = ["queued", "running", "paused"];
 
@@ -60,7 +61,7 @@ export function DiskDetailPage({ id }: { id: string }) {
       <DiskHeader disk={disk} onScan={() => scan.mutate()} hasActiveJob={activeJob != null} />
 
       <div className="flex gap-1 border-b border-zinc-800">
-        {(["overview", "tree", "events"] as Tab[]).map((t) => (
+        {(["overview", "tree", "diff", "events"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -88,6 +89,8 @@ export function DiskDetailPage({ id }: { id: string }) {
           </div>
         )
       )}
+
+      {tab === "diff" && <DiffExplorer />}
 
       {tab === "events" && <EventsTab diskId={diskId} jobs={jobs} />}
     </div>

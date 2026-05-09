@@ -160,29 +160,47 @@ Indices: `(job_id, timestamp)`, `(job_id, category)`.
 
 ---
 
-### `diff_cache`
-Cached diff results between two scans. Cheap to compute, but a 100K-row tree view shouldn't recompute on every UI render. Also serves as the input to the copy phase of a backup composite.
+### `diff_entries`
+Per-file diff results for a diff job. The diff job row in `jobs` (`type='diff'`) carries `source_disk_id`, `dest_disk_id`, and the source/dest scan job ids in `payload_json`. "Latest valid diff" for a source↔dest pair = most recent completed diff job for those two disks.
 
 | Field | Notes |
 |---|---|
 | `id` | PK |
-| `source_disk_id` / `source_scan_id` | The scan we diffed from |
-| `dest_disk_id` / `dest_scan_id` | The scan we diffed against |
-| `computed_at` | |
-| `status` | `valid` / `superseded` (invalidated when an underlying scan is replaced) |
+| `diff_job_id` | FK to `jobs.id` |
+| `source_file_id` | FK to `files.id`. Nullable for `removed` entries (file only exists on dest). |
+| `dest_file_id` | FK to `files.id`. Nullable for `added` entries (file only exists on source). |
+| `kind` | `added` / `removed` / `changed` / `present` |
+| `path` | Source path normally; dest path for `removed` entries. Always populated. |
+| `size_bytes` | Source size normally; dest size for `removed` entries. |
 
-Plus a child table `diff_cache_entries`:
+Indices: `(diff_job_id, kind)`, `(diff_job_id, path)`.
+
+`present` entries ARE stored — the copy job needs to know exactly which files to skip, and the diff UI shows present counts at every directory level.
+
+---
+
+### `diff_dirs`
+Materialized directory aggregates for a diff job. Same O(files + dirs) bottom-up rollup algorithm as `recomputeAggregates` in the scan job — do NOT use correlated LIKE subqueries (see `open-questions.md` → recomputeAggregates freeze).
+
+Algorithm:
+1. `SELECT parent_path, kind, COUNT(*), SUM(size_bytes) FROM diff_entries GROUP BY parent_path, kind` for direct-child totals per directory.
+2. Load `(id, parent_id)` for all dirs; sort deepest-first; accumulate into parents in JS.
+3. Write back in one transaction, yielding every 500 rows.
 
 | Field | Notes |
 |---|---|
-| `diff_cache_id` | FK |
-| `source_file_id` | Nullable (only-on-dest case) |
-| `dest_file_id` | Nullable (only-on-source case) |
-| `kind` | `only_on_source` / `only_on_dest` / `differing_content` / `present_both` |
-| `path` | The path that differs |
-| `size_bytes` | For aggregations |
+| `id` | PK |
+| `diff_job_id` | FK to `jobs.id` |
+| `parent_id` | FK to `diff_dirs.id`. Nullable for root. |
+| `path` | Full directory path |
+| `added_count` / `added_bytes` | |
+| `changed_count` / `changed_bytes` | |
+| `removed_count` / `removed_bytes` | |
+| `present_count` / `present_bytes` | |
 
-Indices: `(diff_cache_id, kind)`.
+Indices: `UNIQUE (diff_job_id, path)`, `(diff_job_id, parent_id)`.
+
+**API shape** (`GET /api/disks/:id/diff?destDiskId=X&parentPath=Y`): returns the `diff_dirs` children + `diff_entries` file rows for a given directory level — mirrors the tree API exactly. Frontend `DiffExplorer` component consumes this.
 
 ---
 
