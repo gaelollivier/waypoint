@@ -132,7 +132,9 @@ export class DiffJobRunner extends JobRunner {
 
       if (!df) {
         entries.push({ sourceFileId: sf.id, destFileId: null, kind: "added", path: rel, sizeBytes: sf.size_bytes });
-      } else if (sf.sampled_hash && df.sampled_hash && sf.sampled_hash !== df.sampled_hash) {
+      } else if (!sf.sampled_hash || !df.sampled_hash || sf.sampled_hash !== df.sampled_hash) {
+        // Treat a NULL hash on either side as changed — unknown hash means "needs copy".
+        // This is conservative: we never silently skip a file just because we couldn't hash it.
         entries.push({ sourceFileId: sf.id, destFileId: df.id, kind: "changed", path: rel, sizeBytes: sf.size_bytes });
       } else {
         entries.push({ sourceFileId: sf.id, destFileId: df.id, kind: "present", path: rel, sizeBytes: sf.size_bytes });
@@ -194,7 +196,14 @@ export class DiffJobRunner extends JobRunner {
     this.db.transaction(() => {
       for (const dp of sortedDirPaths) {
         const parentPath = dp === "/" ? null : path.dirname(dp);
-        const parentId = parentPath ? (dirIdByPath.get(parentPath) ?? null) : null;
+        let parentId: number | null = null;
+        if (parentPath !== null) {
+          const found = dirIdByPath.get(parentPath);
+          // Invariant: dirs are inserted shallowest-first, so the parent must
+          // already be in the map by the time we process a child.
+          if (found === undefined) throw new Error(`diff_dirs invariant violated: parent path "${parentPath}" not in dirIdByPath`);
+          parentId = found;
+        }
         const row = insertDirStmt.get(this.jobId, parentId, dp) as { id: number };
         dirIdByPath.set(dp, row.id);
       }
@@ -218,7 +227,10 @@ export class DiffJobRunner extends JobRunner {
         for (const e of batch) {
           let dirPath = path.dirname(e.path);
           if (dirPath === "." || dirPath === "") dirPath = "/";
-          const diffDirId = dirIdByPath.get(dirPath) ?? null;
+          // Invariant: every parent path was added to dirPathSet in step 5, so
+          // dirIdByPath must contain an entry for every entry's parent dir.
+          const diffDirId = dirIdByPath.get(dirPath);
+          if (diffDirId === undefined) throw new Error(`diff_entries invariant violated: dirPath "${dirPath}" not in dirIdByPath`);
           insertEntryStmt.run(
             this.jobId, diffDirId, e.sourceFileId, e.destFileId, e.kind, e.path, e.sizeBytes
           );

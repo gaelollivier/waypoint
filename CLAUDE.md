@@ -44,3 +44,32 @@ A reviewer never has to grep the whole codebase to understand disk exposure.
 - `apps/api/src/__tests__/**` — test setup/teardown may use `fs` directly.
 - `apps/api/src/db/client.ts` — SQLite database file is opened via `bun:sqlite`, not `fs`.
 - `apps/web/` — frontend has no filesystem access.
+
+---
+
+## RULE: Fail fast — hard-assert internal invariants, never swallow them
+
+When an internal invariant is violated (a code path that "cannot happen" if the
+program is correct), **throw immediately with a descriptive error**. Do not:
+
+- Use `?? fallback` to silently paper over a missing value that should always be present.
+- Use `continue` / `return` to skip an item that should always exist.
+- Log a warning and carry on, producing silently incorrect results downstream.
+
+**Why:** Silent invariant failures produce wrong output (e.g. files missing from
+a diff, aggregates off by thousands of bytes) with no indication anything went
+wrong. A thrown error surfaces the bug immediately and prevents data-loss
+decisions from being made on corrupted state.
+
+**How to apply:**
+
+- If a `Map.get()` or DB query result must be non-null at that point in the
+  code, assert it: `if (value === undefined) throw new Error("invariant: ...")`.
+- Reserve `?? fallback` for **genuine optionals** — values that are legitimately
+  absent in normal operation (e.g. a nullable FK that is expected to sometimes
+  be null).
+- Reserve `catch`-and-continue for **external I/O errors** (permission denied,
+  disk missing) where partial progress is better than aborting the whole job.
+  Internal logic errors are not in this category.
+- Add a short comment explaining *why* a value is guaranteed to be present, so
+  the next reader understands the invariant and doesn't defensively weaken it.

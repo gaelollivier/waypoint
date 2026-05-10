@@ -14,7 +14,7 @@
  */
 
 import { appendFileSync } from "fs";
-import { mkdir } from "fs/promises";
+import { open } from "fs/promises";
 import path from "path";
 
 const DISK_ID_FILENAME = ".waypoint-disk-id";
@@ -35,8 +35,9 @@ const DISK_ID_FILENAME = ".waypoint-disk-id";
  * Guardrails:
  *   - The destination path is always constructed as `<mountPath>/.waypoint-disk-id`.
  *     The caller cannot redirect this write to any other filename.
- *   - Throws if the file already exists. The UUID is assigned exactly once.
- *     Overwriting it would orphan all history recorded against the old UUID.
+ *   - Uses O_CREAT | O_EXCL (open flag 'wx') for atomic exclusive creation.
+ *     The kernel guarantees the file is created exactly once — no TOCTOU race.
+ *     Throws EEXIST if the file already exists.
  */
 export async function writeDiskIdDotfile(
   mountPath: string,
@@ -52,14 +53,24 @@ export async function writeDiskIdDotfile(
     );
   }
 
-  // Never overwrite an existing disk ID.
-  if (await Bun.file(dotfilePath).exists()) {
-    throw new Error(
-      `writeDiskIdDotfile: ${DISK_ID_FILENAME} already exists at ${mountPath} — use readDiskId() to read it`
-    );
+  // Atomic exclusive create: the kernel enforces exactly-once semantics.
+  // 'wx' = O_WRONLY | O_CREAT | O_EXCL — throws EEXIST if file already exists.
+  let fh;
+  try {
+    fh = await open(dotfilePath, "wx");
+  } catch (err: any) {
+    if (err.code === "EEXIST") {
+      throw new Error(
+        `writeDiskIdDotfile: ${DISK_ID_FILENAME} already exists at ${mountPath} — use readDiskId() to read it`
+      );
+    }
+    throw err;
   }
-
-  await Bun.write(dotfilePath, uuid + "\n");
+  try {
+    await fh.writeFile(uuid + "\n");
+  } finally {
+    await fh.close();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -72,12 +83,13 @@ export async function writeDiskIdDotfile(
  * Guardrails:
  *   - Silently refuses to write to any path outside /tmp/. A misconfigured
  *     WAYPOINT_TRACE_PATH can never redirect trace output to a backup disk.
+ *     Uses path.resolve() before the prefix check to neutralise `..` traversal.
  *   - Swallows all write errors — diagnostic logging must never crash the API.
  *
  * Must never be used for data that matters or backup state.
  */
 export function appendToTmpLog(filePath: string, line: string): void {
-  if (!filePath.startsWith("/tmp/")) {
+  if (!path.resolve(filePath).startsWith("/tmp/")) {
     // Silently refuse — wrong path is a misconfiguration, not a crash-worthy error.
     return;
   }
@@ -89,18 +101,9 @@ export function appendToTmpLog(filePath: string, line: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// Directory creation (copy job)
+// NOTE: createDirectory (for the copy job) is intentionally absent.
+//
+// It will be added here when the copy job is implemented, with an explicit
+// guardrail that validates the destination path is within the target disk's
+// mount point before calling mkdir. Do NOT add a version without that guard.
 // ---------------------------------------------------------------------------
-
-/**
- * WRITE: Creates a directory and any missing parents.
- *
- * Used by the copy job to recreate the source directory structure on the
- * backup disk before files are written into it.
- *
- * The copy job is responsible for constructing and validating the destination
- * path before calling this.
- */
-export async function createDirectory(dirPath: string): Promise<void> {
-  await mkdir(dirPath, { recursive: true });
-}

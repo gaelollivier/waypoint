@@ -5,10 +5,6 @@ import { computeSampledHash, HASH_ALGO_VERSION } from "./hasher";
 import type { JobManager } from "../job-manager";
 import { trace } from "../../diag/trace";
 
-// SF_DATALESS flag — macOS iCloud stub files that haven't been downloaded.
-// Reading them would trigger a network fetch. Detect and skip.
-const SF_DATALESS = 0x40000000;
-
 // How many files to stat+hash in parallel within a single directory.
 //
 // Hashing is BLAKE3 in pure JS (sync CPU). With concurrency too high, all
@@ -242,7 +238,6 @@ async function upsertFileBatch(
     sizeBytes: number;
     mtime: string;
     sampledHash: string | null;
-    skipped: boolean;
   };
   const fileData: FileRecord[] = [];
 
@@ -250,20 +245,6 @@ async function upsertFileBatch(
     const filePath = path.join(dirPath, entry.name);
     try {
       const stat = await statFile(filePath);
-
-      // iCloud dataless stub — skip to avoid triggering a download
-      if (stat.flags !== undefined && (stat.flags & SF_DATALESS) !== 0) {
-        jobManager.logEvent(
-          scanJobId,
-          "warning",
-          "excluded",
-          `iCloud dataless file skipped: ${filePath}`,
-          { path: filePath }
-        );
-        fileData.push({ name: entry.name, filePath, sizeBytes: 0, mtime: "", sampledHash: null, skipped: true });
-        return;
-      }
-
       const mtime = stat.mtime.toISOString();
       const sizeBytes = stat.size;
       const existing = existingMap.get(entry.name);
@@ -276,7 +257,7 @@ async function upsertFileBatch(
         sampledHash = await computeSampledHash(filePath, sizeBytes);
       }
 
-      fileData.push({ name: entry.name, filePath, sizeBytes, mtime, sampledHash, skipped: false });
+      fileData.push({ name: entry.name, filePath, sizeBytes, mtime, sampledHash });
     } catch (err: any) {
       jobManager.logEvent(
         scanJobId,
@@ -329,7 +310,6 @@ async function upsertFileBatch(
          last_scan_id      = excluded.last_scan_id`
     );
     for (const f of fileData) {
-      if (f.skipped) continue;
       upsertStmt.run(
         diskId,
         directoryId,
@@ -409,7 +389,9 @@ export async function recomputeAggregates(db: Database, diskId: number): Promise
   }
   for (const r of directRows) {
     const a = acc.get(r.id);
-    if (!a) continue; // file pointing to a missing directory — defensive
+    // Invariant: every directory_id in `files` must have a row in `directories`
+    // (enforced by FK). If this fires, the DB is corrupt.
+    if (!a) throw new Error(`aggregates invariant violated: directory id ${r.id} in files but not in directories`);
     a.directN = r.direct_n;
     a.directB = r.direct_b;
     a.totalN = r.direct_n;

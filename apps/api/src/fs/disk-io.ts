@@ -29,11 +29,6 @@ export interface FileStat {
   mtime: Date;
   /** File size in bytes. */
   size: number;
-  /**
-   * macOS BSD flags (e.g. SF_DATALESS = 0x40000000 for iCloud stub files).
-   * Undefined on non-macOS or when the flag field isn't available.
-   */
-  flags?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -132,14 +127,13 @@ export function listDirSync(dirPath: string): string[] {
 // ---------------------------------------------------------------------------
 
 /**
- * Stats a file and returns its mtime, size, and optional macOS BSD flags.
+ * Stats a file and returns its mtime and size.
  */
 export async function statFile(filePath: string): Promise<FileStat> {
   const stat = await Bun.file(filePath).stat();
   return {
     mtime: new Date(stat.mtime),
     size: stat.size,
-    flags: (stat as any).flags,
   };
 }
 
