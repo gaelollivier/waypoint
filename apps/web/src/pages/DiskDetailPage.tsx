@@ -1,16 +1,17 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
-import type { Disk, DiffJobSummary, Job, JobEvent } from "../api/types";
+import type { Disk, DiffJobSummary, DuplicateJobSummary, Job, JobEvent } from "../api/types";
 import { StatusBadge } from "../components/StatusBadge";
 import { JobDetails } from "../components/JobDetails";
 import { TreeExplorer } from "../components/TreeExplorer";
 import { DiffExplorer } from "../components/DiffExplorer";
+import { DuplicateExplorer } from "../components/DuplicateExplorer";
 import { Link, navigate } from "../components/Router";
 import { useLiveJob } from "../lib/useLiveJob";
 import { formatBytes, formatDate } from "../lib/format";
 
-type Tab = "overview" | "tree" | "diff" | "events";
+type Tab = "overview" | "tree" | "diff" | "duplicates" | "events";
 
 const ACTIVE = ["queued", "running", "paused"];
 
@@ -61,7 +62,7 @@ export function DiskDetailPage({ id }: { id: string }) {
       <DiskHeader disk={disk} onScan={() => scan.mutate()} hasActiveJob={activeJob != null} />
 
       <div className="flex gap-1 border-b border-zinc-800">
-        {(["overview", "tree", "diff", "events"] as Tab[]).map((t) => (
+        {(["overview", "tree", "diff", "duplicates", "events"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -91,6 +92,8 @@ export function DiskDetailPage({ id }: { id: string }) {
       )}
 
       {tab === "diff" && <DiffTab sourceDiskId={diskId} sourceDisk={disk} />}
+
+      {tab === "duplicates" && <DuplicatesTab diskId={diskId} disk={disk} />}
 
       {tab === "events" && <EventsTab diskId={diskId} jobs={jobs} />}
     </div>
@@ -419,6 +422,100 @@ function DiffTab({ sourceDiskId, sourceDisk }: { sourceDiskId: number; sourceDis
       {selectedDestId && !latestCompletedDiff && !activeDiff && sourceDisk.lastScanAt && (
         <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-8 text-center text-sm text-zinc-500">
           No diff results yet. Click "Run Diff" to compare with the selected destination disk.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Duplicates tab ────────────────────────────────────────────────────────────
+
+function DuplicatesTab({ diskId, disk }: { diskId: number; disk: Disk }) {
+  const queryClient = useQueryClient();
+  const [pendingJobId, setPendingJobId] = useState<number | null>(null);
+
+  const { data: duplicateJobs = [], refetch: refetchDuplicateJobs } = useQuery<DuplicateJobSummary[]>({
+    queryKey: ["duplicateJobs", diskId],
+    queryFn: () => api.duplicates.jobs(diskId),
+    refetchInterval: pendingJobId ? 2_000 : false,
+  });
+
+  const latestCompleted = duplicateJobs.find((j) => j.status === "completed") ?? null;
+  const activeJob = duplicateJobs.find((j) =>
+    j.status === "running" || j.status === "queued" || j.status === "paused"
+  ) ?? null;
+
+  // Stop polling once the active job disappears
+  if (pendingJobId && !activeJob) {
+    setPendingJobId(null);
+    refetchDuplicateJobs();
+  }
+
+  const startDetection = useMutation({
+    mutationFn: () => api.duplicates.start(diskId),
+    onSuccess: (res) => {
+      setPendingJobId(res.jobId);
+      queryClient.invalidateQueries({ queryKey: ["duplicateJobs", diskId] });
+    },
+    onError: (err: any) => alert(`Failed to start: ${err.message}`),
+  });
+
+  const canStart = !activeJob && disk.lastScanAt != null && !startDetection.isPending;
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center gap-3 flex-wrap">
+        <button
+          disabled={!canStart}
+          onClick={() => startDetection.mutate()}
+          className="rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {activeJob ? "Running…" : "Run Duplicate Detection"}
+        </button>
+
+        {activeJob && (
+          <span className="text-xs text-zinc-500">
+            Job #{activeJob.id} — {activeJob.status}…
+          </span>
+        )}
+      </div>
+
+      {/* No scan yet */}
+      {!disk.lastScanAt && (
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-6 text-sm text-yellow-400">
+          This disk hasn't been scanned yet. Run a scan first.
+        </div>
+      )}
+
+      {/* Running, no results yet */}
+      {disk.lastScanAt && activeJob && !latestCompleted && (
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-8 text-center text-sm text-zinc-500">
+          Duplicate detection job #{activeJob.id} is running — results will appear here when it completes.
+        </div>
+      )}
+
+      {/* No results, not running */}
+      {disk.lastScanAt && !latestCompleted && !activeJob && (
+        <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-8 text-center text-sm text-zinc-500">
+          No duplicate detection results yet. Click "Run Duplicate Detection" to scan this disk.
+        </div>
+      )}
+
+      {/* Results */}
+      {latestCompleted && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between text-xs text-zinc-600">
+            <span>
+              Job #{latestCompleted.id}
+              {latestCompleted.completedAt
+                ? " · " + new Date(latestCompleted.completedAt).toLocaleString()
+                : ""}
+            </span>
+            {activeJob && (
+              <span className="text-zinc-500">Newer job running — refresh when done</span>
+            )}
+          </div>
+          <DuplicateExplorer diskId={diskId} duplicateJobId={latestCompleted.id} />
         </div>
       )}
     </div>

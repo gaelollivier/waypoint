@@ -75,9 +75,40 @@ export interface DiffJobSummary {
   completedAt: string | null;
 }
 
+export interface DuplicateGroupFile {
+  fileId: number;
+  path: string;
+}
+
+export interface DuplicateGroup {
+  id: number;
+  sampledHash: string;
+  fileCount: number;
+  sizeBytes: number;
+  wastedBytes: number;
+  files: DuplicateGroupFile[];
+}
+
+export interface DuplicatesResponse {
+  duplicateJobId: number;
+  diskId: number;
+  totalGroups: number;
+  totalWastedBytes: number;
+  groups: DuplicateGroup[];
+}
+
+export interface DuplicateJobSummary {
+  id: number;
+  status: string;
+  diskId: number;
+  itemsProcessed: number;
+  createdAt: string;
+  completedAt: string | null;
+}
+
 export interface Job {
   id: number;
-  type: "scan" | "copy" | "verify" | "backup" | "diff";
+  type: "scan" | "copy" | "verify" | "backup" | "diff" | "duplicate_detection";
   status: "queued" | "running" | "paused" | "completed" | "failed" | "cancelled";
   phase: string | null;
   parentJobId: number | null;

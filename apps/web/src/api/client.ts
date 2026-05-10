@@ -1,4 +1,4 @@
-import type { Disk, DiffJobSummary, DiffTreeResponse, Job, JobEvent, TreeResponse, Volume } from "./types";
+import type { Disk, DiffJobSummary, DiffTreeResponse, DuplicateJobSummary, DuplicatesResponse, Job, JobEvent, TreeResponse, Volume } from "./types";
 
 const BASE = "/api";
 
@@ -72,6 +72,36 @@ export const api = {
       if (opts?.parentPath) params.set("parentPath", opts.parentPath);
       if (opts?.diffJobId != null) params.set("diffJobId", String(opts.diffJobId));
       return request<DiffTreeResponse>(`/disks/${sourceDiskId}/diff?${params}`);
+    },
+  },
+
+  duplicates: {
+    start: (diskId: number) =>
+      request<{ jobId: number }>(`/disks/${diskId}/duplicates`, { method: "POST" }),
+
+    jobs: (diskId: number) =>
+      request<DuplicateJobSummary[]>(`/disks/${diskId}/duplicates/jobs`),
+
+    list: (
+      diskId: number,
+      opts?: {
+        duplicateJobId?: number;
+        sort?: "wasted" | "total_size" | "file_count" | "size";
+        minSize?: number;
+        minCopies?: number;
+        limit?: number;
+        offset?: number;
+      }
+    ): Promise<DuplicatesResponse> => {
+      const params = new URLSearchParams();
+      if (opts?.duplicateJobId != null) params.set("duplicateJobId", String(opts.duplicateJobId));
+      if (opts?.sort) params.set("sort", opts.sort);
+      if (opts?.minSize != null) params.set("minSize", String(opts.minSize));
+      if (opts?.minCopies != null) params.set("minCopies", String(opts.minCopies));
+      if (opts?.limit != null) params.set("limit", String(opts.limit));
+      if (opts?.offset != null) params.set("offset", String(opts.offset));
+      const qs = params.toString();
+      return request<DuplicatesResponse>(`/disks/${diskId}/duplicates${qs ? "?" + qs : ""}`);
     },
   },
 

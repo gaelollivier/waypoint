@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 
-export type JobType = "scan" | "copy" | "verify" | "backup" | "diff";
+export type JobType = "scan" | "copy" | "verify" | "backup" | "diff" | "duplicate_detection";
 export type JobStatus = "queued" | "running" | "paused" | "completed" | "failed" | "cancelled";
 export type JobEventLevel = "info" | "warning" | "error";
 
