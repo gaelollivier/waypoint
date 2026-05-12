@@ -1,7 +1,8 @@
 import { Hono } from "hono";
 import { getDb } from "../db/client";
 import { ensureDiskId } from "../disks/identity";
-import { detectDiskKind, listAvailableVolumes } from "../disks/detect";
+import { detectDiskKind } from "../disks/detect";
+import { listVolumes } from "../fs/disk-io";
 import { registerDisk, getAllDisks, getDiskById, updateDisk } from "../disks/registry";
 import { getLockManager } from "../locks";
 import { getJobManager, registerRunner, unregisterRunner } from "../jobs";
@@ -10,9 +11,9 @@ import { ScanJobRunner } from "../jobs/scan/scan-job";
 
 export const disksRouter = new Hono();
 
-// List currently mounted volumes (used by the registration UI's volume picker)
+// List mounted volumes available for registration
 disksRouter.get("/volumes", async (c) => {
-  const volumes = await listAvailableVolumes();
+  const volumes = await listVolumes();
   return c.json(volumes);
 });
 

@@ -1,4 +1,4 @@
-import type { Disk, DiffJobSummary, DiffTreeResponse, DuplicateJobSummary, DuplicatesResponse, Job, JobEvent, TreeResponse, Volume } from "./types";
+import type { Disk, DiffJobSummary, DiffTreeResponse, DuplicateJobSummary, DuplicatesResponse, Job, JobEvent, TreeResponse } from "./types";
 
 const BASE = "/api";
 
@@ -20,7 +20,7 @@ export const api = {
 
     get: (id: number) => request<Disk>(`/disks/${id}`),
 
-    volumes: () => request<Volume[]>("/disks/volumes"),
+    volumes: () => request<Array<{ name: string; mountPath: string; capacityBytes: number | null; freeBytes: number | null }>>("/disks/volumes"),
 
     register: (body: { mountPath: string; label: string }) =>
       request<Disk>("/disks", { method: "POST", body: JSON.stringify(body) }),

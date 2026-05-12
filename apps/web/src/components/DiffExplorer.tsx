@@ -219,6 +219,45 @@ function Breadcrumb({
 }
 
 // ---------------------------------------------------------------------------
+// Summary (top-right, next to breadcrumb)
+// ---------------------------------------------------------------------------
+
+function DiffSummary({ dir }: { dir: DiffTreeResponse["currentDir"] }) {
+  const prevCount = dir.presentCount + dir.removedCount + dir.changedCount;
+  const prevBytes = dir.presentBytes + dir.removedBytes + dir.changedBytes;
+  const newCount  = dir.presentCount + dir.addedCount   + dir.changedCount;
+  const newBytes  = dir.presentBytes + dir.addedBytes   + dir.changedBytes;
+
+  return (
+    <div className="flex items-center gap-3 text-xs font-mono shrink-0 leading-relaxed">
+      {dir.addedCount > 0 && (
+        <span className="text-green-400">+{dir.addedCount.toLocaleString()}</span>
+      )}
+      {dir.changedCount > 0 && (
+        <span className="text-yellow-400">~{dir.changedCount.toLocaleString()}</span>
+      )}
+      {dir.removedCount > 0 && (
+        <span className="text-red-400">−{dir.removedCount.toLocaleString()}</span>
+      )}
+      <span className="text-zinc-700">·</span>
+      <span>
+        <span className="text-zinc-500">
+          {prevCount.toLocaleString()}
+          <span className="text-zinc-700">/</span>
+          {formatBytes(prevBytes)}
+        </span>
+        <span className="text-zinc-700"> → </span>
+        <span className="text-zinc-300">
+          {newCount.toLocaleString()}
+          <span className="text-zinc-700">/</span>
+          {formatBytes(newBytes)}
+        </span>
+      </span>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // DiffExplorer — real data via React Query
 // ---------------------------------------------------------------------------
 
@@ -277,15 +316,7 @@ export function DiffExplorer({
     <div className="space-y-4">
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <Breadcrumb crumbs={page.breadcrumb} onNavigate={navigate} />
-        <div className="flex items-center gap-3 text-xs shrink-0">
-          <span className="text-green-400">+{page.totalAdded.toLocaleString()}</span>
-          <span className="text-yellow-400">~{page.totalChanged.toLocaleString()}</span>
-          <span className="text-red-400">−{page.totalRemoved.toLocaleString()}</span>
-          <span className="text-zinc-600">·</span>
-          <span className="text-zinc-400">
-            → {formatBytes(page.totalPresentBytes + page.totalAddedBytes + page.totalChangedBytes)}
-          </span>
-        </div>
+        <DiffSummary dir={page.currentDir} />
       </div>
 
       <FilterBar filter={filter} onChange={setFilter} page={page} />

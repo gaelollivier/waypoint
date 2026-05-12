@@ -1,7 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
-import type { Volume } from "../api/types";
 import { navigate } from "../components/Router";
 import { formatBytes, formatDate } from "../lib/format";
 
@@ -56,23 +55,21 @@ function DiskCard({ disk }: { disk: import("../api/types").Disk }) {
 
 function RegisterModal({ onClose }: { onClose: () => void }) {
   const queryClient = useQueryClient();
-  const [selected, setSelected] = useState<Volume | null>(null);
+  const [selectedPath, setSelectedPath] = useState("");
   const [label, setLabel] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  const { data: volumes } = useQuery<Volume[]>({
+  const { data: volumes = [], isLoading: loadingVolumes } = useQuery({
     queryKey: ["volumes"],
     queryFn: api.disks.volumes,
   });
 
-  useEffect(() => {
-    if (!volumes) return;
-    const first = volumes.find((v) => !v.isWaypointDisk);
-    if (first && !selected) {
-      setSelected(first);
-      setLabel(first.name);
-    }
-  }, [volumes]);
+  const handleVolumeChange = (mountPath: string) => {
+    setSelectedPath(mountPath);
+    // Pre-fill label from the volume name
+    const vol = volumes.find((v) => v.mountPath === mountPath);
+    if (vol && !label) setLabel(vol.name);
+  };
 
   const register = useMutation({
     mutationFn: ({ mountPath, label }: { mountPath: string; label: string }) =>
@@ -86,9 +83,9 @@ function RegisterModal({ onClose }: { onClose: () => void }) {
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selected) return;
+    if (!selectedPath) return;
     setError(null);
-    register.mutate({ mountPath: selected.mountPath, label });
+    register.mutate({ mountPath: selectedPath, label });
   };
 
   return (
@@ -100,47 +97,32 @@ function RegisterModal({ onClose }: { onClose: () => void }) {
       >
         <h2 className="text-base font-semibold text-white">Register a disk</h2>
 
-        <div className="space-y-1">
-          <p className="text-xs text-zinc-400">Volume</p>
-          {!volumes ? (
-            <p className="text-xs text-zinc-500">Loading volumes…</p>
+        <label className="block space-y-1">
+          <span className="text-xs text-zinc-400">Volume</span>
+          {loadingVolumes ? (
+            <p className="text-sm text-zinc-500 py-2">Loading volumes…</p>
           ) : volumes.length === 0 ? (
-            <p className="text-xs text-zinc-500">No volumes mounted under <code>/Volumes</code>.</p>
+            <p className="text-sm text-zinc-500 py-2">No external volumes found.</p>
           ) : (
-            <div className="space-y-1 max-h-64 overflow-y-auto rounded border border-zinc-800">
-              {(volumes ?? []).map((v: Volume) => {
-                const isSelected = selected?.mountPath === v.mountPath;
-                return (
-                  <button
-                    type="button"
-                    key={v.mountPath}
-                    disabled={v.isWaypointDisk}
-                    onClick={() => {
-                      setSelected(v);
-                      if (!label) setLabel(v.name);
-                    }}
-                    className={`w-full flex items-center justify-between gap-3 px-3 py-2 text-left text-sm transition-colors ${
-                      v.isWaypointDisk
-                        ? "opacity-40 cursor-not-allowed"
-                        : isSelected
-                          ? "bg-blue-900/40 text-white"
-                          : "hover:bg-zinc-800 text-zinc-300"
-                    }`}
-                  >
-                    <div className="min-w-0">
-                      <div className="truncate font-medium">{v.name}</div>
-                      <div className="font-mono text-xs text-zinc-500 truncate">{v.mountPath}</div>
-                    </div>
-                    <div className="text-xs text-zinc-500 shrink-0 text-right">
-                      {v.capacityBytes != null && <div>{formatBytes(v.capacityBytes)}</div>}
-                      {v.isWaypointDisk && <div className="text-zinc-600">already registered</div>}
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
+            <select
+              value={selectedPath}
+              onChange={(e) => handleVolumeChange(e.target.value)}
+              className="w-full rounded bg-zinc-800 border border-zinc-700 px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+            >
+              <option value="">— select a volume —</option>
+              {volumes.map((v) => (
+                <option key={v.mountPath} value={v.mountPath}>
+                  {v.name}
+                  {v.capacityBytes != null ? ` (${formatBytes(v.capacityBytes)})` : ""}
+                </option>
+              ))}
+            </select>
           )}
-        </div>
+        </label>
+
+        {selectedPath && (
+          <div className="text-xs text-zinc-500 font-mono truncate">{selectedPath}</div>
+        )}
 
         <label className="block space-y-1">
           <span className="text-xs text-zinc-400">Label</span>
@@ -165,7 +147,7 @@ function RegisterModal({ onClose }: { onClose: () => void }) {
           </button>
           <button
             type="submit"
-            disabled={register.isPending || !selected || !label}
+            disabled={register.isPending || !selectedPath || !label}
             className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50 transition-colors"
           >
             {register.isPending ? "Registering…" : "Register"}

@@ -169,8 +169,12 @@ function buildBreadcrumb(
     current = row.parent_id;
   }
 
-  // Prepend disk root crumb
-  crumbs.unshift({ id: null, name: diskLabel ?? "Disk", path: "" });
+  // The root directory (parent_id IS NULL) represents the disk itself.
+  // Use the disk label as its display name so the breadcrumb reads
+  // "MyDisk / Photos / …" instead of "MyDisk / MyDisk / …".
+  if (crumbs.length > 0 && crumbs[0].id !== null) {
+    crumbs[0].name = diskLabel ?? crumbs[0].name;
+  }
 
   return crumbs;
 }

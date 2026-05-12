@@ -22,13 +22,13 @@ Personal backup tool for cold storage drives. SSD source → multiple HDDs (one 
 
 ## Status
 
-**Implementation in progress.** Design phase complete; milestones 1–9 done. M9 implemented 2026-05-09: diff job, diff_entries/diff_dirs schema, DiffExplorer UI, disk picker. See `open-questions.md` for details.
+**Implementation in progress.** Design phase complete; milestones 1–10 done. M10 (duplicate detection) complete. Next up: M11 — copy job. See `open-questions.md` for details.
 
 **Stack**: TypeScript + Bun, Hono (HTTP), React + Vite (UI), `bun:sqlite`, BLAKE3, SSE for progress.
 
 **Scale baseline measured**: ~177K files / ~3.5TB on the source SSD. Standard SQLite indices are sufficient.
 
-**Test suite**: `bun run test` in `apps/api/` — 80 tests across 6 files.
+**Test suite**: `bun test` in `apps/api/` — 102 tests across 8 files. Pre-commit hook runs `tsc --noEmit` (web) + `bun test` (API) on every commit.
 
 **Diagnostic trace**: when `WAYPOINT_TRACE` is unset or non-zero, the API writes JSONL trace lines to `/tmp/waypoint-trace.log` (path overridable via `WAYPOINT_TRACE_PATH`). Includes `loop_stall` events whenever the main event loop blocks >250ms. Used to root-cause the M6 freeze (correlated-LIKE end-of-scan UPDATE, see `open-questions.md`). Set `WAYPOINT_TRACE=0` to disable.
 
@@ -47,13 +47,25 @@ Personal backup tool for cold storage drives. SSD source → multiple HDDs (one 
 | 7 | Web UI shell (disk list, job list, live SSE progress) | ✅ Done |
 | 8 | Tree view (virtualized disk explorer, materialized aggregates) | ✅ Done |
 | 9 | Diff (diff job, diff_entries + diff_dirs, DiffExplorer UI) | ✅ Done |
-| 10 | Copy job (temp→rename, dual inline hashing, resume-safe) | 🔲 |
-| 11 | Backup composite (scan→scan→diff→copy pipeline, pause-as-unit) | 🔲 |
-| 12 | Verify job (re-hash files, surface mismatches) | 🔲 |
-| 13 | Quarantine & cleanup (orphan temp files → .waypoint-quarantine/) | 🔲 |
-| 14 | Polish (ETAs, exclude editor, error review UI, SMART data) | 🔲 |
+| 10 | Duplicate file detection (job, API, UI tab) | ✅ Done |
+| 11 | Copy job (temp→rename, dual inline hashing, resume-safe) | 🔲 Next |
+| 12 | Backup composite (scan→scan→diff→copy pipeline, pause-as-unit) | 🔲 |
+| 13 | Verify job (re-hash files, surface mismatches) | 🔲 |
+| 14 | Quarantine & cleanup (orphan temp files → .waypoint-quarantine/) | 🔲 |
+| 15 | Polish (ETAs, exclude editor, error review UI, SMART data) | 🔲 |
 
 The scan job (M6) is the architectural keystone — if its resumability is wrong, everything else is wrong.
+
+---
+
+## Backlog
+
+Improvements planned but not yet scheduled into a milestone.
+
+| Item | Doc | Notes |
+|---|---|---|
+| Filter macOS noise from duplicate detection | `open-questions.md` | `._*`, `.DS_Store`, `__MACOSX/` files create huge duplicate groups (2051 copies of `._crossfire.lua` on first real run). Add path-pattern filter to the duplicate job so real user duplicates surface first |
+| Scan ETA: switch from bytes/sec to files/sec + inode count | `open-questions.md` | `bytesProcessed` is the sum of stat'd file sizes, not bytes read — a single large file causes a massive rate spike. Scan time is uniform per-inode (stat cost), so `filesPerSec` against `df -i` inode count is a much more stable ETA. Also consider widening the 5s rolling window or using an EMA. |
 
 ---
 

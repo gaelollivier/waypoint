@@ -146,6 +146,7 @@ Acceptable for v1 given the user's hardware (slow HDD where full verify is hours
 
 - **Scans index everything.** Exclusion patterns do NOT apply to scans. We want a true picture of disk usage including `.DS_Store`, `.Trashes`, `node_modules`, etc. The tree view should show the user where their disk space is actually going, including hidden/system noise.
 - **Excludes apply at the copy stage only.** When a backup composite builds its copy set from the diff, exclusion patterns filter out files that should not be backed up (recreatable artifacts, system noise, dev caches).
+- **Excludes are stored in a config file, not the database.** The `disk_excludes` table in the initial schema is deprecated — exclude patterns will be read from a config file instead. Simpler, version-controllable, no migration needed to change patterns.
 - **Permission errors during scan are logged per directory** as non-critical errors, not failures. macOS may deny reads on `.Trashes/<other-uid>/`, restricted system dirs, etc. Index what's readable; surface what's not.
 - **Cost acknowledged**: scanning + sampled-hashing a 100GB `node_modules` is wasted work if it's never copied. Acceptable for v1 — the user wants accurate disk usage. Revisit only if scan times become painful.
 

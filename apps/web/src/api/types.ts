@@ -13,14 +13,6 @@ export interface Disk {
   lastVerifyAt: string | null;
 }
 
-export interface Volume {
-  mountPath: string;
-  name: string;
-  capacityBytes: number | null;
-  freeBytes: number | null;
-  isWaypointDisk: boolean;
-}
-
 export type DiffKind = "added" | "changed" | "removed" | "present";
 
 export interface DiffEntry {
@@ -66,7 +58,7 @@ export interface DiffTreeResponse {
 
 export interface DiffJobSummary {
   id: number;
-  status: string;
+  status: Job["status"];
   sourceDiskId: number;
   destDiskId: number;
   destLabel: string | null;
@@ -99,7 +91,7 @@ export interface DuplicatesResponse {
 
 export interface DuplicateJobSummary {
   id: number;
-  status: string;
+  status: Job["status"];
   diskId: number;
   itemsProcessed: number;
   createdAt: string;

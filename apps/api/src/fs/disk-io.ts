@@ -36,20 +36,6 @@ export interface FileStat {
 // ---------------------------------------------------------------------------
 
 /**
- * Lists the names of volumes mounted under /Volumes on macOS.
- * Skips hidden entries (names starting with '.').
- * Returns [] on any error (e.g. /Volumes not present).
- */
-export async function listVolumes(): Promise<string[]> {
-  try {
-    const entries = await readdir("/Volumes");
-    return entries.filter((name) => !name.startsWith("."));
-  } catch {
-    return [];
-  }
-}
-
-/**
  * Returns the capacity and free bytes for the volume at mountPath.
  * Uses `df -Pk <mountPath>` — the POSIX-standard, 1K-block output.
  * Returns nulls if the path isn't mounted or df fails.
@@ -89,6 +75,45 @@ export async function detectDiskKind(
   } catch {
     return "hdd";
   }
+}
+
+// ---------------------------------------------------------------------------
+// Volume listing
+// ---------------------------------------------------------------------------
+
+export interface VolumeInfo {
+  name: string;
+  mountPath: string;
+  capacityBytes: number | null;
+  freeBytes: number | null;
+}
+
+/**
+ * Lists mounted volumes under /Volumes.
+ * Skips hidden entries and the synthetic "Macintosh HD" root link.
+ * Each volume is enriched with capacity/free via `df`.
+ */
+export async function listVolumes(): Promise<VolumeInfo[]> {
+  const entries = await readdir("/Volumes", { withFileTypes: true });
+  const volumes: VolumeInfo[] = [];
+
+  for (const entry of entries) {
+    // Skip hidden files and the "Macintosh HD" symlink to /
+    if (entry.name.startsWith(".")) continue;
+    const mountPath = `/Volumes/${entry.name}`;
+
+    // Only include directories/symlinks that are actual mount points
+    if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+
+    const stats = getDiskStats(mountPath);
+    volumes.push({
+      name: entry.name,
+      mountPath,
+      ...stats,
+    });
+  }
+
+  return volumes;
 }
 
 // ---------------------------------------------------------------------------

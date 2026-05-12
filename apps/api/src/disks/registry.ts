@@ -73,8 +73,10 @@ export function markDiskConnected(
  * Called by the poller when a disk's UUID is no longer found among mounted volumes.
  */
 export function markDiskDisconnected(db: Database, diskUuid: string): void {
+  // Preserve mount_path — it's needed to relativize stored file paths (e.g.
+  // in diff jobs) even when the disk is offline.
   db.prepare(
-    `UPDATE disks SET is_connected = 0, mount_path = NULL WHERE disk_uuid = ?`
+    `UPDATE disks SET is_connected = 0 WHERE disk_uuid = ?`
   ).run(diskUuid);
 }
 

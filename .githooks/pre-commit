@@ -1,0 +1,11 @@
+#!/bin/sh
+set -e
+
+echo "==> Type-checking web app…"
+apps/web/node_modules/.bin/tsc -p apps/web/tsconfig.json --noEmit
+
+echo "==> Running API tests…"
+cd apps/api && NODE_ENV=test bun test
+cd ..
+
+echo "==> All checks passed."

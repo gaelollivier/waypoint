@@ -426,6 +426,30 @@ describe("DiffJobRunner", () => {
     expect(added[0].path).toBe("/only.txt");
   });
 
+  // ── Bug repro: null mount_path on disconnected disk ─────────────────────
+  // When a disk disconnects, mount_path was set to NULL. The diff job reads
+  // mount_path at diff time — with NULL it can't strip the prefix, so all
+  // relative paths include the full absolute mount and nothing matches.
+
+  it("produces correct results when source disk mount_path was preserved after disconnect", async () => {
+    const src = path.join(TMP_BASE, "disconnect-src");
+    const dst = path.join(TMP_BASE, "disconnect-dst");
+    const files = { "a.txt": "same", "sub/b.txt": "same too" };
+    writeTree(src, files);
+    writeTree(dst, files);
+    await scanDisk(db, jm, sourceDiskId, src);
+    await scanDisk(db, jm, destDiskId, dst);
+
+    // Simulate disconnect: mount_path is preserved (the fix), is_connected = 0
+    db.prepare("UPDATE disks SET is_connected = 0 WHERE id = ?").run(sourceDiskId);
+
+    const diffJobId = await runDiff(db, jm, sourceDiskId, destDiskId);
+    const entries = getEntries(db, diffJobId);
+    // All files should match as 'present', not be misclassified as 'added'
+    expect(entries.length).toBeGreaterThan(0);
+    expect(entries.every((e) => e.kind === "present")).toBe(true);
+  });
+
   it("two diff jobs for the same pair produce independent diff_entries rows", async () => {
     const src = path.join(TMP_BASE, "multi-src");
     const dst = path.join(TMP_BASE, "multi-dst");

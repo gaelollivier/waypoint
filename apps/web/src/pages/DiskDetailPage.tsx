@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useCallback, useSyncExternalStore } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { Disk, DiffJobSummary, DuplicateJobSummary, Job, JobEvent } from "../api/types";
@@ -12,6 +12,7 @@ import { useLiveJob } from "../lib/useLiveJob";
 import { formatBytes, formatDate } from "../lib/format";
 
 type Tab = "overview" | "tree" | "diff" | "duplicates" | "events";
+const VALID_TABS: Tab[] = ["overview", "tree", "diff", "duplicates", "events"];
 
 const ACTIVE = ["queued", "running", "paused"];
 
@@ -21,10 +22,47 @@ const LEVEL_COLORS: Record<JobEvent["level"], string> = {
   error:   "text-red-500",
 };
 
+/** Read a search param from the URL reactively (re-renders on popstate). */
+function useSearchParam(key: string): string | null {
+  const subscribe = useCallback(
+    (cb: () => void) => {
+      window.addEventListener("popstate", cb);
+      return () => window.removeEventListener("popstate", cb);
+    },
+    []
+  );
+  const getSnapshot = useCallback(
+    () => new URLSearchParams(window.location.search).get(key),
+    [key]
+  );
+  return useSyncExternalStore(subscribe, getSnapshot);
+}
+
+/** Update search params without a full navigation — preserves the path. */
+function setSearchParams(updates: Record<string, string | null>) {
+  const params = new URLSearchParams(window.location.search);
+  for (const [k, v] of Object.entries(updates)) {
+    if (v === null) params.delete(k);
+    else params.set(k, v);
+  }
+  const qs = params.toString();
+  const url = window.location.pathname + (qs ? "?" + qs : "");
+  history.pushState(null, "", url);
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
 export function DiskDetailPage({ id }: { id: string }) {
   const diskId = Number(id);
   const queryClient = useQueryClient();
-  const [tab, setTab] = useState<Tab>("overview");
+
+  // Tab state from URL — defaults to "overview"
+  const rawTab = useSearchParam("tab");
+  const tab: Tab = rawTab && VALID_TABS.includes(rawTab as Tab) ? (rawTab as Tab) : "overview";
+  const setTab = (t: Tab) => setSearchParams({ tab: t === "overview" ? null : t });
+
+  // Diff dest disk from URL
+  const rawDest = useSearchParam("dest");
+  const urlDestDiskId = rawDest ? Number(rawDest) : null;
 
   const { data: disk, isLoading: diskLoading } = useQuery<Disk>({
     queryKey: ["disk", diskId],
@@ -91,7 +129,14 @@ export function DiskDetailPage({ id }: { id: string }) {
         )
       )}
 
-      {tab === "diff" && <DiffTab sourceDiskId={diskId} sourceDisk={disk} />}
+      {tab === "diff" && (
+        <DiffTab
+          sourceDiskId={diskId}
+          sourceDisk={disk}
+          selectedDestId={urlDestDiskId}
+          onSelectDest={(destId) => setSearchParams({ dest: destId != null ? String(destId) : null })}
+        />
+      )}
 
       {tab === "duplicates" && <DuplicatesTab diskId={diskId} disk={disk} />}
 
@@ -273,12 +318,18 @@ function OverviewTab({
 
 // ── Diff tab ──────────────────────────────────────────────────────────────────
 
-function DiffTab({ sourceDiskId, sourceDisk }: { sourceDiskId: number; sourceDisk: Disk }) {
+function DiffTab({
+  sourceDiskId,
+  sourceDisk,
+  selectedDestId,
+  onSelectDest,
+}: {
+  sourceDiskId: number;
+  sourceDisk: Disk;
+  selectedDestId: number | null;
+  onSelectDest: (destId: number | null) => void;
+}) {
   const queryClient = useQueryClient();
-  // Which dest disk the user has selected for the current diff view
-  const [selectedDestId, setSelectedDestId] = useState<number | null>(null);
-  // Track the most-recently-started diff job id so we can poll for completion
-  const [pendingJobId, setPendingJobId] = useState<number | null>(null);
 
   // All registered disks (to populate the dest picker)
   const { data: allDisks = [] } = useQuery<Disk[]>({
@@ -293,7 +344,7 @@ function DiffTab({ sourceDiskId, sourceDisk }: { sourceDiskId: number; sourceDis
   const { data: diffJobs = [], refetch: refetchDiffJobs } = useQuery<DiffJobSummary[]>({
     queryKey: ["diffJobs", sourceDiskId],
     queryFn: () => api.diff.jobs(sourceDiskId),
-    refetchInterval: pendingJobId ? 2_000 : false,
+    refetchInterval: 5_000,
   });
 
   // Latest completed diff for the selected dest disk
@@ -310,16 +361,12 @@ function DiffTab({ sourceDiskId, sourceDisk }: { sourceDiskId: number; sourceDis
       )
     : null;
 
-  // Stop polling when no active job remains
-  if (pendingJobId && !activeDiff) {
-    setPendingJobId(null);
-    refetchDiffJobs();
-  }
+  // Live job data for the active diff (SSE-powered progress)
+  const { job: liveJob, now } = useLiveJob(activeDiff?.id ?? null);
 
   const startDiff = useMutation({
     mutationFn: () => api.diff.start(sourceDiskId, selectedDestId!),
-    onSuccess: (res) => {
-      setPendingJobId(res.jobId);
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["diffJobs", sourceDiskId] });
     },
     onError: (err: any) => alert(`Diff failed to start: ${err.message}`),
@@ -342,7 +389,7 @@ function DiffTab({ sourceDiskId, sourceDisk }: { sourceDiskId: number; sourceDis
           <select
             value={selectedDestId ?? ""}
             onChange={(e) => {
-              setSelectedDestId(e.target.value ? Number(e.target.value) : null);
+              onSelectDest(e.target.value ? Number(e.target.value) : null);
             }}
             className="rounded bg-zinc-800 border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 focus:outline-none focus:border-blue-500"
           >
@@ -365,12 +412,6 @@ function DiffTab({ sourceDiskId, sourceDisk }: { sourceDiskId: number; sourceDis
           >
             {activeDiff ? "Running…" : "Run Diff"}
           </button>
-        )}
-
-        {activeDiff && (
-          <span className="text-xs text-zinc-500">
-            Job #{activeDiff.id} — {activeDiff.status}…
-          </span>
         )}
       </div>
 
@@ -395,24 +436,19 @@ function DiffTab({ sourceDiskId, sourceDisk }: { sourceDiskId: number; sourceDis
         </div>
       )}
 
-      {/* Active job progress placeholder */}
-      {selectedDestId && activeDiff && !latestCompletedDiff && (
-        <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-8 text-center text-sm text-zinc-500">
-          Diff job #{activeDiff.id} is running — results will appear here when it completes.
-        </div>
+      {/* Active job progress indicator */}
+      {selectedDestId && activeDiff && (
+        <DiffProgressCard job={liveJob} fallback={activeDiff} now={now} />
       )}
 
       {/* Diff explorer */}
-      {selectedDestId && latestCompletedDiff && (
+      {selectedDestId && latestCompletedDiff && !activeDiff && (
         <div className="space-y-2">
           <div className="flex items-center justify-between text-xs text-zinc-600">
             <span>
               Diff #{latestCompletedDiff.id} ·{" "}
               {latestCompletedDiff.completedAt ? formatDate(latestCompletedDiff.completedAt) : ""}
             </span>
-            {activeDiff && (
-              <span className="text-zinc-500">Newer diff running — refresh when done</span>
-            )}
           </div>
           <DiffExplorer sourceDiskId={sourceDiskId} destDiskId={selectedDestId} />
         </div>
@@ -424,6 +460,57 @@ function DiffTab({ sourceDiskId, sourceDisk }: { sourceDiskId: number; sourceDis
           No diff results yet. Click "Run Diff" to compare with the selected destination disk.
         </div>
       )}
+    </div>
+  );
+}
+
+function DiffProgressCard({
+  job,
+  fallback,
+  now,
+}: {
+  job: Job | null;
+  fallback: DiffJobSummary;
+  now: number;
+}) {
+  const j = job ?? fallback;
+  const items = "itemsProcessed" in j ? j.itemsProcessed : 0;
+  const status = j.status;
+  const startedAt = job?.startedAt ?? null;
+  const elapsed = startedAt ? Math.max(0, Math.round((now - new Date(startedAt).getTime()) / 1000)) : null;
+
+  const fmtElapsed = elapsed != null
+    ? elapsed < 60
+      ? `${elapsed}s`
+      : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`
+    : null;
+
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-5 space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <StatusBadge status={status} />
+          <span className="font-mono text-sm uppercase text-zinc-300">diff</span>
+          <span className="text-xs text-zinc-600">#{fallback.id}</span>
+        </div>
+        {fmtElapsed && (
+          <span className="text-xs text-zinc-500">{fmtElapsed}</span>
+        )}
+      </div>
+
+      {/* Progress bar — indeterminate pulse when no total is known */}
+      <div className="space-y-1.5">
+        <div className="h-1.5 w-full rounded-full bg-zinc-800 overflow-hidden">
+          <div
+            className="h-full rounded-full bg-blue-600 transition-all animate-pulse"
+            style={{ width: "100%" }}
+          />
+        </div>
+        <div className="flex items-center justify-between text-xs text-zinc-500">
+          <span>{items.toLocaleString()} entries compared</span>
+          <span className="capitalize">{status}</span>
+        </div>
+      </div>
     </div>
   );
 }
