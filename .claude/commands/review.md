@@ -91,9 +91,6 @@ Read `apps/api/src/jobs/diff/diff-job.ts`:
 
 Read `apps/api/src/jobs/scan/walker.ts` and `hasher.ts`:
 
-- Are iCloud stub files (`SF_DATALESS`) correctly detected and skipped?
-  A stub file read would trigger a network download and produce a hash of
-  partial data.
 - Could a hashing error leave a file with `sampled_hash = NULL`? If so, would
   the diff job treat it as `changed` (safe) or `present` (dangerous)?
 - Is mtime+size caching safe? If a file is modified between `stat` and `hash`,
@@ -110,6 +107,16 @@ Read `apps/api/src/jobs/scan/walker.ts` and `hasher.ts`:
   writing to the same destination disk simultaneously?
 - **Same-disk diff/copy:** Is diffing or copying a disk against itself detected
   and blocked? Writing back to the source disk would be catastrophic.
+
+## 8. Filter against acknowledged gaps
+
+Before writing the final report, read `docs/decisions.md` § "Acknowledged review
+gaps". Any finding that matches an acknowledged gap should be **silently
+dropped** from the report — do not include it in CRITICAL, WARNING, or INFO.
+
+If a previously-acknowledged gap has gotten **worse** (e.g. new code increases
+the blast radius), report it as a new finding and note that the original gap was
+acknowledged but the situation has changed.
 
 ## Output format
 

@@ -150,6 +150,25 @@ Acceptable for v1 given the user's hardware (slow HDD where full verify is hours
 - **Permission errors during scan are logged per directory** as non-critical errors, not failures. macOS may deny reads on `.Trashes/<other-uid>/`, restricted system dirs, etc. Index what's readable; surface what's not.
 - **Cost acknowledged**: scanning + sampled-hashing a 100GB `node_modules` is wasted work if it's never copied. Acceptable for v1 — the user wants accurate disk usage. Revisit only if scan times become painful.
 
+## Acknowledged review gaps
+
+Known gaps surfaced by `/review` that are accepted as-is. Future reviews should
+not re-report these unless the underlying design changes.
+
+- **iCloud stub file detection (`SF_DATALESS`):** Explicitly won't do. Not a
+  real concern for this use case, and a previous implementation was messy.
+  May reconsider if the need arises.
+- **Orphaned temp file cleanup:** By design for now. Future iterations will add
+  cleanup functionality (move to `.waypoint-quarantine/`).
+- **Sampled hash can miss changes in un-sampled regions:** By design. Documented
+  in the "Risk acknowledgment for sampled verify" section above. Full verify job
+  is the planned mitigation.
+- **Same-disk diff not blocked:** By design. A same-disk diff is read-only and
+  harmless; blocking it is unnecessary complexity.
+- **Copy hash verifies source bytes, not written bytes:** By design for this
+  milestone. The verify job (coming later) is the authoritative on-disk
+  correctness check.
+
 ## Explicit non-goals (v1)
 
 - No encryption.

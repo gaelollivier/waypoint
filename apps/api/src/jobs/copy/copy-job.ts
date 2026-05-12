@@ -575,19 +575,24 @@ export class CopyJobRunner extends JobRunner {
     const destAbsPath = path.join(this.destMountPath, item.dest_path);
     const destStat = await statFile(destAbsPath);
     const fileName = path.basename(item.dest_path);
-    const dirPath = path.dirname(item.dest_path);
+    // The directories table stores absolute paths (set by the scanner), so
+    // convert the relative dir path to absolute for lookups.
+    const dirRelPath = path.dirname(item.dest_path);
+    const dirAbsPath = dirRelPath === "/" || dirRelPath === "."
+      ? this.destMountPath
+      : path.join(this.destMountPath, dirRelPath);
 
     // Find or create directory on dest disk
     const dirRow = this.db
       .prepare("SELECT id FROM directories WHERE disk_id = ? AND path = ?")
-      .get(this.destDiskId, dirPath === "." ? "/" : dirPath) as { id: number } | null;
+      .get(this.destDiskId, dirAbsPath) as { id: number } | null;
 
     // If the directory doesn't exist in our DB yet, create it
     let directoryId: number;
     if (dirRow) {
       directoryId = dirRow.id;
     } else {
-      directoryId = this.ensureDirectoryChain(dirPath);
+      directoryId = this.ensureDirectoryChain(dirRelPath);
     }
 
     // Upsert the file row
@@ -622,6 +627,9 @@ export class CopyJobRunner extends JobRunner {
   /**
    * Ensures the full directory chain exists in the `directories` table for the
    * dest disk. Returns the leaf directory's id.
+   *
+   * The directories table stores absolute paths (set by the scanner), so we
+   * convert each segment to its absolute form for both lookups and inserts.
    */
   private ensureDirectoryChain(relativePath: string): number {
     const segments = relativePath === "/" || relativePath === "."
@@ -629,27 +637,28 @@ export class CopyJobRunner extends JobRunner {
       : ["/" , ...relativePath.split("/").filter(Boolean)];
 
     let parentId: number | null = null;
-    let currentPath = "";
+    let currentRelPath = "";
 
     for (const segment of segments) {
       if (segment === "/") {
-        currentPath = "/";
+        currentRelPath = "/";
       } else {
-        currentPath = currentPath === "/" ? `/${segment}` : `${currentPath}/${segment}`;
+        currentRelPath = currentRelPath === "/" ? `/${segment}` : `${currentRelPath}/${segment}`;
       }
+
+      // The scanner stores absolute paths, so convert for DB lookups/inserts
+      const absPath = currentRelPath === "/"
+        ? this.destMountPath
+        : path.join(this.destMountPath, currentRelPath);
 
       const existing = this.db
         .prepare("SELECT id FROM directories WHERE disk_id = ? AND path = ?")
-        .get(this.destDiskId, currentPath) as { id: number } | null;
+        .get(this.destDiskId, absPath) as { id: number } | null;
 
       if (existing) {
         parentId = existing.id;
         continue;
       }
-
-      const absPath = currentPath === "/"
-        ? this.destMountPath
-        : path.join(this.destMountPath, currentPath);
 
       const row = this.db
         .prepare(
