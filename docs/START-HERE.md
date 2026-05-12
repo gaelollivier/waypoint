@@ -22,7 +22,7 @@ Personal backup tool for cold storage drives. SSD source → multiple HDDs (one 
 
 ## Status
 
-**Implementation in progress.** Design phase complete; milestones 1–10 done. M10 (duplicate detection) complete. Next up: M11 — copy job. See `open-questions.md` for details.
+**Implementation in progress.** Design phase complete; milestones 1–11 done. M11 (copy job) complete. Next up: M12 — verify job. See `open-questions.md` for details.
 
 **Stack**: TypeScript + Bun, Hono (HTTP), React + Vite (UI), `bun:sqlite`, BLAKE3, SSE for progress.
 
@@ -49,10 +49,10 @@ Personal backup tool for cold storage drives. SSD source → multiple HDDs (one 
 | 9 | Diff (diff job, diff_entries + diff_dirs, DiffExplorer UI) | ✅ Done |
 | 10 | Duplicate file detection (job, API, UI tab) | ✅ Done |
 | 11 | Copy job (temp→rename, inline full hash, resume-safe, full UI) | 🔜 In progress |
-| 12 | Backup composite (scan→scan→diff→copy pipeline, pause-as-unit) | 🔲 |
-| 13 | Verify job (re-hash files, surface mismatches) | 🔲 |
-| 14 | Quarantine & cleanup (orphan temp files → .waypoint-quarantine/) | 🔲 |
-| 15 | Polish (ETAs, exclude editor, error review UI, SMART data) | 🔲 |
+| 12 | Verify job (re-hash files, surface mismatches) | 🔲 |
+| 13 | Quarantine & cleanup (orphan temp files → .waypoint-quarantine/) | 🔲 |
+| 14 | Polish (ETAs, exclude editor, error review UI, SMART data) | 🔲 |
+| 15 | Backup composite (scan→scan→diff→copy pipeline, pause-as-unit) | 🔲 |
 
 The scan job (M6) is the architectural keystone — if its resumability is wrong, everything else is wrong.
 
