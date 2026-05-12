@@ -61,7 +61,7 @@ Measured on the source SSD (photo/video-heavy personal library):
 
 - **Initial scan**: compute `sampled_hash` for every file. Do not compute `full_hash`.
 - **Re-scan**: filter by mtime+size first (free, from `stat()`); only re-compute `sampled_hash` if mtime or size changed, or if the file is newly discovered. Files unchanged on filesystem are not re-read.
-- **Copy job**: compute BOTH hashes inline during the read pass (both can be derived from one sequential read). Compare `sampled_hash` to source's stored `sampled_hash` as integrity check during copy. Store both on the destination's row.
+- **Copy job**: compute `full_hash` inline during the sequential read pass (every byte flows through the BLAKE3 hasher — free). Store `full_hash` on both the source and destination `files` rows. Source is re-validated before copy (re-stat + re-compute sampled hash); if source changed since scan, the file is skipped. No post-write hash verification — the verify job is the authoritative on-disk correctness check.
 - **Verify job (default = sampled mode)**: re-compute `sampled_hash` from disk, compare to stored `sampled_hash`. Catches change in the sampled regions; does NOT detect bit rot in unsampled regions of large files.
 - **Verify job (full mode, future v1.x)**: re-compute `full_hash` from disk, compare to stored `full_hash`. The "true scrub." Skipped if `full_hash` is null on a file (file was never copied through this tool, only scanned).
 
@@ -84,8 +84,8 @@ Acceptable for v1 given the user's hardware (slow HDD where full verify is hours
   - Encodes intent in the path: `*.backup-tmp-*` = "we crashed during this write" vs canonical-path hash mismatch = "previously-good file corrupted." Different recovery semantics.
   - Concurrent retries can't collide on the same canonical path.
   - Cost is one rename per file (a single inode op, free on the same filesystem).
-- **No per-file fsync.** Per-file fsync on a 5400rpm HDD destroys throughput. Crash safety relies on (a) the temp→rename pattern preventing partial files at canonical paths, (b) inline hash comparison during copy catching read/memory errors, (c) the verify job as the true correctness guarantee that bytes are durably on disk. The verify job is the authoritative check, not the copy job.
-- **Inline hashing during copy**: BLAKE3 hasher accumulates incrementally as bytes are read from source and written to destination temp file. At end of copy, computed hash is compared to the source hash stored in SQLite. Mismatch → abort, leave temp file in place, log error, surface for manual review. Match → rename, mark as written. Single read pass.
+- **No per-file fsync.** Per-file fsync on a 5400rpm HDD destroys throughput. Crash safety relies on (a) the temp→rename pattern preventing partial files at canonical paths, (b) the verify job as the true correctness guarantee that bytes are durably on disk. The verify job is the authoritative check, not the copy job.
+- **Inline hashing during copy**: BLAKE3 hasher accumulates incrementally as bytes are read from source and written to destination temp file. Produces `full_hash` for free from the sequential read. Single read pass, no post-write re-hash. Rename always proceeds after write completes — the verify job is the authoritative integrity check.
 
 ## Architecture
 

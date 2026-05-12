@@ -232,6 +232,47 @@ Added a tracked pre-commit hook (`.githooks/pre-commit`) that runs `tsc --noEmit
 
 ---
 
+---
+
+## M11 Copy job — design decisions (2026-05-12)
+
+### No post-write hash verification during copy
+The copy job computes the full BLAKE3 hash inline during the streaming read (it's free — every byte flows through the hasher). But it does NOT re-hash the temp file after writing to verify what landed on disk. The verify job is the authoritative correctness check for on-disk integrity. Removing this simplifies `copyFileAtomic` significantly — no `expectedSampledHash` parameter, no `HashMismatchError` path, no `computeSampledHash` call on the temp file.
+
+### Source re-validation before each copy
+Before copying each file, the copy job: (1) re-stats the source file (mtime + size), comparing to the stored `files` row; (2) re-computes the sampled hash on the source file, comparing to the stored `sampled_hash`. If either differs → skip with `skipped_source_changed`. This prevents copying stale data. The overhead is minimal (SSD reads, ~6 small slices for sampled hash).
+
+### Dest file exists → hash compare, never overwrite
+If the dest path already exists: compute its sampled hash and compare to source. Match → `skipped_already_present`. Mismatch → `error_hash_mismatch`, log both hashes. Never overwrite under any circumstance.
+
+### Disk space: pre-flight fails, periodic pauses
+Pre-flight check sums all pending bytes and compares to free space + 1GB margin. Insufficient → fail immediately (copying 10 files out of 50,000 isn't useful). During copy, re-check every 10 minutes. Below 500MB → auto-pause (partial progress is worth keeping). ENOSPC during write → auto-pause.
+
+### No excludes for now
+Full backup — all files from the diff are copied. Exclude patterns deferred to M14 (exclude editor UI).
+
+### Orphaned temp files: track, don't move or delete
+On resume, orphaned temp files (`.backup-tmp-<uuid>`) from interrupted copies are logged and the copy_item is reset to `pending`. The temp file is left on disk. Cleanup/quarantine tooling is a future milestone (M14).
+
+### Cancel leaves dirty state
+Cancelling a copy job leaves in_progress items and orphaned temp files. Cleanup tooling deferred.
+
+### Per-chunk progress for large files
+`copyFileAtomic` accepts an `onChunkWritten` callback so the copy runner can report bytes-level progress within a single large file. This feeds the speed charts and gives meaningful ETA during multi-GB video copies.
+
+### Upsert dest files row after copy
+After a successful copy, the runner upserts a `files` row on the dest disk (stat after rename for mtime, reuse source `sampled_hash`, store computed `full_hash`). This keeps the dest disk's file index current without requiring a re-scan.
+
+### Copy concurrency = 1 (sequential)
+Dest is a 5400rpm HDD. Parallel writes cause head thrashing and destroy throughput. Sequential copy saturates the HDD write speed. The natural hardware concurrency (OS I/O pipelining between SSD reads and HDD writes) happens at the OS level, not the application level.
+
+---
+
+## Deferred / Backlog items (added 2026-05-12)
+
+### Scan snapshots / history
+Currently `files` is a "current state" table — each scan upserts rows for that disk. There's no way to browse previous scan states or compare scans over time. Future work: version the `files` table per `scan_job_id` so users can browse previous scan states in the tree view. This would also enable "what changed between scans" queries.
+
 ### User collaboration preferences
 
 - Testing flow is **UI-only**. Do not give curl commands as testing instructions. Curl is only acceptable for backend-state debugging when explicitly asked.

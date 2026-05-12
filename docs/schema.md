@@ -131,7 +131,7 @@ Per-file copy state for an active copy job. Lets the copy job resume mid-stream 
 | `source_file_id` | FK to `files` |
 | `dest_disk_id` | FK to `disks` |
 | `dest_path` | Path the file will/did land at on dest |
-| `status` | `pending` / `in_progress` / `done` / `error_hash_mismatch` / `error_io` / `skipped_already_present` |
+| `status` | `pending` / `in_progress` / `done` / `error_hash_mismatch` / `error_io` / `skipped_already_present` / `skipped_source_changed` |
 | `bytes_copied` | For mid-file resume reporting (not used for actual resume — we restart the file) |
 | `started_at` / `completed_at` | |
 | `error_detail` | |

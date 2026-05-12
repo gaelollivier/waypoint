@@ -14,8 +14,10 @@
  */
 
 import { appendFileSync } from "fs";
-import { open } from "fs/promises";
+import { mkdir, open, rename } from "fs/promises";
 import path from "path";
+import { readFileStream } from "./disk-io";
+import { createStreamingHasher, finaliseHash } from "../jobs/scan/hasher";
 
 const DISK_ID_FILENAME = ".waypoint-disk-id";
 
@@ -101,9 +103,139 @@ export function appendToTmpLog(filePath: string, line: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// NOTE: createDirectory (for the copy job) is intentionally absent.
-//
-// It will be added here when the copy job is implemented, with an explicit
-// guardrail that validates the destination path is within the target disk's
-// mount point before calling mkdir. Do NOT add a version without that guard.
+// Directory creation (for the copy job)
 // ---------------------------------------------------------------------------
+
+/**
+ * WRITE: Creates a directory (and intermediate parents) on a backup disk.
+ *
+ * Guardrails:
+ *   - The absolute path must resolve within destMountPath. Throws if path
+ *     traversal (e.g. via ".." segments) would escape the disk mount.
+ *   - Uses `recursive: true` so this is idempotent — safe to call on every
+ *     file copy even if the directory already exists.
+ */
+export async function createDirectory(
+  destMountPath: string,
+  relativePath: string
+): Promise<void> {
+  const absolutePath = path.join(destMountPath, relativePath);
+  if (!path.resolve(absolutePath).startsWith(path.resolve(destMountPath))) {
+    throw new Error(
+      `createDirectory: path "${relativePath}" escapes disk mount "${destMountPath}"`
+    );
+  }
+  await mkdir(absolutePath, { recursive: true });
+}
+
+// ---------------------------------------------------------------------------
+// Atomic file copy with inline hashing (for the copy job)
+// ---------------------------------------------------------------------------
+
+/** Thrown when the destination file already exists. */
+export class FileAlreadyExistsError extends Error {
+  constructor(destPath: string) {
+    super(`File already exists at destination: ${destPath}`);
+    this.name = "FileAlreadyExistsError";
+  }
+}
+
+/**
+ * WRITE: Copies a file from source to dest using the temp→rename pattern,
+ * computing a full BLAKE3 hash inline during the streaming read.
+ *
+ * This is the most safety-critical function in the codebase. It handles
+ * irreplaceable personal data. Every step has an explicit guardrail.
+ *
+ * Order of operations:
+ *   1. Path containment checks (dest and temp must be within the mount)
+ *   2. Dest existence check (never overwrite)
+ *   3. Temp existence check (UUID collision guard)
+ *   4. Stream source → temp file + BLAKE3 hasher
+ *   5. Atomic rename temp → final
+ *
+ * On any failure, the temp file is left in place (not cleaned up).
+ * The caller tracks it via copy_items.temp_filename for later cleanup.
+ *
+ * Guardrails:
+ *   - Path containment: both dest and temp paths must resolve within destMountPath
+ *   - No overwrite: throws FileAlreadyExistsError if dest already exists
+ *   - Exclusive create: temp file opened with 'wx' (O_CREAT | O_EXCL)
+ *   - Atomic rename: same directory, same filesystem — guaranteed atomic on POSIX
+ */
+export async function copyFileAtomic(opts: {
+  sourcePath: string;
+  destMountPath: string;
+  destRelativePath: string;
+  tempSuffix: string;
+  onChunkWritten?: (bytesWritten: number) => void;
+}): Promise<{ fullHash: string; bytesWritten: number }> {
+  const { sourcePath, destMountPath, destRelativePath, tempSuffix, onChunkWritten } = opts;
+
+  const destAbsPath = path.join(destMountPath, destRelativePath);
+  const tempPath = destAbsPath + `.backup-tmp-${tempSuffix}`;
+  const resolvedMount = path.resolve(destMountPath);
+
+  // 1. Path containment: dest and temp must both be inside the disk mount
+  if (!path.resolve(destAbsPath).startsWith(resolvedMount)) {
+    throw new Error(
+      `copyFileAtomic: dest path "${destRelativePath}" escapes disk mount "${destMountPath}"`
+    );
+  }
+  if (!path.resolve(tempPath).startsWith(resolvedMount)) {
+    throw new Error(
+      `copyFileAtomic: temp path escapes disk mount "${destMountPath}"`
+    );
+  }
+
+  // 2. Dest existence guard: NEVER overwrite
+  if (await Bun.file(destAbsPath).exists()) {
+    throw new FileAlreadyExistsError(destAbsPath);
+  }
+
+  // 3. Temp existence guard: UUID suffix makes collision near-impossible, but defend anyway
+  if (await Bun.file(tempPath).exists()) {
+    throw new Error(
+      `copyFileAtomic: temp file already exists at ${tempPath} — UUID collision or stale temp`
+    );
+  }
+
+  // 4. Stream source → temp file + BLAKE3 hasher
+  const hasher = createStreamingHasher();
+  let bytesWritten = 0;
+
+  // Open temp file with exclusive create — kernel-level exactly-once semantics
+  let fh;
+  try {
+    fh = await open(tempPath, "wx");
+  } catch (err: any) {
+    if (err.code === "EEXIST") {
+      throw new Error(`copyFileAtomic: temp file race — ${tempPath} appeared between check and open`);
+    }
+    throw err;
+  }
+
+  try {
+    const stream = readFileStream(sourcePath);
+    const reader = stream.getReader();
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      hasher.update(value);
+      await fh.write(value);
+      bytesWritten += value.byteLength;
+      onChunkWritten?.(value.byteLength);
+    }
+  } finally {
+    await fh.close();
+  }
+
+  const fullHash = finaliseHash(hasher);
+
+  // 5. Atomic rename: temp → final (same directory = same filesystem, atomic on POSIX)
+  await rename(tempPath, destAbsPath);
+
+  return { fullHash, bytesWritten };
+}

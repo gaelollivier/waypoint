@@ -105,6 +105,14 @@ export const api = {
     },
   },
 
+  copy: {
+    start: (sourceDiskId: number, destDiskId: number, diffJobId: number) =>
+      request<{ jobId: number }>("/copy", {
+        method: "POST",
+        body: JSON.stringify({ sourceDiskId, destDiskId, diffJobId }),
+      }),
+  },
+
   jobs: {
     list: (params?: { status?: string; type?: string; targetDiskId?: number; limit?: number }) => {
       const qs = params

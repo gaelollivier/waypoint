@@ -330,6 +330,7 @@ function DiffTab({
   onSelectDest: (destId: number | null) => void;
 }) {
   const queryClient = useQueryClient();
+  const [showCopyDialog, setShowCopyDialog] = useState(false);
 
   // All registered disks (to populate the dest picker)
   const { data: allDisks = [] } = useQuery<Disk[]>({
@@ -338,6 +339,7 @@ function DiffTab({
     refetchInterval: 10_000,
   });
   const destDisks = allDisks;
+  const destDisk = selectedDestId ? allDisks.find((d) => d.id === selectedDestId) : null;
   const isSameDisk = selectedDestId === sourceDiskId;
 
   // Past diff jobs for this source disk
@@ -352,6 +354,14 @@ function DiffTab({
     ? diffJobs.find((j) => j.destDiskId === selectedDestId && j.status === "completed")
     : null;
 
+  // Diff tree root data (for copy summary — only fetched when we have a completed diff)
+  const { data: diffRoot } = useQuery({
+    queryKey: ["diffRoot", sourceDiskId, selectedDestId, latestCompletedDiff?.id],
+    queryFn: () => api.diff.tree(sourceDiskId, selectedDestId!, { diffJobId: latestCompletedDiff!.id }),
+    enabled: !!latestCompletedDiff && !!selectedDestId,
+    staleTime: 30_000,
+  });
+
   // Pending/running diff for the selected dest
   const activeDiff = selectedDestId
     ? diffJobs.find(
@@ -361,8 +371,22 @@ function DiffTab({
       )
     : null;
 
+  // Active/paused copy job on the dest disk
+  const { data: activeCopyJobs = [] } = useQuery<Job[]>({
+    queryKey: ["activeCopyJobs", selectedDestId],
+    queryFn: () => api.jobs.list({ type: "copy", limit: 5 }),
+    enabled: !!selectedDestId,
+    refetchInterval: 5_000,
+  });
+  const activeCopy = activeCopyJobs.find(
+    (j) => j.destDiskId === selectedDestId && ["queued", "running", "paused"].includes(j.status)
+  ) ?? null;
+
   // Live job data for the active diff (SSE-powered progress)
   const { job: liveJob, now } = useLiveJob(activeDiff?.id ?? null);
+
+  // Live copy job progress
+  const { job: liveCopyJob, now: copyNow } = useLiveJob(activeCopy?.id ?? null);
 
   const startDiff = useMutation({
     mutationFn: () => api.diff.start(sourceDiskId, selectedDestId!),
@@ -372,11 +396,31 @@ function DiffTab({
     onError: (err: any) => alert(`Diff failed to start: ${err.message}`),
   });
 
+  const startCopy = useMutation({
+    mutationFn: () =>
+      api.copy.start(sourceDiskId, selectedDestId!, latestCompletedDiff!.id),
+    onSuccess: () => {
+      setShowCopyDialog(false);
+      queryClient.invalidateQueries({ queryKey: ["activeCopyJobs", selectedDestId] });
+      queryClient.invalidateQueries({ queryKey: ["jobs", { diskId: sourceDiskId }] });
+    },
+    onError: (err: any) => alert(`Copy failed to start: ${err.message}`),
+  });
+
   const canStartDiff =
     selectedDestId != null &&
     !activeDiff &&
     sourceDisk.lastScanAt != null &&
     !startDiff.isPending;
+
+  const canStartCopy =
+    latestCompletedDiff != null &&
+    !activeDiff &&
+    !activeCopy &&
+    !isSameDisk &&
+    destDisk?.isConnected &&
+    diffRoot != null &&
+    (diffRoot.totalAdded + diffRoot.totalChanged) > 0;
 
   return (
     <div className="space-y-5">
@@ -413,6 +457,21 @@ function DiffTab({
             {activeDiff ? "Running…" : "Run Diff"}
           </button>
         )}
+
+        {canStartCopy && (
+          <button
+            onClick={() => setShowCopyDialog(true)}
+            className="rounded bg-green-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-green-500 transition-colors"
+          >
+            Start Copy
+          </button>
+        )}
+
+        {activeCopy && (
+          <span className="text-xs text-zinc-500">
+            Copy job #{activeCopy.id} — {activeCopy.status}
+          </span>
+        )}
       </div>
 
       {/* Same-disk warning */}
@@ -436,9 +495,14 @@ function DiffTab({
         </div>
       )}
 
-      {/* Active job progress indicator */}
+      {/* Active diff progress indicator */}
       {selectedDestId && activeDiff && (
         <DiffProgressCard job={liveJob} fallback={activeDiff} now={now} />
+      )}
+
+      {/* Active copy job progress */}
+      {selectedDestId && activeCopy && liveCopyJob && (
+        <CopyProgressCard job={liveCopyJob} now={copyNow} destDisk={destDisk} />
       )}
 
       {/* Diff explorer */}
@@ -458,6 +522,206 @@ function DiffTab({
       {selectedDestId && !latestCompletedDiff && !activeDiff && sourceDisk.lastScanAt && (
         <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-8 text-center text-sm text-zinc-500">
           No diff results yet. Click "Run Diff" to compare with the selected destination disk.
+        </div>
+      )}
+
+      {/* Copy confirmation dialog */}
+      {showCopyDialog && diffRoot && destDisk && (
+        <CopyConfirmDialog
+          diffRoot={diffRoot}
+          destDisk={destDisk}
+          isPending={startCopy.isPending}
+          onConfirm={() => startCopy.mutate()}
+          onClose={() => setShowCopyDialog(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── Copy confirmation dialog ────────────────────────────────────────────────
+
+function CopyConfirmDialog({
+  diffRoot,
+  destDisk,
+  isPending,
+  onConfirm,
+  onClose,
+}: {
+  diffRoot: import("../api/types").DiffTreeResponse;
+  destDisk: Disk;
+  isPending: boolean;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  const filesToCopy = diffRoot.totalAdded + diffRoot.totalChanged;
+  const bytesToCopy = diffRoot.totalAddedBytes + diffRoot.totalChangedBytes;
+  const alreadyPresent = diffRoot.totalPresent;
+  const freeBytes = destDisk.freeBytes;
+  const estimatedFreeAfter = freeBytes != null ? freeBytes - bytesToCopy : null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+      <div
+        className="w-full max-w-md rounded-xl border border-zinc-700 bg-zinc-900 p-6 space-y-5"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 className="text-base font-semibold text-white">Start Copy</h2>
+
+        <div className="space-y-3">
+          <SummaryRow label="Files to copy" value={`${filesToCopy.toLocaleString()} files`} sub={formatBytes(bytesToCopy)} />
+          {diffRoot.totalChanged > 0 && (
+            <SummaryRow
+              label="  Changed files"
+              value={`${diffRoot.totalChanged.toLocaleString()} files`}
+              sub={formatBytes(diffRoot.totalChangedBytes)}
+              className="text-yellow-400"
+            />
+          )}
+          <SummaryRow label="Already present" value={`${alreadyPresent.toLocaleString()} files`} sub={formatBytes(diffRoot.totalPresentBytes)} className="text-zinc-500" />
+          <div className="border-t border-zinc-800" />
+          <SummaryRow label="Dest free space" value={formatBytes(freeBytes)} />
+          <SummaryRow
+            label="After copy"
+            value={formatBytes(estimatedFreeAfter)}
+            className={estimatedFreeAfter != null && estimatedFreeAfter < 0 ? "text-red-400" : "text-zinc-300"}
+          />
+        </div>
+
+        {estimatedFreeAfter != null && estimatedFreeAfter < 0 && (
+          <div className="rounded-lg border border-red-800/50 bg-red-950/30 px-4 py-3 text-xs text-red-400">
+            Not enough free space on the destination disk.
+          </div>
+        )}
+
+        <div className="flex justify-end gap-3">
+          <button
+            onClick={onClose}
+            className="rounded px-4 py-2 text-sm text-zinc-400 hover:text-white transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            disabled={isPending || (estimatedFreeAfter != null && estimatedFreeAfter < 0)}
+            onClick={onConfirm}
+            className="rounded bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {isPending ? "Starting…" : "Start Copy"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SummaryRow({
+  label,
+  value,
+  sub,
+  className = "text-zinc-300",
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  className?: string;
+}) {
+  return (
+    <div className="flex items-center justify-between">
+      <span className="text-sm text-zinc-400">{label}</span>
+      <div className="text-right">
+        <span className={`text-sm font-medium ${className}`}>{value}</span>
+        {sub && <span className="ml-2 text-xs text-zinc-600">{sub}</span>}
+      </div>
+    </div>
+  );
+}
+
+// ── Copy progress card (in diff tab) ────────────────────────────────────────
+
+function CopyProgressCard({
+  job,
+  now,
+  destDisk,
+}: {
+  job: Job;
+  now: number;
+  destDisk: Disk | null | undefined;
+}) {
+  const p = job.progressJson as {
+    totalFiles?: number;
+    totalBytes?: number;
+    copiedFiles?: number;
+    copiedBytes?: number;
+    skippedFiles?: number;
+    errorFiles?: number;
+    currentFile?: string | null;
+    diskFreeBytes?: number | null;
+  } | null;
+
+  const totalFiles = p?.totalFiles ?? 0;
+  const copiedFiles = p?.copiedFiles ?? 0;
+  const copiedBytes = p?.copiedBytes ?? 0;
+  const totalBytes = p?.totalBytes ?? 0;
+  const progress = totalBytes > 0 ? copiedBytes / totalBytes : 0;
+  const currentFile = p?.currentFile;
+  const startedAt = job.startedAt;
+  const elapsed = startedAt ? Math.max(0, (now - new Date(startedAt).getTime()) / 1000) : 0;
+
+  const bytesPerSec = elapsed > 0 ? copiedBytes / elapsed : 0;
+  const remainingBytes = totalBytes - copiedBytes;
+  const eta = bytesPerSec > 0 ? remainingBytes / bytesPerSec : null;
+
+  const fmtEta = eta != null
+    ? eta < 60 ? `${Math.round(eta)}s`
+      : eta < 3600 ? `${Math.floor(eta / 60)}m ${Math.round(eta % 60)}s`
+        : `${Math.floor(eta / 3600)}h ${Math.floor((eta % 3600) / 60)}m`
+    : null;
+
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-5 space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <StatusBadge status={job.status} />
+          <span className="font-mono text-sm uppercase text-zinc-300">copy</span>
+          <span className="text-xs text-zinc-600">#{job.id}</span>
+        </div>
+        {fmtEta && job.status === "running" && (
+          <span className="text-xs text-zinc-500">ETA: {fmtEta}</span>
+        )}
+      </div>
+
+      {/* Progress bar */}
+      <div className="space-y-1.5">
+        <div className="h-1.5 w-full rounded-full bg-zinc-800 overflow-hidden">
+          <div
+            className="h-full rounded-full bg-green-600 transition-all"
+            style={{ width: `${Math.min(100, progress * 100)}%` }}
+          />
+        </div>
+        <div className="flex items-center justify-between text-xs text-zinc-500">
+          <span>
+            {copiedFiles.toLocaleString()} / {totalFiles.toLocaleString()} files
+            {" · "}
+            {formatBytes(copiedBytes)} / {formatBytes(totalBytes)}
+          </span>
+          {bytesPerSec > 0 && <span>{formatBytes(Math.round(bytesPerSec))}/s</span>}
+        </div>
+      </div>
+
+      {/* Current file */}
+      {currentFile && job.status === "running" && (
+        <p className="text-xs text-zinc-600 truncate font-mono">{currentFile}</p>
+      )}
+
+      {/* Error/skip summary */}
+      {((p?.errorFiles ?? 0) > 0 || (p?.skippedFiles ?? 0) > 0) && (
+        <div className="flex gap-3 text-xs">
+          {(p?.skippedFiles ?? 0) > 0 && (
+            <span className="text-yellow-500">{p!.skippedFiles} skipped</span>
+          )}
+          {(p?.errorFiles ?? 0) > 0 && (
+            <span className="text-red-400">{p!.errorFiles} errors</span>
+          )}
         </div>
       )}
     </div>

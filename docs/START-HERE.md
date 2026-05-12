@@ -48,7 +48,7 @@ Personal backup tool for cold storage drives. SSD source → multiple HDDs (one 
 | 8 | Tree view (virtualized disk explorer, materialized aggregates) | ✅ Done |
 | 9 | Diff (diff job, diff_entries + diff_dirs, DiffExplorer UI) | ✅ Done |
 | 10 | Duplicate file detection (job, API, UI tab) | ✅ Done |
-| 11 | Copy job (temp→rename, dual inline hashing, resume-safe) | 🔲 Next |
+| 11 | Copy job (temp→rename, inline full hash, resume-safe, full UI) | 🔜 In progress |
 | 12 | Backup composite (scan→scan→diff→copy pipeline, pause-as-unit) | 🔲 |
 | 13 | Verify job (re-hash files, surface mismatches) | 🔲 |
 | 14 | Quarantine & cleanup (orphan temp files → .waypoint-quarantine/) | 🔲 |
@@ -66,6 +66,7 @@ Improvements planned but not yet scheduled into a milestone.
 |---|---|---|
 | Filter macOS noise from duplicate detection | `open-questions.md` | `._*`, `.DS_Store`, `__MACOSX/` files create huge duplicate groups (2051 copies of `._crossfire.lua` on first real run). Add path-pattern filter to the duplicate job so real user duplicates surface first |
 | Scan ETA: switch from bytes/sec to files/sec + inode count | `open-questions.md` | `bytesProcessed` is the sum of stat'd file sizes, not bytes read — a single large file causes a massive rate spike. Scan time is uniform per-inode (stat cost), so `filesPerSec` against `df -i` inode count is a much more stable ETA. Also consider widening the 5s rolling window or using an EMA. |
+| Scan snapshots / history | `open-questions.md` | Version `files` table per `scan_job_id` so users can browse previous scan states and compare scans over time. Currently `files` is overwritten on each scan. |
 
 ---
 

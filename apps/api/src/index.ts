@@ -10,6 +10,7 @@ import { jobsRouter } from "./routes/jobs";
 import { treeRouter } from "./routes/tree";
 import { diffRouter } from "./routes/diff";
 import { duplicatesRouter } from "./routes/duplicates";
+import { copyRouter } from "./routes/copy";
 import { startLoopStallDetector, trace } from "./diag/trace";
 
 // Initialize DB (runs migrations + clears stale locks) at startup
@@ -43,6 +44,7 @@ app.route("/api/jobs", jobsRouter);
 app.route("/api/disks/:id/tree", treeRouter);
 app.route("/api/disks/:id/diff", diffRouter);
 app.route("/api/disks/:id/duplicates", duplicatesRouter);
+app.route("/api/copy", copyRouter);
 
 const PORT = Number(process.env.PORT ?? 3000);
 

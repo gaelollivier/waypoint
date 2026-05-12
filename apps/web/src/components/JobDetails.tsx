@@ -224,12 +224,33 @@ export function JobDetails({
       : null;
   const progress = explicitProgress ?? derivedProgress;
 
+  const isCopy = job.type === "copy";
   const isScan = job.type === "scan";
   const dataPerSecLabel = isScan ? "Data scanned/s" : "Throughput";
 
+  // Copy-specific progress: use totalFiles/totalBytes from progressJson
+  const copyProgress = isCopy ? (job.progressJson as {
+    totalFiles?: number;
+    totalBytes?: number;
+    copiedFiles?: number;
+    copiedBytes?: number;
+    skippedFiles?: number;
+    errorFiles?: number;
+    currentFile?: string | null;
+  } | null) : null;
+
+  const copyTotalBytes = copyProgress?.totalBytes ?? 0;
+  const copyCopiedBytes = copyProgress?.copiedBytes ?? 0;
+  const copyEtaSec =
+    isCopy && job.status === "running" && bytesPerSec > 0 && copyTotalBytes > 0
+      ? Math.max(0, (copyTotalBytes - copyCopiedBytes) / bytesPerSec)
+      : null;
+
   const primaryStats = [
-    { label: "Files", value: job.itemsProcessed.toLocaleString() },
-    { label: "Data", value: formatBytes(job.bytesProcessed) },
+    { label: "Files", value: job.itemsProcessed.toLocaleString(),
+      sub: isCopy && copyProgress?.totalFiles ? `/ ${copyProgress.totalFiles.toLocaleString()}` : undefined },
+    { label: "Data", value: formatBytes(job.bytesProcessed),
+      sub: isCopy && copyTotalBytes ? `/ ${formatBytes(copyTotalBytes)}` : undefined },
     {
       label: "Files/sec",
       value: formatRate(filesPerSec, "/s"),
@@ -242,9 +263,11 @@ export function JobDetails({
     },
   ];
 
+  const effectiveEta = isCopy ? copyEtaSec : etaSec;
+
   const secondaryStats = [
     { label: "Elapsed", value: formatDuration(elapsedSec) },
-    { label: "ETA", value: etaSec != null ? formatDuration(etaSec) : "—" },
+    { label: "ETA", value: effectiveEta != null ? formatDuration(effectiveEta) : "—" },
     { label: "Warnings", value: job.warningsCount.toString() },
     { label: "Errors", value: job.errorsCount.toString() },
   ];
@@ -286,7 +309,27 @@ export function JobDetails({
       )}
 
       {/* Progress bar */}
-      {progress != null && <ProgressBar value={progress} />}
+      {isCopy && copyTotalBytes > 0 && (
+        <ProgressBar value={Math.min(1, copyCopiedBytes / copyTotalBytes)} />
+      )}
+      {!isCopy && progress != null && <ProgressBar value={progress} />}
+
+      {/* Current file (copy jobs) */}
+      {isCopy && copyProgress?.currentFile && job.status === "running" && (
+        <p className="text-xs text-zinc-600 truncate font-mono">{copyProgress.currentFile}</p>
+      )}
+
+      {/* Copy skip/error summary */}
+      {isCopy && ((copyProgress?.skippedFiles ?? 0) > 0 || (copyProgress?.errorFiles ?? 0) > 0) && (
+        <div className="flex gap-3 text-xs">
+          {(copyProgress?.skippedFiles ?? 0) > 0 && (
+            <span className="text-yellow-500">{copyProgress!.skippedFiles} skipped</span>
+          )}
+          {(copyProgress?.errorFiles ?? 0) > 0 && (
+            <span className="text-red-400">{copyProgress!.errorFiles} errors</span>
+          )}
+        </div>
+      )}
 
       {/* Stats */}
       <StatGrid stats={primaryStats} />
@@ -313,7 +356,7 @@ export function JobDetails({
       </div>
 
       {/* Footer note */}
-      {usedBytes != null && (
+      {!isCopy && usedBytes != null && (
         <p className="text-xs text-zinc-600">
           Progress and ETA estimated against {formatBytes(usedBytes)} of used disk space
           {disk?.label && <> on <span className="text-zinc-400">{disk.label}</span></>}.

@@ -4,6 +4,7 @@ import { getDb } from "../db/client";
 import { getJobManager, getRunner, registerRunner, unregisterRunner } from "../jobs";
 import { sseRegistry } from "../jobs/sse";
 import { ScanJobRunner } from "../jobs/scan/scan-job";
+import { CopyJobRunner } from "../jobs/copy/copy-job";
 import { getDiskById } from "../disks/registry";
 
 export const jobsRouter = new Hono();
@@ -108,34 +109,69 @@ jobsRouter.post("/:id/resume", (c) => {
     return c.json({ ok: true });
   }
 
-  // Rehydrate. Currently only scan jobs are rehydratable — copy/verify don't
-  // exist yet; backup composite rehydration is a v1.x concern.
-  if (job.type !== "scan") {
-    return c.json({ error: `Cannot rehydrate ${job.type} jobs yet` }, 501);
-  }
-
   const db = getDb();
-  if (job.target_disk_id == null) {
-    return c.json({ error: "Scan job has no target disk" }, 500);
+
+  // Rehydrate based on job type
+  if (job.type === "scan") {
+    if (job.target_disk_id == null) {
+      return c.json({ error: "Scan job has no target disk" }, 500);
+    }
+    const disk = getDiskById(db, job.target_disk_id);
+    if (!disk) return c.json({ error: "Target disk no longer exists" }, 410);
+    if (!disk.is_connected || !disk.mount_path) {
+      return c.json({ error: "Target disk is not connected" }, 409);
+    }
+
+    const runner = new ScanJobRunner({
+      jobId: job.id,
+      jobManager: jm,
+      db,
+      diskId: disk.id,
+      mountPath: disk.mount_path,
+    });
+
+    registerRunner(job.id, runner);
+    runner.start().finally(() => unregisterRunner(job.id));
+    return c.json({ ok: true, rehydrated: true });
   }
-  const disk = getDiskById(db, job.target_disk_id);
-  if (!disk) return c.json({ error: "Target disk no longer exists" }, 410);
-  if (!disk.is_connected || !disk.mount_path) {
-    return c.json({ error: "Target disk is not connected" }, 409);
+
+  if (job.type === "copy") {
+    if (job.source_disk_id == null || job.dest_disk_id == null) {
+      return c.json({ error: "Copy job has no source or dest disk" }, 500);
+    }
+    const sourceDisk = getDiskById(db, job.source_disk_id);
+    if (!sourceDisk) return c.json({ error: "Source disk no longer exists" }, 410);
+    if (!sourceDisk.is_connected || !sourceDisk.mount_path) {
+      return c.json({ error: "Source disk is not connected" }, 409);
+    }
+    const destDisk = getDiskById(db, job.dest_disk_id);
+    if (!destDisk) return c.json({ error: "Dest disk no longer exists" }, 410);
+    if (!destDisk.is_connected || !destDisk.mount_path) {
+      return c.json({ error: "Dest disk is not connected" }, 409);
+    }
+
+    const payload = job.payload_json ? JSON.parse(job.payload_json) : {};
+    if (!payload.diffJobId) {
+      return c.json({ error: "Copy job payload missing diffJobId" }, 500);
+    }
+
+    const runner = new CopyJobRunner({
+      jobId: job.id,
+      jobManager: jm,
+      db,
+      sourceDiskId: job.source_disk_id,
+      destDiskId: job.dest_disk_id,
+      diffJobId: payload.diffJobId,
+      destMountPath: destDisk.mount_path,
+      sourceMountPath: sourceDisk.mount_path,
+    });
+
+    registerRunner(job.id, runner);
+    runner.start().finally(() => unregisterRunner(job.id));
+    return c.json({ ok: true, rehydrated: true });
   }
 
-  const runner = new ScanJobRunner({
-    jobId: job.id,
-    jobManager: jm,
-    db,
-    diskId: disk.id,
-    mountPath: disk.mount_path,
-  });
-
-  registerRunner(job.id, runner);
-  runner.start().finally(() => unregisterRunner(job.id));
-
-  return c.json({ ok: true, rehydrated: true });
+  return c.json({ error: `Cannot rehydrate ${job.type} jobs yet` }, 501);
 });
 
 // Cancel a job. If an in-process runner exists, signal it (so it cleans up).

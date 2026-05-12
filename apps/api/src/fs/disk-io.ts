@@ -201,3 +201,12 @@ export async function readFileSlice(
 export async function readFileAll(filePath: string): Promise<ArrayBuffer> {
   return Bun.file(filePath).arrayBuffer();
 }
+
+/**
+ * Returns a ReadableStream over the file's content for sequential streaming.
+ * Used by the copy job to pipe source files through a BLAKE3 hasher while
+ * writing to the destination disk.
+ */
+export function readFileStream(filePath: string): ReadableStream<Uint8Array> {
+  return Bun.file(filePath).stream();
+}
