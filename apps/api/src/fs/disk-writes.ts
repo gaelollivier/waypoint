@@ -19,6 +19,9 @@ import path from "path";
 import { readFileStream } from "./disk-io";
 import { createStreamingHasher, finaliseHash } from "../jobs/scan/hasher";
 
+/** Yield to the event loop every 64 MB during streaming copies. */
+const YIELD_EVERY_BYTES = 64 * 1024 * 1024;
+
 const DISK_ID_FILENAME = ".waypoint-disk-id";
 
 // ---------------------------------------------------------------------------
@@ -218,6 +221,7 @@ export async function copyFileAtomic(opts: {
   try {
     const stream = readFileStream(sourcePath);
     const reader = stream.getReader();
+    let bytesSinceYield = 0;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -226,7 +230,15 @@ export async function copyFileAtomic(opts: {
       hasher.update(value);
       await fh.write(value);
       bytesWritten += value.byteLength;
+      bytesSinceYield += value.byteLength;
       onChunkWritten?.(value.byteLength);
+
+      // Yield to the event loop periodically so the API stays responsive
+      // during large file copies (a 26GB file would otherwise starve it).
+      if (bytesSinceYield >= YIELD_EVERY_BYTES) {
+        bytesSinceYield = 0;
+        await new Promise<void>((r) => setImmediate(r));
+      }
     }
   } finally {
     await fh.close();

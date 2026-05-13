@@ -77,18 +77,26 @@ jobsRouter.get("/:id/events", (c) => {
   });
 });
 
-// Pause a running job
+// Pause a running job. If no in-process runner exists (e.g. after a server
+// restart orphaned the job), fall back to a DB-only transition so the job
+// can be resumed later.
 jobsRouter.post("/:id/pause", (c) => {
   const id = Number(c.req.param("id"));
-  const job = getJobManager().getJob(id);
+  const jm = getJobManager();
+  const job = jm.getJob(id);
   if (!job) return c.json({ error: "Job not found" }, 404);
   if (job.status !== "running") {
     return c.json({ error: `Job is ${job.status}, not running` }, 409);
   }
   const runner = getRunner(id);
-  if (!runner) return c.json({ error: "Job is not active in this process" }, 409);
-  runner.pause();
-  return c.json({ ok: true });
+  if (runner) {
+    runner.pause();
+    return c.json({ ok: true });
+  }
+  // Orphaned running job (server restarted) — transition DB directly
+  jm.transition(id, "paused");
+  sseRegistry.publish(id, "status", { id, status: "paused" });
+  return c.json({ ok: true, rehydrated: false });
 });
 
 // Resume a paused job. If no in-process runner exists (e.g. after a server
