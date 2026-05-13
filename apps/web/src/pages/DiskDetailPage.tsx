@@ -468,9 +468,12 @@ function DiffTab({
         )}
 
         {activeCopy && (
-          <span className="text-xs text-zinc-500">
+          <Link
+            href={`/jobs/${activeCopy.id}`}
+            className="text-xs text-zinc-500 hover:text-white transition-colors"
+          >
             Copy job #{activeCopy.id} — {activeCopy.status}
-          </span>
+          </Link>
         )}
       </div>
 
@@ -654,7 +657,11 @@ function CopyProgressCard({
     copiedBytes?: number;
     skippedFiles?: number;
     errorFiles?: number;
+    pendingFiles?: number;
+    pendingBytes?: number;
     currentFile?: string | null;
+    currentFileBytes?: number;
+    currentFileBytesCopied?: number;
     diskFreeBytes?: number | null;
   } | null;
 
@@ -668,8 +675,13 @@ function CopyProgressCard({
   const elapsed = startedAt ? Math.max(0, (now - new Date(startedAt).getTime()) / 1000) : 0;
 
   const bytesPerSec = elapsed > 0 ? copiedBytes / elapsed : 0;
-  const remainingBytes = totalBytes - copiedBytes;
+  const remainingBytes = Math.max(0, p?.pendingBytes ?? (totalBytes - copiedBytes));
+  const pendingFiles = p?.pendingFiles ?? Math.max(0, totalFiles - copiedFiles);
   const eta = bytesPerSec > 0 ? remainingBytes / bytesPerSec : null;
+  const currentFileBytes = p?.currentFileBytes ?? 0;
+  const currentFileBytesCopied = Math.min(currentFileBytes, p?.currentFileBytesCopied ?? 0);
+  const showCurrentFileProgress =
+    !!currentFile && job.status === "running" && currentFileBytes >= 100 * 1024 * 1024;
 
   const fmtEta = eta != null
     ? eta < 60 ? `${Math.round(eta)}s`
@@ -685,9 +697,17 @@ function CopyProgressCard({
           <span className="font-mono text-sm uppercase text-zinc-300">copy</span>
           <span className="text-xs text-zinc-600">#{job.id}</span>
         </div>
-        {fmtEta && job.status === "running" && (
-          <span className="text-xs text-zinc-500">ETA: {fmtEta}</span>
-        )}
+        <div className="flex items-center gap-3">
+          {fmtEta && job.status === "running" && (
+            <span className="text-xs text-zinc-500">ETA: {fmtEta}</span>
+          )}
+          <Link
+            href={`/jobs/${job.id}`}
+            className="text-xs text-zinc-500 hover:text-white transition-colors"
+          >
+            Details →
+          </Link>
+        </div>
       </div>
 
       {/* Progress bar */}
@@ -706,11 +726,32 @@ function CopyProgressCard({
           </span>
           {bytesPerSec > 0 && <span>{formatBytes(Math.round(bytesPerSec))}/s</span>}
         </div>
+        <div className="flex items-center justify-between text-xs text-zinc-600">
+          <span>{pendingFiles.toLocaleString()} files remaining</span>
+          <span>{formatBytes(remainingBytes)} remaining</span>
+        </div>
       </div>
 
       {/* Current file */}
       {currentFile && job.status === "running" && (
-        <p className="text-xs text-zinc-600 truncate font-mono">{currentFile}</p>
+        <div className="space-y-1.5">
+          <p className="text-xs text-zinc-600 truncate font-mono">{currentFile}</p>
+          {showCurrentFileProgress && (
+            <>
+              <div className="h-1 w-full rounded-full bg-zinc-800 overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-green-700 transition-all"
+                  style={{
+                    width: `${currentFileBytes > 0 ? Math.min(100, (currentFileBytesCopied / currentFileBytes) * 100) : 0}%`,
+                  }}
+                />
+              </div>
+              <p className="text-xs text-zinc-600 font-mono">
+                Current file: {formatBytes(currentFileBytesCopied)} / {formatBytes(currentFileBytes)}
+              </p>
+            </>
+          )}
+        </div>
       )}
 
       {/* Error/skip summary */}

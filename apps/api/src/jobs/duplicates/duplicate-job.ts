@@ -4,6 +4,11 @@ import type { JobManager } from "../job-manager";
 import { trace } from "../../diag/trace";
 
 const INSERT_BATCH_SIZE = 500;
+const USER_VISIBLE_FILE_FILTER_SQL = `
+  name != '.DS_Store'
+  AND name NOT LIKE '._%'
+  AND path NOT LIKE '%/__MACOSX/%'
+`;
 
 interface DuplicateGroupRow {
   sampled_hash: string;
@@ -42,7 +47,9 @@ export class DuplicateDetectionJobRunner extends JobRunner {
       .prepare(
         `SELECT sampled_hash, size_bytes, COUNT(*) AS file_count
          FROM files
-         WHERE disk_id = ? AND sampled_hash IS NOT NULL
+         WHERE disk_id = ?
+           AND sampled_hash IS NOT NULL
+           AND ${USER_VISIBLE_FILE_FILTER_SQL}
          GROUP BY sampled_hash
          HAVING file_count > 1
          ORDER BY size_bytes DESC`
@@ -79,7 +86,9 @@ export class DuplicateDetectionJobRunner extends JobRunner {
     const selectMembers = this.db.prepare(
       `SELECT id AS file_id, path
        FROM files
-       WHERE disk_id = ? AND sampled_hash = ?`
+       WHERE disk_id = ?
+         AND sampled_hash = ?
+         AND ${USER_VISIBLE_FILE_FILTER_SQL}`
     );
 
     const insertFile = this.db.prepare(

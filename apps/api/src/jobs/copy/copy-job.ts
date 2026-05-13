@@ -61,8 +61,10 @@ interface CopyProgress {
   skippedFiles: number;
   errorFiles: number;
   pendingFiles: number;
+  pendingBytes: number;
   currentFile: string | null;
   currentFileBytes: number;
+  currentFileBytesCopied: number;
   diskFreeBytes: number | null;
 }
 
@@ -84,8 +86,10 @@ export class CopyJobRunner extends JobRunner {
     skippedFiles: 0,
     errorFiles: 0,
     pendingFiles: 0,
+    pendingBytes: 0,
     currentFile: null,
     currentFileBytes: 0,
+    currentFileBytesCopied: 0,
     diskFreeBytes: null,
   };
 
@@ -225,6 +229,7 @@ export class CopyJobRunner extends JobRunner {
     this.progress.totalFiles = entries.length;
     this.progress.totalBytes = totalBytes;
     this.progress.pendingFiles = entries.length;
+    this.progress.pendingBytes = totalBytes;
     this.broadcastProgress();
 
     this.logEvent(
@@ -276,8 +281,11 @@ export class CopyJobRunner extends JobRunner {
            SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) AS done,
            SUM(CASE WHEN status IN ('skipped_already_present', 'skipped_source_changed') THEN 1 ELSE 0 END) AS skipped,
            SUM(CASE WHEN status IN ('error_hash_mismatch', 'error_io') THEN 1 ELSE 0 END) AS errors,
-           SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending
-         FROM copy_items WHERE copy_job_id = ?`
+           SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+           COALESCE(SUM(CASE WHEN status = 'pending' THEN f.size_bytes ELSE 0 END), 0) AS pending_bytes
+         FROM copy_items ci
+         JOIN files f ON f.id = ci.source_file_id
+         WHERE ci.copy_job_id = ?`
       )
       .get(this.jobId) as {
         total: number;
@@ -285,6 +293,7 @@ export class CopyJobRunner extends JobRunner {
         skipped: number;
         errors: number;
         pending: number;
+        pending_bytes: number;
       };
 
     const byteTotals = this.db
@@ -305,6 +314,7 @@ export class CopyJobRunner extends JobRunner {
     this.progress.skippedFiles = counts.skipped;
     this.progress.errorFiles = counts.errors;
     this.progress.pendingFiles = counts.pending;
+    this.progress.pendingBytes = counts.pending_bytes;
     this.broadcastProgress();
   }
 
@@ -367,6 +377,7 @@ export class CopyJobRunner extends JobRunner {
 
       this.progress.currentFile = item.dest_path;
       this.progress.currentFileBytes = item.size_bytes;
+      this.progress.currentFileBytesCopied = 0;
       this.broadcastProgress();
 
       try {
@@ -376,6 +387,8 @@ export class CopyJobRunner extends JobRunner {
         const message = err instanceof Error ? err.message : String(err);
         this.markItemStatus(item.id, "error_io", message);
         this.progress.errorFiles++;
+        this.progress.pendingFiles--;
+        this.progress.pendingBytes = Math.max(0, this.progress.pendingBytes - item.size_bytes);
         this.incrementProgress({
           itemsProcessed: 1,
           errorsCount: 1,
@@ -399,6 +412,7 @@ export class CopyJobRunner extends JobRunner {
 
     this.progress.currentFile = null;
     this.progress.currentFileBytes = 0;
+    this.progress.currentFileBytesCopied = 0;
     this.broadcastProgress();
   }
 
@@ -430,6 +444,8 @@ export class CopyJobRunner extends JobRunner {
       const msg = `Cannot stat source file: ${err instanceof Error ? err.message : String(err)}`;
       this.markItemStatus(item.id, "error_io", msg);
       this.progress.errorFiles++;
+      this.progress.pendingFiles--;
+      this.progress.pendingBytes = Math.max(0, this.progress.pendingBytes - item.size_bytes);
       this.incrementProgress({
         itemsProcessed: 1,
         errorsCount: 1,
@@ -448,6 +464,8 @@ export class CopyJobRunner extends JobRunner {
         `Source file changed since scan: size ${item.size_bytes}→${currentStat.size}, mtime ${item.mtime}→${currentStat.mtime.toISOString()}`
       );
       this.progress.skippedFiles++;
+      this.progress.pendingFiles--;
+      this.progress.pendingBytes = Math.max(0, this.progress.pendingBytes - item.size_bytes);
       this.incrementProgress({
         itemsProcessed: 1,
         nonCriticalErrorsCount: 1,
@@ -471,6 +489,8 @@ export class CopyJobRunner extends JobRunner {
           `Source file hash changed since scan: ${item.sampled_hash} → ${currentHash}`
         );
         this.progress.skippedFiles++;
+        this.progress.pendingFiles--;
+        this.progress.pendingBytes = Math.max(0, this.progress.pendingBytes - item.size_bytes);
         this.incrementProgress({
           itemsProcessed: 1,
           nonCriticalErrorsCount: 1,
@@ -489,6 +509,8 @@ export class CopyJobRunner extends JobRunner {
       if (item.sampled_hash && destHash === item.sampled_hash) {
         this.markItemStatus(item.id, "skipped_already_present", null);
         this.progress.skippedFiles++;
+        this.progress.pendingFiles--;
+        this.progress.pendingBytes = Math.max(0, this.progress.pendingBytes - item.size_bytes);
         this.incrementProgress({
           itemsProcessed: 1,
           progressJson: this.progress,
@@ -503,6 +525,8 @@ export class CopyJobRunner extends JobRunner {
         `Dest file exists with different hash: source=${item.sampled_hash}, dest=${destHash}`
       );
       this.progress.errorFiles++;
+      this.progress.pendingFiles--;
+      this.progress.pendingBytes = Math.max(0, this.progress.pendingBytes - item.size_bytes);
       this.incrementProgress({
         itemsProcessed: 1,
         errorsCount: 1,
@@ -531,6 +555,7 @@ export class CopyJobRunner extends JobRunner {
       tempSuffix,
       onChunkWritten: (bytes) => {
         copyBytesAccumulator += bytes;
+        this.progress.currentFileBytesCopied = copyBytesAccumulator;
         // Report chunk-level progress for large files
         this.incrementProgress({
           bytesProcessed: bytes,
@@ -556,6 +581,8 @@ export class CopyJobRunner extends JobRunner {
     this.progress.copiedFiles++;
     this.progress.copiedBytes += result.bytesWritten;
     this.progress.pendingFiles--;
+    this.progress.pendingBytes = Math.max(0, this.progress.pendingBytes - item.size_bytes);
+    this.progress.currentFileBytesCopied = 0;
     this.incrementProgress({
       itemsProcessed: 1,
       // Don't double-count bytes — chunks already reported them
