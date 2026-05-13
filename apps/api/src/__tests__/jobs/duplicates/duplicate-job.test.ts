@@ -140,4 +140,31 @@ describe("DuplicateDetectionJobRunner", () => {
     const jobId = await runDuplicateDetection(db, jm, diskId);
     expect(jm.getJob(jobId)!.items_processed).toBe(2); // 2 groups
   });
+
+  it("filters macOS metadata noise out of duplicate groups", async () => {
+    const root = path.join(TMP_BASE, "macos-noise");
+    writeTree(root, {
+      "photos/vacation-1.jpg": "real duplicate",
+      "backup/vacation-1.jpg": "real duplicate",
+      ".DS_Store": "metadata duplicate",
+      "photos/.DS_Store": "metadata duplicate",
+      "._crossfire.lua": "resource fork duplicate",
+      "scripts/._crossfire.lua": "resource fork duplicate",
+      "__MACOSX/photos/._vacation-1.jpg": "archive metadata duplicate",
+      "exports/__MACOSX/._vacation-2.jpg": "archive metadata duplicate",
+    });
+    await scanDisk(db, jm, diskId, root);
+
+    const jobId = await runDuplicateDetection(db, jm, diskId);
+    const groups = getGroups(db, jobId);
+
+    expect(groups.length).toBe(1);
+    expect(groups[0].file_count).toBe(2);
+
+    const files = getGroupFiles(db, groups[0].id);
+    expect(files.map((f) => path.basename(f.path)).sort()).toEqual([
+      "vacation-1.jpg",
+      "vacation-1.jpg",
+    ]);
+  });
 });

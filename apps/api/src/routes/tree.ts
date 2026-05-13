@@ -29,7 +29,7 @@ export interface TreeResponse {
 
 /**
  * GET /api/disks/:id/tree
- * Optional query: ?parentId=<directoryId>
+ * Optional query: ?parentId=<directoryId> or ?parentPath=<absoluteDirectoryPath>
  *
  * Returns all direct children (subdirectories + files) of the given directory,
  * sorted largest-first. If parentId is omitted, returns the root directory's
@@ -40,6 +40,7 @@ export interface TreeResponse {
 treeRouter.get("/", (c) => {
   const diskId = Number(c.req.param("id"));
   const rawParentId = c.req.query("parentId");
+  const rawParentPath = c.req.query("parentPath");
 
   const db = getDb();
   const disk = getDiskById(db, diskId);
@@ -50,7 +51,15 @@ treeRouter.get("/", (c) => {
   let parentPath: string | null = null;
   let totalSizeBytes = 0;
 
-  if (rawParentId !== undefined) {
+  if (rawParentPath !== undefined) {
+    const dir = db
+      .prepare("SELECT id, path, total_size_bytes FROM directories WHERE path = ? AND disk_id = ?")
+      .get(rawParentPath, diskId) as { id: number; path: string; total_size_bytes: number } | null;
+    if (!dir) return c.json({ error: "Directory not found" }, 404);
+    parentId = dir.id;
+    parentPath = dir.path;
+    totalSizeBytes = dir.total_size_bytes;
+  } else if (rawParentId !== undefined) {
     parentId = Number(rawParentId);
     const dir = db
       .prepare("SELECT id, path, total_size_bytes FROM directories WHERE id = ? AND disk_id = ?")

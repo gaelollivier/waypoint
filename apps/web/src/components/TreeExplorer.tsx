@@ -1,8 +1,28 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useSyncExternalStore } from "react";
 import { api } from "../api/client";
 import type { TreeEntry, TreeResponse } from "../api/types";
 import { formatBytes } from "../lib/format";
 
+function useSearchParam(key: string): string | null {
+  const subscribe = useCallback((cb: () => void) => {
+    window.addEventListener("popstate", cb);
+    return () => window.removeEventListener("popstate", cb);
+  }, []);
+  const getSnapshot = useCallback(
+    () => new URLSearchParams(window.location.search).get(key),
+    [key]
+  );
+  return useSyncExternalStore(subscribe, getSnapshot);
+}
+
+function setSearchParam(key: string, value: string | null): void {
+  const params = new URLSearchParams(window.location.search);
+  if (value === null) params.delete(key);
+  else params.set(key, value);
+  const qs = params.toString();
+  history.pushState(null, "", window.location.pathname + (qs ? "?" + qs : ""));
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
 
 function EntryRow({
   entry,
@@ -61,7 +81,7 @@ function Breadcrumb({
   onNavigate,
 }: {
   crumbs: TreeResponse["breadcrumb"];
-  onNavigate: (dirId: number | null) => void;
+  onNavigate: (path: string | null) => void;
 }) {
   return (
     <nav className="flex items-center gap-1 text-sm min-w-0 overflow-x-auto">
@@ -74,7 +94,7 @@ function Breadcrumb({
               <span className="text-white font-medium">{crumb.name}</span>
             ) : (
               <button
-                onClick={() => onNavigate(crumb.id)}
+                onClick={() => onNavigate(i === 0 ? null : crumb.path)}
                 className="text-zinc-400 hover:text-white transition-colors"
               >
                 {crumb.name}
@@ -92,15 +112,16 @@ function Breadcrumb({
  * scrolls naturally — no inner scrollbar.
  */
 export function TreeExplorer({ diskId }: { diskId: number }) {
+  const treePath = useSearchParam("treePath");
   const [tree, setTree] = useState<TreeResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async (dirId: number | null) => {
+  const load = useCallback(async (parentPath: string | null) => {
     setLoading(true);
     setError(null);
     try {
-      const data = await api.tree.get(diskId, dirId);
+      const data = await api.tree.get(diskId, { parentPath });
       setTree(data);
     } catch (err: any) {
       setError(err.message);
@@ -109,7 +130,11 @@ export function TreeExplorer({ diskId }: { diskId: number }) {
     }
   }, [diskId]);
 
-  useEffect(() => { load(null); }, [load]);
+  useEffect(() => { load(treePath); }, [load, treePath]);
+
+  const navigateToPath = (path: string | null) => {
+    setSearchParam("treePath", path);
+  };
 
   const entries = tree?.entries ?? [];
   const maxBytes = entries[0]?.sizeBytes ?? 0;
@@ -118,7 +143,7 @@ export function TreeExplorer({ diskId }: { diskId: number }) {
     <div className="space-y-4">
       {tree && (
         <div className="flex items-center justify-between gap-4">
-          <Breadcrumb crumbs={tree.breadcrumb} onNavigate={load} />
+          <Breadcrumb crumbs={tree.breadcrumb} onNavigate={navigateToPath} />
           <span className="text-xs text-zinc-600 shrink-0">
             {formatBytes(tree.totalSizeBytes)} total
           </span>
@@ -147,7 +172,12 @@ export function TreeExplorer({ diskId }: { diskId: number }) {
         {!loading && !error && entries.length > 0 && (
           <div className="divide-y divide-zinc-800/60">
             {entries.map((entry) => (
-              <EntryRow key={entry.path} entry={entry} maxBytes={maxBytes} onEnter={(e) => load(e.id)} />
+              <EntryRow
+                key={entry.path}
+                entry={entry}
+                maxBytes={maxBytes}
+                onEnter={(e) => navigateToPath(e.path)}
+              />
             ))}
           </div>
         )}

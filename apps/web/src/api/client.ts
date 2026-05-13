@@ -47,8 +47,19 @@ export const api = {
   },
 
   tree: {
-    get: (diskId: number, parentId?: number | null): Promise<TreeResponse> => {
-      const qs = parentId != null ? `?parentId=${parentId}` : "";
+    get: (
+      diskId: number,
+      opts?: { parentId?: number | null; parentPath?: string | null } | number | null
+    ): Promise<TreeResponse> => {
+      const params = new URLSearchParams();
+      if (typeof opts === "number") {
+        params.set("parentId", String(opts));
+      } else if (opts?.parentId != null) {
+        params.set("parentId", String(opts.parentId));
+      } else if (opts?.parentPath) {
+        params.set("parentPath", opts.parentPath);
+      }
+      const qs = params.toString() ? `?${params.toString()}` : "";
       return request<TreeResponse>(`/disks/${diskId}/tree${qs}`);
     },
   },

@@ -236,14 +236,23 @@ export function JobDetails({
     copiedBytes?: number;
     skippedFiles?: number;
     errorFiles?: number;
+    pendingFiles?: number;
+    pendingBytes?: number;
     currentFile?: string | null;
+    currentFileBytes?: number;
+    currentFileBytesCopied?: number;
   } | null) : null;
 
   const copyTotalBytes = copyProgress?.totalBytes ?? 0;
   const copyCopiedBytes = copyProgress?.copiedBytes ?? 0;
+  const copyPendingFiles = copyProgress?.pendingFiles ?? 0;
+  const copyRemainingBytes = Math.max(
+    0,
+    copyProgress?.pendingBytes ?? (copyTotalBytes - copyCopiedBytes)
+  );
   const copyEtaSec =
     isCopy && job.status === "running" && bytesPerSec > 0 && copyTotalBytes > 0
-      ? Math.max(0, (copyTotalBytes - copyCopiedBytes) / bytesPerSec)
+      ? copyRemainingBytes / bytesPerSec
       : null;
 
   const primaryStats = [
@@ -268,9 +277,23 @@ export function JobDetails({
   const secondaryStats = [
     { label: "Elapsed", value: formatDuration(elapsedSec) },
     { label: "ETA", value: effectiveEta != null ? formatDuration(effectiveEta) : "—" },
-    { label: "Warnings", value: job.warningsCount.toString() },
+    isCopy
+      ? {
+          label: "Remaining",
+          value: copyPendingFiles.toLocaleString(),
+          sub: copyTotalBytes ? formatBytes(copyRemainingBytes) : undefined,
+        }
+      : { label: "Warnings", value: job.warningsCount.toString() },
     { label: "Errors", value: job.errorsCount.toString() },
   ];
+
+  const currentFileBytes = copyProgress?.currentFileBytes ?? 0;
+  const currentFileBytesCopied = Math.min(
+    currentFileBytes,
+    copyProgress?.currentFileBytesCopied ?? 0
+  );
+  const showCurrentFileProgress =
+    isCopy && copyProgress?.currentFile && currentFileBytes >= 100 * 1024 * 1024;
 
   // Build chart data from speed samples
   const startedAtMs = job.startedAt ? new Date(job.startedAt).getTime() : 0;
@@ -316,7 +339,17 @@ export function JobDetails({
 
       {/* Current file (copy jobs) */}
       {isCopy && copyProgress?.currentFile && job.status === "running" && (
-        <p className="text-xs text-zinc-600 truncate font-mono">{copyProgress.currentFile}</p>
+        <div className="space-y-1.5">
+          <p className="text-xs text-zinc-600 truncate font-mono">{copyProgress.currentFile}</p>
+          {showCurrentFileProgress && (
+            <>
+              <ProgressBar value={currentFileBytes > 0 ? currentFileBytesCopied / currentFileBytes : 0} />
+              <p className="text-xs text-zinc-600 font-mono">
+                Current file: {formatBytes(currentFileBytesCopied)} / {formatBytes(currentFileBytes)}
+              </p>
+            </>
+          )}
+        </div>
       )}
 
       {/* Copy skip/error summary */}
