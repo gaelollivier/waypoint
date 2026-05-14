@@ -99,6 +99,8 @@ diffRouter.get("/", (c) => {
   const destDiskId = Number(rawDestDiskId);
 
   const db = getDb();
+  const sourceDisk = getDiskById(db, sourceDiskId);
+  if (!sourceDisk) return c.json({ error: "Source disk not found" }, 404);
 
   // Resolve which diff job to use
   let diffJobId: number;
@@ -143,6 +145,9 @@ diffRouter.get("/", (c) => {
     return c.json({ error: "Path not found in diff" }, 404);
   }
 
+  const destDisk = getDiskById(db, destDiskId);
+  if (!destDisk) return c.json({ error: "Destination disk not found" }, 404);
+
   // Child directories
   const subdirs = db
     .prepare(
@@ -166,16 +171,22 @@ diffRouter.get("/", (c) => {
   // Direct files in this directory
   const files = db
     .prepare(
-      `SELECT id, kind, path, size_bytes
-       FROM diff_entries
-       WHERE diff_job_id = ? AND diff_dir_id = ?
-       ORDER BY size_bytes DESC`
+      `SELECT de.id, de.kind, de.path, de.size_bytes,
+              sf.size_bytes AS source_size_bytes,
+              df.size_bytes AS dest_size_bytes
+       FROM diff_entries de
+       LEFT JOIN files sf ON sf.id = de.source_file_id
+       LEFT JOIN files df ON df.id = de.dest_file_id
+       WHERE de.diff_job_id = ? AND de.diff_dir_id = ?
+       ORDER BY de.size_bytes DESC`
     )
     .all(diffJobId, dirRow.id) as Array<{
       id: number;
       kind: string;
       path: string;
       size_bytes: number;
+      source_size_bytes: number | null;
+      dest_size_bytes: number | null;
     }>;
 
   // Build breadcrumb
@@ -213,6 +224,8 @@ diffRouter.get("/", (c) => {
       path: f.path,
       sizeBytes: f.size_bytes,
       diffKind: f.kind as "added" | "changed" | "removed" | "present",
+      sourceSizeBytes: f.source_size_bytes,
+      destSizeBytes: f.dest_size_bytes,
     })),
   ].sort((a, b) => b.sizeBytes - a.sizeBytes);
 
@@ -221,6 +234,8 @@ diffRouter.get("/", (c) => {
     sourceDiskId,
     destDiskId,
     parentPath,
+    sourceCurrentPath: absolutePathForDiffPath(sourceDisk.mount_path, parentPath),
+    destCurrentPath: absolutePathForDiffPath(destDisk.mount_path, parentPath),
     breadcrumb,
     totalAdded: rootRow?.added_count ?? 0,
     totalAddedBytes: rootRow?.added_bytes ?? 0,
@@ -310,4 +325,10 @@ function buildBreadcrumb(
   }
 
   return crumbs;
+}
+
+function absolutePathForDiffPath(mountPath: string | null, diffPath: string): string | null {
+  if (!mountPath) return null;
+  if (diffPath === "/") return mountPath;
+  return path.join(mountPath, diffPath);
 }

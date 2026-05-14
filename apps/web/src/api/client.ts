@@ -124,6 +124,14 @@ export const api = {
       }),
   },
 
+  system: {
+    openInFinder: (path: string) =>
+      request<{ ok: boolean }>("/system/open-in-finder", {
+        method: "POST",
+        body: JSON.stringify({ path }),
+      }),
+  },
+
   jobs: {
     list: (params?: { status?: string; type?: string; targetDiskId?: number; limit?: number }) => {
       const qs = params

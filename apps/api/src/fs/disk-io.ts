@@ -78,6 +78,28 @@ export async function detectDiskKind(
 }
 
 // ---------------------------------------------------------------------------
+// Host file browser integration
+// ---------------------------------------------------------------------------
+
+/**
+ * Opens a path in Finder using macOS `open`.
+ *
+ * This function intentionally does not validate containment. Callers must
+ * validate the path against known disk mount roots before invoking it.
+ */
+export function openPathInFinder(absolutePath: string): void {
+  const proc = Bun.spawnSync(["open", absolutePath], {
+    stderr: "pipe",
+    stdout: "ignore",
+  });
+
+  if (proc.exitCode !== 0) {
+    const stderr = proc.stderr.toString().trim();
+    throw new Error(stderr || `open failed with exit code ${proc.exitCode}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Volume listing
 // ---------------------------------------------------------------------------
 
