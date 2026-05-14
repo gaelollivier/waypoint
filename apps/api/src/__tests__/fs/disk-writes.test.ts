@@ -1,8 +1,12 @@
 import { describe, it, expect, afterEach } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
-import { writeGeneratedTestFileAtomic } from "../../fs/disk-writes";
+import { deleteDuplicateFile, writeGeneratedTestFileAtomic } from "../../fs/disk-writes";
+import { JobManager } from "../../jobs/job-manager";
+import { ScanJobRunner } from "../../jobs/scan/scan-job";
+import { DuplicateDetectionJobRunner } from "../../jobs/duplicates/duplicate-job";
+import { makeTestDb, insertDisk } from "../helpers";
 
 const roots: string[] = [];
 
@@ -61,7 +65,7 @@ describe("writeGeneratedTestFileAtomic", () => {
     expect(readFileSync(finalPath, "utf8")).toBe("keep");
   });
 
-  it("refuses to overwrite an existing temp file", async () => {
+  it("refuses to overwrite an existing temp file (write speed test)", async () => {
     const root = makeRoot();
     const fileUuid = "33333333-3333-4333-8333-333333333333";
     const tempPath = path.join(root, `.waypoint-test-copy-${fileUuid}.write-speed-tmp-tmp`);
@@ -79,5 +83,130 @@ describe("writeGeneratedTestFileAtomic", () => {
 
     expect(existsSync(path.join(root, `.waypoint-test-copy-${fileUuid}`))).toBe(false);
     expect(readFileSync(tempPath, "utf8")).toBe("keep");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// deleteDuplicateFile
+// ---------------------------------------------------------------------------
+
+describe("deleteDuplicateFile", () => {
+  it("deletes a verified duplicate file", async () => {
+    const root = makeRoot();
+    const keepPath = path.join(root, "keep.txt");
+    const deletePath = path.join(root, "delete.txt");
+    writeFileSync(keepPath, "identical content");
+    writeFileSync(deletePath, "identical content");
+
+    const result = await deleteDuplicateFile({
+      deletePath,
+      keepPath,
+      diskMountPath: root,
+    });
+
+    expect(result.hash).toBeTruthy();
+    expect(existsSync(keepPath)).toBe(true);
+    expect(existsSync(deletePath)).toBe(false);
+  });
+
+  it("rejects when delete path escapes disk mount", async () => {
+    const root = makeRoot();
+    const otherRoot = makeRoot();
+    writeFileSync(path.join(root, "keep.txt"), "content");
+    writeFileSync(path.join(otherRoot, "escape.txt"), "content");
+
+    await expect(
+      deleteDuplicateFile({
+        deletePath: path.join(otherRoot, "escape.txt"),
+        keepPath: path.join(root, "keep.txt"),
+        diskMountPath: root,
+      })
+    ).rejects.toThrow("escapes disk mount");
+  });
+
+  it("rejects when delete and keep paths are the same file", async () => {
+    const root = makeRoot();
+    const filePath = path.join(root, "same.txt");
+    writeFileSync(filePath, "content");
+
+    await expect(
+      deleteDuplicateFile({
+        deletePath: filePath,
+        keepPath: filePath,
+        diskMountPath: root,
+      })
+    ).rejects.toThrow("same file");
+  });
+
+  it("rejects when hashes differ", async () => {
+    const root = makeRoot();
+    const keepPath = path.join(root, "keep.txt");
+    const deletePath = path.join(root, "delete.txt");
+    writeFileSync(keepPath, "content A");
+    writeFileSync(deletePath, "content B");
+
+    await expect(
+      deleteDuplicateFile({ deletePath, keepPath, diskMountPath: root })
+    ).rejects.toThrow("hash mismatch");
+
+    // Both files must survive
+    expect(existsSync(keepPath)).toBe(true);
+    expect(existsSync(deletePath)).toBe(true);
+  });
+
+  // This is the end-to-end test that reproduces the double-prefix bug:
+  // scan a real directory, run duplicate detection, then use the paths from
+  // the DB exactly as the cleanup route does.
+  it("works with paths from a real scan + duplicate detection", async () => {
+    const root = makeRoot();
+    mkdirSync(path.join(root, "photos"), { recursive: true });
+    mkdirSync(path.join(root, "backup"), { recursive: true });
+    writeFileSync(path.join(root, "photos", "img.jpg"), "duplicate content here");
+    writeFileSync(path.join(root, "backup", "img.jpg"), "duplicate content here");
+
+    const db = makeTestDb();
+    const jm = new JobManager(db);
+    const diskId = insertDisk(db, { mount_path: root, is_connected: 1 });
+
+    // Scan
+    const scanJob = jm.createJob({ type: "scan", targetDiskId: diskId });
+    const scanRunner = new ScanJobRunner({
+      jobId: scanJob.id, jobManager: jm, db, diskId, mountPath: root,
+    });
+    await scanRunner.start();
+
+    // Duplicate detection
+    const dupJob = jm.createJob({ type: "duplicate_detection", targetDiskId: diskId });
+    const dupRunner = new DuplicateDetectionJobRunner({
+      jobId: dupJob.id, jobManager: jm, db, diskId,
+    });
+    await dupRunner.start();
+
+    // Read paths from duplicate_group_files — exactly as the cleanup route does
+    const group = db
+      .prepare("SELECT id FROM duplicate_groups WHERE duplicate_job_id = ?")
+      .get(dupJob.id) as { id: number };
+    const files = db
+      .prepare("SELECT file_id, path FROM duplicate_group_files WHERE group_id = ? ORDER BY path")
+      .all(group.id) as Array<{ file_id: number; path: string }>;
+
+    expect(files.length).toBe(2);
+
+    // Paths in duplicate_group_files are absolute (written by scan).
+    // The cleanup route must use them directly — NOT prefix with mount_path.
+    const disk = db.prepare("SELECT mount_path FROM disks WHERE id = ?").get(diskId) as { mount_path: string };
+    const keepPath = files[0].path;
+    const deletePath = files[1].path;
+
+    const result = await deleteDuplicateFile({
+      deletePath,
+      keepPath,
+      diskMountPath: disk.mount_path,
+    });
+
+    expect(result.hash).toBeTruthy();
+    // files[0] = backup/img.jpg (kept), files[1] = photos/img.jpg (deleted)
+    expect(existsSync(path.join(root, "backup", "img.jpg"))).toBe(true);
+    expect(existsSync(path.join(root, "photos", "img.jpg"))).toBe(false);
   });
 });

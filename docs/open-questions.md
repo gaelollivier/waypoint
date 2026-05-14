@@ -268,7 +268,7 @@ Dest is a 5400rpm HDD. Parallel writes cause head thrashing and destroy throughp
 
 ---
 
-## Deferred / Backlog items (added 2026-05-12)
+## Implementation notes (added during development)
 
 ### M12 Write speed test job — implemented 2026-05-13
 
@@ -282,9 +282,6 @@ Implemented behavior:
 - Uses the same audited temp→rename streaming helper path as `copyFileAtomic`, with per-chunk progress feeding the existing bytes/sec samples.
 - Pause/resume checkpoints run inside the chunk loop, so large tests pause promptly.
 - Frontend launch lives on the disk overview header; job details show target file, mode, written bytes, remaining bytes, ETA, and write speed chart.
-
-### Scan snapshots / history
-Currently `files` is a "current state" table — each scan upserts rows for that disk. There's no way to browse previous scan states or compare scans over time. Future work: version the `files` table per `scan_job_id` so users can browse previous scan states in the tree view. This would also enable "what changed between scans" queries.
 
 ### User collaboration preferences
 

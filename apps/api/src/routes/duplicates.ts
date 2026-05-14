@@ -365,8 +365,9 @@ duplicatesRouter.post("/cleanup", async (c) => {
 
   // ---- Execute deletions one by one ----
 
-  // keepPath is guaranteed present in fileMap — validated above
-  const keepPath = path.join(disk.mount_path, fileMap.get(keepFileId)!);
+  // Paths in duplicate_group_files are absolute (written by the scan job),
+  // so we use them directly — no mount_path prefix needed.
+  const keepPath = fileMap.get(keepFileId)!;
 
   const results: Array<{
     fileId: number;
@@ -376,9 +377,9 @@ duplicatesRouter.post("/cleanup", async (c) => {
   }> = [];
 
   for (const fileId of deleteFileIds) {
-    // deletePath is guaranteed present in fileMap — validated above
-    const relativePath = fileMap.get(fileId)!;
-    const deletePath = path.join(disk.mount_path, relativePath);
+    // filePath is guaranteed present in fileMap — validated above
+    const filePath = fileMap.get(fileId)!;
+    const deletePath = filePath;
 
     try {
       await deleteDuplicateFile({
@@ -386,11 +387,11 @@ duplicatesRouter.post("/cleanup", async (c) => {
         keepPath,
         diskMountPath: disk.mount_path,
       });
-      results.push({ fileId, path: relativePath, status: "deleted" });
+      results.push({ fileId, path: filePath, status: "deleted" });
     } catch (err: any) {
       results.push({
         fileId,
-        path: relativePath,
+        path: filePath,
         status: "error",
         error: err.message,
       });

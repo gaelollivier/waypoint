@@ -63,11 +63,12 @@ The scan job (M6) is the architectural keystone — if its resumability is wrong
 
 Improvements planned but not yet scheduled into a milestone.
 
-| Item | Doc | Notes |
-|---|---|---|
-| Scan ETA: switch from bytes/sec to files/sec + inode count | `open-questions.md` | `bytesProcessed` is the sum of stat'd file sizes, not bytes read — a single large file causes a massive rate spike. Scan time is uniform per-inode (stat cost), so `filesPerSec` against `df -i` inode count is a much more stable ETA. Also consider widening the 5s rolling window or using an EMA. |
-| Scan snapshots / history | `open-questions.md` | Version `files` table per `scan_job_id` so users can browse previous scan states and compare scans over time. Currently `files` is overwritten on each scan. |
-| Copy job: rich insight view (match scan job pattern) | | Same philosophy as scan jobs — show a rich view of all available job insights in both the diff view (where the copy is initiated) and the job details page. Reuse the same component. |
+| Item | Notes |
+|---|---|
+| Move heavy jobs off the main thread | Duplicate detection blocks the event loop with synchronous SQLite (GROUP BY in Phase 1, batch inserts in Phase 3). Server becomes very slow during large jobs. Options: Bun worker thread with its own SQLite connection, or paginated Phase 1 query with yields. |
+| Scan ETA: switch from bytes/sec to files/sec + inode count | `bytesProcessed` is the sum of stat'd file sizes, not bytes read — a single large file causes a massive rate spike. Scan time is uniform per-inode (stat cost), so `filesPerSec` against `df -i` inode count is a much more stable ETA. Also consider widening the 5s rolling window or using an EMA. |
+| Scan snapshots / history | Version `files` table per `scan_job_id` so users can browse previous scan states and compare scans over time. Currently `files` is overwritten on each scan. |
+| Copy job: rich insight view (match scan job pattern) | Same philosophy as scan jobs — show a rich view of all available job insights in both the diff view (where the copy is initiated) and the job details page. Reuse the same component. |
 
 Recently completed backlog:
 
