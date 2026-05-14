@@ -703,8 +703,10 @@ export class CopyJobRunner extends JobRunner {
       parentId = row.id;
     }
 
-    // parentId is guaranteed non-null: segments always has at least ["/"]
-    return parentId!;
+    if (parentId === null) {
+      throw new Error("invariant: ensureDirectoryChain produced no directory — segments was empty");
+    }
+    return parentId;
   }
 
   // -------------------------------------------------------------------------

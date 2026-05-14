@@ -308,12 +308,12 @@ async function writeAtomicFileFromChunks(opts: {
   }
 
   // 2. Dest existence guard: NEVER overwrite
-  if (await Bun.file(destAbsPath).exists()) {
+  if (await fileExists(destAbsPath)) {
     throw new FileAlreadyExistsError(destAbsPath);
   }
 
   // 3. Temp existence guard: UUID suffix makes collision near-impossible, but defend anyway
-  if (await Bun.file(tempPath).exists()) {
+  if (await fileExists(tempPath)) {
     throw new Error(
       `copyFileAtomic: temp file already exists at ${tempPath} — UUID collision or stale temp`
     );
@@ -413,10 +413,15 @@ export async function deleteDuplicateFile(opts: {
   const { deletePath, keepPath, diskMountPath } = opts;
   const resolvedMount = path.resolve(diskMountPath);
 
-  // 1. Path containment: the file being deleted must be on the expected disk
+  // 1. Path containment: both files must be on the expected disk
   if (!path.resolve(deletePath).startsWith(resolvedMount)) {
     throw new Error(
       `deleteDuplicateFile: delete path "${deletePath}" escapes disk mount "${diskMountPath}"`
+    );
+  }
+  if (!path.resolve(keepPath).startsWith(resolvedMount)) {
+    throw new Error(
+      `deleteDuplicateFile: keep path "${keepPath}" escapes disk mount "${diskMountPath}"`
     );
   }
 

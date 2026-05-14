@@ -309,6 +309,8 @@ export class DiffJobRunner extends JobRunner {
     function depth(id: number): number {
       const a = acc.get(id);
       if (!a) return 0;
+      // depth 0 = root dir, which simply re-walks (cheap, one iteration).
+      // Using 0 as "not yet computed" is intentional — a separate sentinel is not worth the complexity.
       if (a.depth !== 0) return a.depth;
       let d = 0;
       let cur: number | null = id;

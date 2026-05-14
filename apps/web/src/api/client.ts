@@ -103,8 +103,8 @@ export const api = {
       diskId: number,
       body: {
         duplicateGroupId: number;
-        keepFileId: number;
-        deleteFileIds: number[];
+        keepFile: { fileId: number; path: string };
+        deleteFiles: Array<{ fileId: number; path: string }>;
       }
     ) =>
       request<CleanupResponse>(`/disks/${diskId}/duplicates/cleanup`, {

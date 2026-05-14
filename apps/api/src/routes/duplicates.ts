@@ -244,8 +244,8 @@ function isBrowserUserAgent(ua: string | undefined): boolean {
 interface CleanupRequestBody {
   initiatedFromWebUI: boolean;
   duplicateGroupId: number;
-  keepFileId: number;
-  deleteFileIds: number[];
+  keepFile: { fileId: number; path: string };
+  deleteFiles: Array<{ fileId: number; path: string }>;
 }
 
 duplicatesRouter.post("/cleanup", async (c) => {
@@ -272,24 +272,27 @@ duplicatesRouter.post("/cleanup", async (c) => {
   // ---- Input validation ----
 
   const diskId = Number(c.req.param("id"));
-  const { duplicateGroupId, keepFileId, deleteFileIds } = body;
+  const { duplicateGroupId, keepFile, deleteFiles } = body;
 
   if (!Number.isInteger(duplicateGroupId) || duplicateGroupId <= 0) {
     return c.json({ error: "Invalid duplicateGroupId" }, 400);
   }
-  if (!Number.isInteger(keepFileId) || keepFileId <= 0) {
-    return c.json({ error: "Invalid keepFileId" }, 400);
+  if (!keepFile || !Number.isInteger(keepFile.fileId) || keepFile.fileId <= 0 || typeof keepFile.path !== "string") {
+    return c.json({ error: "Invalid keepFile — must include fileId and path" }, 400);
   }
-  if (!Array.isArray(deleteFileIds) || deleteFileIds.length === 0) {
-    return c.json({ error: "deleteFileIds must be a non-empty array" }, 400);
+  if (!Array.isArray(deleteFiles) || deleteFiles.length === 0) {
+    return c.json({ error: "deleteFiles must be a non-empty array" }, 400);
   }
-  if (deleteFileIds.some((id) => !Number.isInteger(id) || id <= 0)) {
-    return c.json({ error: "All deleteFileIds must be positive integers" }, 400);
+  if (deleteFiles.some((f) => !Number.isInteger(f.fileId) || f.fileId <= 0 || typeof f.path !== "string")) {
+    return c.json({ error: "All deleteFiles entries must include fileId and path" }, 400);
   }
+
+  const keepFileId = keepFile.fileId;
+  const deleteFileIds = deleteFiles.map((f) => f.fileId);
 
   // The file to keep must not appear in the delete list
   if (deleteFileIds.includes(keepFileId)) {
-    return c.json({ error: "keepFileId must not appear in deleteFileIds" }, 400);
+    return c.json({ error: "keepFile must not appear in deleteFiles" }, 400);
   }
 
   const db = getDb();
@@ -349,6 +352,20 @@ duplicatesRouter.post("/cleanup", async (c) => {
       return c.json(
         { error: `File ${fileId} is not a member of duplicate group ${duplicateGroupId}` },
         400
+      );
+    }
+  }
+
+  // Verify that the paths sent by the frontend match the paths in the DB.
+  // The human reviewed these exact paths in the confirmation dialog — if they
+  // don't match what the DB has, something is wrong and we must not proceed.
+  const sentFiles = [keepFile, ...deleteFiles];
+  for (const sent of sentFiles) {
+    const dbPath = fileMap.get(sent.fileId);
+    if (dbPath !== sent.path) {
+      return c.json(
+        { error: `Path mismatch for file ${sent.fileId}: UI sent "${sent.path}" but DB has "${dbPath}"` },
+        409
       );
     }
   }

@@ -361,10 +361,10 @@ export function DuplicateExplorer({
     mutationFn: (target: { group: DuplicateGroup; keepFile: DuplicateGroupFile }) =>
       api.duplicates.cleanup(diskId, {
         duplicateGroupId: target.group.id,
-        keepFileId: target.keepFile.fileId,
-        deleteFileIds: target.group.files
+        keepFile: { fileId: target.keepFile.fileId, path: target.keepFile.path },
+        deleteFiles: target.group.files
           .filter((f) => f.fileId !== target.keepFile.fileId)
-          .map((f) => f.fileId),
+          .map((f) => ({ fileId: f.fileId, path: f.path })),
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["duplicates", diskId] });
