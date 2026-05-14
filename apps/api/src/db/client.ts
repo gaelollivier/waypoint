@@ -7,6 +7,11 @@ const DB_FILENAME = "waypoint.db";
 
 let _db: Database | null = null;
 
+/** Replace the DB singleton — test use only. */
+export function setDb(db: Database): void {
+  _db = db;
+}
+
 export function getDb(): Database {
   if (_db) return _db;
 
