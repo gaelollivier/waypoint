@@ -133,16 +133,17 @@ function DuplicateGroupCard({
             >
               {keepFileId === f.fileId ? "✓" : ""}
             </button>
-            <span
-              className={`font-mono text-xs truncate ${
+            <a
+              href={`/disks/${diskId}?tab=tree&treePath=${encodeURIComponent(f.path.substring(0, f.path.lastIndexOf("/")))}`}
+              className={`font-mono text-xs truncate hover:underline ${
                 keepFileId !== null && keepFileId !== f.fileId
                   ? "text-red-400/70 line-through"
-                  : "text-zinc-500"
+                  : "text-zinc-500 hover:text-zinc-300"
               }`}
               title={f.path}
             >
               {f.path}
-            </span>
+            </a>
             {keepFileId === f.fileId && (
               <span className="text-[10px] text-green-500 font-medium shrink-0">KEEP</span>
             )}
