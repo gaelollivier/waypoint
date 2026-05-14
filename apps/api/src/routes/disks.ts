@@ -7,6 +7,7 @@ import { registerDisk, getAllDisks, getDiskById, updateDisk } from "../disks/reg
 import { getLockManager } from "../locks";
 import { getJobManager, registerRunner, unregisterRunner } from "../jobs";
 import { ScanJobRunner } from "../jobs/scan/scan-job";
+import { WriteSpeedJobRunner } from "../jobs/write-speed/write-speed-job";
 
 
 export const disksRouter = new Hono();
@@ -144,6 +145,70 @@ disksRouter.post("/:id/scan", async (c) => {
   runner.start().finally(() => unregisterRunner(job.id));
 
   return c.json({ jobId: job.id }, 202);
+});
+
+// Start a generated write speed test for a disk.
+// Body: { sizeBytes?: number, mode?: "null" | "random" }
+disksRouter.post("/:id/write-speed-test", async (c) => {
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<{ sizeBytes?: number; mode?: "null" | "random" }>().catch(() => ({}));
+  const db = getDb();
+  const disk = getDiskById(db, id);
+  if (!disk) return c.json({ error: "Disk not found" }, 404);
+  if (!disk.is_connected || !disk.mount_path) {
+    return c.json({ error: "Disk is not connected" }, 409);
+  }
+
+  const sizeBytes = body.sizeBytes ?? 1024 * 1024 * 1024;
+  if (!Number.isSafeInteger(sizeBytes) || sizeBytes <= 0) {
+    return c.json({ error: "sizeBytes must be a positive safe integer" }, 400);
+  }
+
+  const mode = body.mode ?? "null";
+  if (mode !== "null" && mode !== "random") {
+    return c.json({ error: "mode must be null or random" }, 400);
+  }
+
+  const activeWriter = db
+    .prepare(
+      `SELECT id FROM jobs
+       WHERE status IN ('queued', 'running', 'paused')
+         AND (
+           (type = 'copy' AND dest_disk_id = ?)
+           OR (type = 'write_speed_test' AND target_disk_id = ?)
+         )
+       LIMIT 1`
+    )
+    .get(id, id) as { id: number } | null;
+  if (activeWriter) {
+    return c.json(
+      { error: `A write job is already active on this disk (job ${activeWriter.id})` },
+      409
+    );
+  }
+
+  const jm = getJobManager();
+  const fileUuid = crypto.randomUUID();
+  const job = jm.createJob({
+    type: "write_speed_test",
+    targetDiskId: id,
+    payload: { sizeBytes, mode, fileUuid },
+  });
+
+  const runner = new WriteSpeedJobRunner({
+    jobId: job.id,
+    jobManager: jm,
+    diskId: id,
+    mountPath: disk.mount_path,
+    totalBytes: sizeBytes,
+    mode,
+    fileUuid,
+  });
+
+  registerRunner(job.id, runner);
+  runner.start().finally(() => unregisterRunner(job.id));
+
+  return c.json({ jobId: job.id, filePath: `.waypoint-test-copy-${fileUuid}` }, 202);
 });
 
 // Events log across all jobs for a disk (reverse-chron, filterable)

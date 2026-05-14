@@ -226,7 +226,8 @@ export function JobDetails({
 
   const isCopy = job.type === "copy";
   const isScan = job.type === "scan";
-  const dataPerSecLabel = isScan ? "Data scanned/s" : "Throughput";
+  const isWriteSpeed = job.type === "write_speed_test";
+  const dataPerSecLabel = isScan ? "Data scanned/s" : isWriteSpeed ? "Write speed" : "Throughput";
 
   // Copy-specific progress: use totalFiles/totalBytes from progressJson
   const copyProgress = isCopy ? (job.progressJson as {
@@ -242,6 +243,13 @@ export function JobDetails({
     currentFileBytes?: number;
     currentFileBytesCopied?: number;
   } | null) : null;
+  const writeSpeedProgress = isWriteSpeed ? (job.progressJson as {
+    filePath?: string;
+    mode?: "null" | "random";
+    totalBytes?: number;
+    bytesWritten?: number;
+    diskFreeBytes?: number | null;
+  } | null) : null;
 
   const copyTotalBytes = copyProgress?.totalBytes ?? 0;
   const copyCopiedBytes = copyProgress?.copiedBytes ?? 0;
@@ -254,30 +262,59 @@ export function JobDetails({
     isCopy && job.status === "running" && bytesPerSec > 0 && copyTotalBytes > 0
       ? copyRemainingBytes / bytesPerSec
       : null;
+  const writeSpeedTotalBytes = writeSpeedProgress?.totalBytes ?? 0;
+  const writeSpeedWrittenBytes = writeSpeedProgress?.bytesWritten ?? job.bytesProcessed;
+  const writeSpeedRemainingBytes = Math.max(0, writeSpeedTotalBytes - writeSpeedWrittenBytes);
+  const writeSpeedEtaSec =
+    isWriteSpeed && job.status === "running" && bytesPerSec > 0 && writeSpeedTotalBytes > 0
+      ? writeSpeedRemainingBytes / bytesPerSec
+      : null;
 
-  const primaryStats = [
-    { label: "Files", value: job.itemsProcessed.toLocaleString(),
-      sub: isCopy && copyProgress?.totalFiles ? `/ ${copyProgress.totalFiles.toLocaleString()}` : undefined },
-    { label: "Data", value: formatBytes(job.bytesProcessed),
-      sub: isCopy && copyTotalBytes ? `/ ${formatBytes(copyTotalBytes)}` : undefined },
-    {
-      label: "Files/sec",
-      value: formatRate(filesPerSec, "/s"),
-      sub: instant ? `avg ${formatRate(avgFilesPerSec, "/s")}` : undefined,
-    },
-    {
-      label: dataPerSecLabel,
-      value: formatBytesPerSec(bytesPerSec),
-      sub: instant ? `avg ${formatBytesPerSec(avgBytesPerSec)}` : undefined,
-    },
-  ];
+  const primaryStats = isWriteSpeed
+    ? [
+        {
+          label: "Written",
+          value: formatBytes(writeSpeedWrittenBytes),
+          sub: writeSpeedTotalBytes ? `/ ${formatBytes(writeSpeedTotalBytes)}` : undefined,
+        },
+        { label: "Mode", value: writeSpeedProgress?.mode ?? "null" },
+        {
+          label: "Write speed",
+          value: formatBytesPerSec(bytesPerSec),
+          sub: instant ? `avg ${formatBytesPerSec(avgBytesPerSec)}` : undefined,
+        },
+        { label: "Remaining", value: formatBytes(writeSpeedRemainingBytes) },
+      ]
+    : [
+        { label: "Files", value: job.itemsProcessed.toLocaleString(),
+          sub: isCopy && copyProgress?.totalFiles ? `/ ${copyProgress.totalFiles.toLocaleString()}` : undefined },
+        { label: "Data", value: formatBytes(job.bytesProcessed),
+          sub: isCopy && copyTotalBytes ? `/ ${formatBytes(copyTotalBytes)}` : undefined },
+        {
+          label: "Files/sec",
+          value: formatRate(filesPerSec, "/s"),
+          sub: instant ? `avg ${formatRate(avgFilesPerSec, "/s")}` : undefined,
+        },
+        {
+          label: dataPerSecLabel,
+          value: formatBytesPerSec(bytesPerSec),
+          sub: instant ? `avg ${formatBytesPerSec(avgBytesPerSec)}` : undefined,
+        },
+      ];
 
-  const effectiveEta = isCopy ? copyEtaSec : etaSec;
+  const effectiveEta = isWriteSpeed ? writeSpeedEtaSec : isCopy ? copyEtaSec : etaSec;
 
   const secondaryStats = [
     { label: "Elapsed", value: formatDuration(elapsedSec) },
     { label: "ETA", value: effectiveEta != null ? formatDuration(effectiveEta) : "—" },
-    isCopy
+    isWriteSpeed
+      ? {
+          label: "Free",
+          value: writeSpeedProgress?.diskFreeBytes != null
+            ? formatBytes(writeSpeedProgress.diskFreeBytes)
+            : "—",
+        }
+      : isCopy
       ? {
           label: "Remaining",
           value: copyPendingFiles.toLocaleString(),
@@ -332,10 +369,18 @@ export function JobDetails({
       )}
 
       {/* Progress bar */}
+      {isWriteSpeed && writeSpeedTotalBytes > 0 && (
+        <ProgressBar value={Math.min(1, writeSpeedWrittenBytes / writeSpeedTotalBytes)} />
+      )}
       {isCopy && copyTotalBytes > 0 && (
         <ProgressBar value={Math.min(1, copyCopiedBytes / copyTotalBytes)} />
       )}
-      {!isCopy && progress != null && <ProgressBar value={progress} />}
+      {!isCopy && !isWriteSpeed && progress != null && <ProgressBar value={progress} />}
+
+      {/* Current output file (write speed jobs) */}
+      {isWriteSpeed && writeSpeedProgress?.filePath && (
+        <p className="text-xs text-zinc-600 truncate font-mono">{writeSpeedProgress.filePath}</p>
+      )}
 
       {/* Current file (copy jobs) */}
       {isCopy && copyProgress?.currentFile && job.status === "running" && (
@@ -370,14 +415,16 @@ export function JobDetails({
 
       {/* Charts */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <SpeedChart
-          data={rateData}
-          dataKey="filesPerSec"
-          color="#3b82f6"
-          yFormatter={(v) => formatRate(v, "/s")}
-          tooltipFormatter={(v) => formatRate(v, "/s")}
-          label="Files/sec"
-        />
+        {!isWriteSpeed && (
+          <SpeedChart
+            data={rateData}
+            dataKey="filesPerSec"
+            color="#3b82f6"
+            yFormatter={(v) => formatRate(v, "/s")}
+            tooltipFormatter={(v) => formatRate(v, "/s")}
+            label="Files/sec"
+          />
+        )}
         <SpeedChart
           data={rateData}
           dataKey="bytesPerSec"
@@ -389,7 +436,7 @@ export function JobDetails({
       </div>
 
       {/* Footer note */}
-      {!isCopy && usedBytes != null && (
+      {!isCopy && !isWriteSpeed && usedBytes != null && (
         <p className="text-xs text-zinc-600">
           Progress and ETA estimated against {formatBytes(usedBytes)} of used disk space
           {disk?.label && <> on <span className="text-zinc-400">{disk.label}</span></>}.

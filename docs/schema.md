@@ -81,14 +81,14 @@ One row per job, primitive or composite. Polymorphic via `type`.
 | Field | Notes |
 |---|---|
 | `id` | INTEGER PK |
-| `type` | `scan` / `copy` / `verify` / `backup` (composite) |
+| `type` | `scan` / `diff` / `copy` / `verify` / `duplicate_detection` / `write_speed_test` / `backup` (composite) |
 | `parent_job_id` | Set on sub-jobs of a composite. Nullable. |
 | `status` | `queued` / `running` / `paused` / `completed` / `failed` / `cancelled` |
 | `phase` | For composite jobs: `scanning_source` / `scanning_dest` / `diffing` / `copying` / `done`. NULL for primitives. |
 | `active_sub_job_id` | Composite's currently-active child |
 | `source_disk_id` | Top-level disk reference for indexed lookup. Nullable for jobs without a source (e.g. verify). |
 | `dest_disk_id` | Top-level disk reference for indexed lookup. Nullable. |
-| `target_disk_id` | The single disk a primitive job operates on (scan, verify). Nullable. |
+| `target_disk_id` | The single disk a primitive job operates on (scan, verify, duplicate detection, write speed test). Nullable. |
 | `payload_json` | Type-specific extra input (file sets, options, etc.). The common disk fields are promoted to top-level columns above so most filters never touch JSON. |
 | `progress_json` | Live metrics (files/sec, MB/sec, ETA) |
 | `bytes_processed` / `items_processed` | Aggregate counters |

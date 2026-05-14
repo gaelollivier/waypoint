@@ -5,6 +5,7 @@ import { getJobManager, getRunner, registerRunner, unregisterRunner } from "../j
 import { sseRegistry } from "../jobs/sse";
 import { ScanJobRunner } from "../jobs/scan/scan-job";
 import { CopyJobRunner } from "../jobs/copy/copy-job";
+import { WriteSpeedJobRunner } from "../jobs/write-speed/write-speed-job";
 import { getDiskById } from "../disks/registry";
 
 export const jobsRouter = new Hono();
@@ -172,6 +173,36 @@ jobsRouter.post("/:id/resume", (c) => {
       diffJobId: payload.diffJobId,
       destMountPath: destDisk.mount_path,
       sourceMountPath: sourceDisk.mount_path,
+    });
+
+    registerRunner(job.id, runner);
+    runner.start().finally(() => unregisterRunner(job.id));
+    return c.json({ ok: true, rehydrated: true });
+  }
+
+  if (job.type === "write_speed_test") {
+    if (job.target_disk_id == null) {
+      return c.json({ error: "Write speed test has no target disk" }, 500);
+    }
+    const disk = getDiskById(db, job.target_disk_id);
+    if (!disk) return c.json({ error: "Target disk no longer exists" }, 410);
+    if (!disk.is_connected || !disk.mount_path) {
+      return c.json({ error: "Target disk is not connected" }, 409);
+    }
+
+    const payload = job.payload_json ? JSON.parse(job.payload_json) : {};
+    if (!payload.sizeBytes || !payload.mode || !payload.fileUuid) {
+      return c.json({ error: "Write speed test payload is incomplete" }, 500);
+    }
+
+    const runner = new WriteSpeedJobRunner({
+      jobId: job.id,
+      jobManager: jm,
+      diskId: job.target_disk_id,
+      mountPath: disk.mount_path,
+      totalBytes: payload.sizeBytes,
+      mode: payload.mode,
+      fileUuid: payload.fileUuid,
     });
 
     registerRunner(job.id, runner);

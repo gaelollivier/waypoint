@@ -22,7 +22,7 @@ Personal backup tool for cold storage drives. SSD source → multiple HDDs (one 
 
 ## Status
 
-**Implementation in progress.** Design phase complete; milestones 1–11 done. M11 (copy job) complete. Next up: M12 — verify job. See `open-questions.md` for details.
+**Implementation in progress.** Design phase complete; milestones 1–12 done. M12 (write speed test job) complete. Next up: M13 — verify job. See `open-questions.md` for details.
 
 **Stack**: TypeScript + Bun, Hono (HTTP), React + Vite (UI), `bun:sqlite`, BLAKE3, SSE for progress.
 
@@ -48,11 +48,12 @@ Personal backup tool for cold storage drives. SSD source → multiple HDDs (one 
 | 8 | Tree view (virtualized disk explorer, materialized aggregates) | ✅ Done |
 | 9 | Diff (diff job, diff_entries + diff_dirs, DiffExplorer UI) | ✅ Done |
 | 10 | Duplicate file detection (job, API, UI tab) | ✅ Done |
-| 11 | Copy job (temp→rename, inline full hash, resume-safe, full UI) | 🔜 In progress |
-| 12 | Verify job (re-hash files, surface mismatches) | 🔲 |
-| 13 | Quarantine & cleanup (orphan temp files → .waypoint-quarantine/) | 🔲 |
-| 14 | Polish (ETAs, exclude editor, error review UI, SMART data) | 🔲 |
-| 15 | Backup composite (scan→scan→diff→copy pipeline, pause-as-unit) | 🔲 |
+| 11 | Copy job (temp→rename, inline full hash, resume-safe, full UI) | ✅ Done |
+| 12 | Write speed test job (generated data → `.waypoint-test-copy-[uuid]`, pause/resume, throughput UI) | ✅ Done |
+| 13 | Verify job (re-hash files, surface mismatches) | 🔲 |
+| 14 | Quarantine & cleanup (orphan temp files → .waypoint-quarantine/) | 🔲 |
+| 15 | Polish (ETAs, exclude editor, error review UI, SMART data) | 🔲 |
+| 16 | Backup composite (scan→scan→diff→copy pipeline, pause-as-unit) | 🔲 |
 
 The scan job (M6) is the architectural keystone — if its resumability is wrong, everything else is wrong.
 
@@ -74,6 +75,8 @@ Recently completed backlog:
 - Tree view syncs the current folder path with the URL and browser history.
 - Copy job status on the diff view links to the job details page.
 - Copy job progress shows pending files/bytes, ETA, and per-file byte progress for large files.
+- Copy job milestone marked complete after successful manual copy testing.
+- Write speed test job writes generated null/random data to `.waypoint-test-copy-[uuid]`, uses the same temp→rename streaming write path as copy, supports pause/resume, and shows live write-speed states/charts.
 
 ---
 

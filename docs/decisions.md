@@ -102,7 +102,7 @@ Acceptable for v1 given the user's hardware (slow HDD where full verify is hours
 ## Concurrency / locking
 
 - **Operations are categorized by what they modify on the disk itself**, not by what they read.
-  - **Writers** (modify disk contents): `copy`, quarantine moves.
+  - **Writers** (modify disk contents): `copy`, `write_speed_test`, quarantine moves.
   - **Readers** (only read disk; any state changes go to the host DB): `scan`, `verify`, diff queries, tree browsing.
 - **Write lock per disk.** Held by the active writer for that disk. Blocks all other operations on that disk while active.
 - **Paused write lock** allows readers to run on the same disk. Blocks other writers. Resume re-acquires the exclusive write lock.
@@ -115,7 +115,7 @@ Acceptable for v1 given the user's hardware (slow HDD where full verify is hours
 ## Jobs
 
 - Every long-running operation is a **job** with durable state in SQLite.
-- Primitive job types: `scan`, `diff`, `copy`, `verify`. (`diff` is a job despite being fast — keeps the model consistent, gives it a status, and its output tables (`diff_entries`, `diff_dirs`) are keyed by `diff_job_id`.)
+- Primitive job types: `scan`, `diff`, `copy`, `verify`, `duplicate_detection`, `write_speed_test`. (`diff` is a job despite being fast — keeps the model consistent, gives it a status, and its output tables (`diff_entries`, `diff_dirs`) are keyed by `diff_job_id`.)
 - Composite job type: `backup` — orchestrates `scan(source) → scan(dest) → diff → copy(missing/changed)`. Sequential phases. Verify is NOT auto-chained (too slow to bundle).
 - **Composite jobs are themselves stateful.** A `backup` job has its own row tracking current phase + reference to the active sub-job. Pause on the composite freezes the whole pipeline at its current point (sub-job pauses, composite remains in its current phase). User can unplug the disk or reboot mid-backup; on resume, the composite continues from the same sub-job + same point within it.
 - Job statuses: `queued → running → paused / completed / failed / cancelled`.

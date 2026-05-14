@@ -86,6 +86,31 @@ export function DiskDetailPage({ id }: { id: string }) {
     onError: (err: any) => alert(`Scan failed: ${err.message}`),
   });
 
+  const writeSpeedTest = useMutation({
+    mutationFn: (body: { sizeBytes: number; mode: "null" | "random" }) =>
+      api.disks.writeSpeedTest(diskId, body),
+    onSuccess: ({ jobId }) => {
+      queryClient.invalidateQueries({ queryKey: ["jobs", { diskId }] });
+      navigate(`/jobs/${jobId}`);
+    },
+    onError: (err: any) => alert(`Write speed test failed: ${err.message}`),
+  });
+
+  const startWriteSpeedTest = () => {
+    const rawGb = prompt("Write speed test size in GB", "1");
+    if (rawGb == null) return;
+    const gb = Number(rawGb);
+    if (!Number.isFinite(gb) || gb <= 0) {
+      alert("Enter a positive size in GB.");
+      return;
+    }
+    const mode = confirm("Use random data? Cancel uses null data.") ? "random" : "null";
+    writeSpeedTest.mutate({
+      sizeBytes: Math.round(gb * 1024 * 1024 * 1024),
+      mode,
+    });
+  };
+
   if (diskLoading) return <p className="text-sm text-zinc-500 p-6">Loading…</p>;
   if (!disk) return <p className="text-sm text-red-400 p-6">Disk not found.</p>;
 
@@ -97,7 +122,12 @@ export function DiskDetailPage({ id }: { id: string }) {
         </Link>
       </div>
 
-      <DiskHeader disk={disk} onScan={() => scan.mutate()} hasActiveJob={activeJob != null} />
+      <DiskHeader
+        disk={disk}
+        onScan={() => scan.mutate()}
+        onWriteSpeedTest={startWriteSpeedTest}
+        hasActiveJob={activeJob != null}
+      />
 
       <div className="flex gap-1 border-b border-zinc-800">
         {(["overview", "tree", "diff", "duplicates", "events"] as Tab[]).map((t) => (
@@ -150,10 +180,12 @@ export function DiskDetailPage({ id }: { id: string }) {
 function DiskHeader({
   disk,
   onScan,
+  onWriteSpeedTest,
   hasActiveJob,
 }: {
   disk: Disk;
   onScan: () => void;
+  onWriteSpeedTest: () => void;
   hasActiveJob: boolean;
 }) {
   const usedBytes =
@@ -183,12 +215,20 @@ function DiskHeader({
         </div>
         <div className="flex items-center gap-2 shrink-0">
           {disk.isConnected && !hasActiveJob && (
-            <button
-              onClick={onScan}
-              className="rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 transition-colors"
-            >
-              Scan
-            </button>
+            <>
+              <button
+                onClick={onWriteSpeedTest}
+                className="rounded bg-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-700 transition-colors"
+              >
+                Test write
+              </button>
+              <button
+                onClick={onScan}
+                className="rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 transition-colors"
+              >
+                Scan
+              </button>
+            </>
           )}
         </div>
       </div>
