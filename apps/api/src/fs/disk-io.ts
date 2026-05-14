@@ -84,11 +84,24 @@ export async function detectDiskKind(
 /**
  * Opens a path in Finder using macOS `open`.
  *
- * This function intentionally does not validate containment. Callers must
- * validate the path against known disk mount roots before invoking it.
+ * Guardrails:
+ *   - The resolved path must be within one of the provided allowedRoots.
+ *     This is defense-in-depth — callers also validate, but this function
+ *     refuses to open arbitrary paths even if a caller forgets.
  */
-export function openPathInFinder(absolutePath: string): void {
-  const proc = Bun.spawnSync(["open", absolutePath], {
+export function openPathInFinder(absolutePath: string, allowedRoots: string[]): void {
+  const resolved = path.resolve(absolutePath);
+  const withinRoot = allowedRoots.some((root) => {
+    const resolvedRoot = path.resolve(root);
+    return resolved === resolvedRoot || resolved.startsWith(resolvedRoot + "/");
+  });
+  if (!withinRoot) {
+    throw new Error(
+      `openPathInFinder: path "${absolutePath}" is not within any allowed root`
+    );
+  }
+
+  const proc = Bun.spawnSync(["open", resolved], {
     stderr: "pipe",
     stdout: "ignore",
   });

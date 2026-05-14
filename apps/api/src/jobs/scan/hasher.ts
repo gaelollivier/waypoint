@@ -1,6 +1,6 @@
 import { _BLAKE3, blake3 } from "@noble/hashes/blake3.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
-import { readFileSlice, readFileAll } from "../../fs/disk-io";
+import { readFileSlice, readFileAll, readFileStream } from "../../fs/disk-io";
 
 export const HASH_ALGO_VERSION = 1;
 
@@ -63,11 +63,34 @@ export async function computeSampledHash(filePath: string, sizeBytes: number): P
 /**
  * Computes a full BLAKE3 hash of a file's entire content.
  * Used for files ≤ 100KB, and during copy jobs for the full_hash column.
+ *
+ * WARNING: Loads the entire file into memory. Only safe for small files.
+ * For large files, use computeFullHashStreaming() instead.
+ *
  * Returns a 64-char hex string.
  */
 export async function computeFullHash(filePath: string): Promise<string> {
   const buf = await readFileAll(filePath);
   return bytesToHex(blake3(new Uint8Array(buf)));
+}
+
+/**
+ * Computes a full BLAKE3 hash by streaming the file in chunks.
+ * Safe for files of any size — memory usage is bounded by the chunk size
+ * chosen by Bun's ReadableStream (typically 64 KB).
+ *
+ * Returns a 64-char hex string.
+ */
+export async function computeFullHashStreaming(filePath: string): Promise<string> {
+  const stream = readFileStream(filePath);
+  const hasher = createStreamingHasher();
+  const reader = stream.getReader();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    hasher.update(value);
+  }
+  return finaliseHash(hasher);
 }
 
 /**

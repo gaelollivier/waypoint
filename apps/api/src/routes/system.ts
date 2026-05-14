@@ -28,13 +28,14 @@ systemRouter.post("/open-in-finder", async (c) => {
     .prepare("SELECT mount_path FROM disks WHERE mount_path IS NOT NULL")
     .all() as Array<{ mount_path: string }>;
 
-  const allowed = disks.some((disk) => isPathWithinRoot(targetPath, disk.mount_path));
+  const mountPaths = disks.map((disk) => disk.mount_path);
+  const allowed = mountPaths.some((mp) => isPathWithinRoot(targetPath, mp));
   if (!allowed) {
     return c.json({ error: "path is not under a registered disk mount" }, 403);
   }
 
   try {
-    openPathInFinder(targetPath);
+    openPathInFinder(targetPath, mountPaths);
     return c.json({ ok: true });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

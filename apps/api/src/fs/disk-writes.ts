@@ -17,7 +17,7 @@ import { appendFileSync, mkdirSync } from "fs";
 import { mkdir, open, rename, unlink } from "fs/promises";
 import path from "path";
 import { fileExists, readFileStream } from "./disk-io";
-import { computeFullHash, createStreamingHasher, finaliseHash } from "../jobs/scan/hasher";
+import { computeFullHashStreaming, createStreamingHasher, finaliseHash } from "../jobs/scan/hasher";
 
 /** Yield to the event loop every 64 MB during streaming copies. */
 const YIELD_EVERY_BYTES = 64 * 1024 * 1024;
@@ -439,10 +439,10 @@ export async function deleteDuplicateFile(opts: {
     );
   }
 
-  // 4. Compute full BLAKE3 hashes of both files and compare
+  // 4. Compute full BLAKE3 hashes of both files via streaming (safe for any file size)
   const [deleteHash, keepHash] = await Promise.all([
-    computeFullHash(deletePath),
-    computeFullHash(keepPath),
+    computeFullHashStreaming(deletePath),
+    computeFullHashStreaming(keepPath),
   ]);
 
   if (deleteHash !== keepHash) {
