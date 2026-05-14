@@ -31,6 +31,12 @@ export const api = {
     scan: (id: number) =>
       request<{ jobId: number }>(`/disks/${id}/scan`, { method: "POST" }),
 
+    writeSpeedTest: (id: number, body: { sizeBytes: number; mode: "null" | "random" }) =>
+      request<{ jobId: number; filePath: string }>(`/disks/${id}/write-speed-test`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+
     events: (
       id: number,
       params?: { level?: string; jobId?: number; limit?: number; offset?: number }

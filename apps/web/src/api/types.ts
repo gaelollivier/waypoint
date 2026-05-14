@@ -104,7 +104,14 @@ export interface DuplicateJobSummary {
 
 export interface Job {
   id: number;
-  type: "scan" | "copy" | "verify" | "backup" | "diff" | "duplicate_detection";
+  type:
+    | "scan"
+    | "copy"
+    | "verify"
+    | "backup"
+    | "diff"
+    | "duplicate_detection"
+    | "write_speed_test";
   status: "queued" | "running" | "paused" | "completed" | "failed" | "cancelled";
   phase: string | null;
   parentJobId: number | null;

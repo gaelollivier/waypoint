@@ -48,7 +48,7 @@ export function insertDisk(
 export function insertJob(
   db: Database,
   overrides: Partial<{
-    type: "scan" | "copy" | "verify" | "backup" | "diff" | "duplicate_detection";
+    type: "scan" | "copy" | "verify" | "backup" | "diff" | "duplicate_detection" | "write_speed_test";
     status: "queued" | "running" | "paused" | "completed" | "failed" | "cancelled";
     target_disk_id: number | null;
     created_by: "user" | "composite";

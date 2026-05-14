@@ -205,8 +205,94 @@ export async function copyFileAtomic(opts: {
 }): Promise<{ fullHash: string; bytesWritten: number }> {
   const { sourcePath, destMountPath, destRelativePath, tempSuffix, onChunkWritten } = opts;
 
+  const stream = readFileStream(sourcePath);
+  const reader = stream.getReader();
+  const chunks = async function* (): AsyncIterable<Uint8Array> {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      yield value;
+    }
+  };
+
+  const result = await writeAtomicFileFromChunks({
+    destMountPath,
+    destRelativePath,
+    tempSuffix,
+    tempMarker: ".backup-tmp-",
+    chunks: chunks(),
+    computeHash: true,
+    onChunkWritten,
+  });
+
+  if (!result.fullHash) {
+    throw new Error("copyFileAtomic: internal error — missing full hash");
+  }
+
+  return { fullHash: result.fullHash, bytesWritten: result.bytesWritten };
+}
+
+/**
+ * WRITE: Writes generated data to a new dotfile on a disk using the same
+ * temp→rename streaming path as the copy job.
+ *
+ * Guardrails:
+ *   - The final filename is always `.waypoint-test-copy-<uuid>`.
+ *   - The final and temp paths must resolve inside the disk mount.
+ *   - Existing final/temp files are never overwritten.
+ */
+export async function writeGeneratedTestFileAtomic(opts: {
+  destMountPath: string;
+  fileUuid: string;
+  totalBytes: number;
+  mode: "null" | "random";
+  tempSuffix: string;
+  onChunkWritten?: (bytesWritten: number) => void | Promise<void>;
+}): Promise<{ relativePath: string; bytesWritten: number }> {
+  const { destMountPath, fileUuid, totalBytes, mode, tempSuffix, onChunkWritten } = opts;
+  const relativePath = `.waypoint-test-copy-${fileUuid}`;
+
+  if (!/^[0-9a-f-]{36}$/i.test(fileUuid)) {
+    throw new Error(`writeGeneratedTestFileAtomic: invalid UUID ${fileUuid}`);
+  }
+  if (!Number.isSafeInteger(totalBytes) || totalBytes <= 0) {
+    throw new Error("writeGeneratedTestFileAtomic: totalBytes must be a positive safe integer");
+  }
+
+  const result = await writeAtomicFileFromChunks({
+    destMountPath,
+    destRelativePath: relativePath,
+    tempSuffix,
+    tempMarker: ".write-speed-tmp-",
+    chunks: generateTestChunks(totalBytes, mode),
+    computeHash: false,
+    onChunkWritten,
+  });
+
+  return { relativePath, bytesWritten: result.bytesWritten };
+}
+
+async function writeAtomicFileFromChunks(opts: {
+  destMountPath: string;
+  destRelativePath: string;
+  tempSuffix: string;
+  tempMarker: string;
+  chunks: AsyncIterable<Uint8Array>;
+  computeHash: boolean;
+  onChunkWritten?: (bytesWritten: number) => void | Promise<void>;
+}): Promise<{ fullHash: string | null; bytesWritten: number }> {
+  const {
+    destMountPath,
+    destRelativePath,
+    tempSuffix,
+    tempMarker,
+    chunks,
+    computeHash,
+    onChunkWritten,
+  } = opts;
+
   const destAbsPath = path.join(destMountPath, destRelativePath);
-  const tempPath = destAbsPath + `.backup-tmp-${tempSuffix}`;
+  const tempPath = destAbsPath + `${tempMarker}${tempSuffix}`;
   const resolvedMount = path.resolve(destMountPath);
 
   // 1. Path containment: dest and temp must both be inside the disk mount
@@ -234,7 +320,7 @@ export async function copyFileAtomic(opts: {
   }
 
   // 4. Stream source → temp file + BLAKE3 hasher
-  const hasher = createStreamingHasher();
+  const hasher = computeHash ? createStreamingHasher() : null;
   let bytesWritten = 0;
 
   // Open temp file with exclusive create — kernel-level exactly-once semantics
@@ -249,19 +335,14 @@ export async function copyFileAtomic(opts: {
   }
 
   try {
-    const stream = readFileStream(sourcePath);
-    const reader = stream.getReader();
     let bytesSinceYield = 0;
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      hasher.update(value);
+    for await (const value of chunks) {
+      hasher?.update(value);
       await fh.write(value);
       bytesWritten += value.byteLength;
       bytesSinceYield += value.byteLength;
-      onChunkWritten?.(value.byteLength);
+      await onChunkWritten?.(value.byteLength);
 
       // Yield to the event loop periodically so the API stays responsive
       // during large file copies (a 26GB file would otherwise starve it).
@@ -274,10 +355,33 @@ export async function copyFileAtomic(opts: {
     await fh.close();
   }
 
-  const fullHash = finaliseHash(hasher);
+  const fullHash = hasher ? finaliseHash(hasher) : null;
 
   // 5. Atomic rename: temp → final (same directory = same filesystem, atomic on POSIX)
   await rename(tempPath, destAbsPath);
 
   return { fullHash, bytesWritten };
+}
+
+async function* generateTestChunks(
+  totalBytes: number,
+  mode: "null" | "random"
+): AsyncIterable<Uint8Array> {
+  const chunkSize = 1024 * 1024;
+  let remaining = totalBytes;
+
+  while (remaining > 0) {
+    const size = Math.min(chunkSize, remaining);
+    const chunk = new Uint8Array(size);
+    if (mode === "random") fillRandom(chunk);
+    remaining -= size;
+    yield chunk;
+  }
+}
+
+function fillRandom(chunk: Uint8Array): void {
+  const max = 65_536;
+  for (let offset = 0; offset < chunk.byteLength; offset += max) {
+    crypto.getRandomValues(chunk.subarray(offset, Math.min(offset + max, chunk.byteLength)));
+  }
 }

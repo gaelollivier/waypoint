@@ -270,6 +270,19 @@ Dest is a 5400rpm HDD. Parallel writes cause head thrashing and destroy throughp
 
 ## Deferred / Backlog items (added 2026-05-12)
 
+### M12 Write speed test job — implemented 2026-05-13
+
+Goal: benchmark destination disk write throughput through Waypoint's own write
+pipeline, after the first real copy job proved slower than expected.
+
+Implemented behavior:
+- New `write_speed_test` job type targets one connected disk and acquires the same per-disk write lock used by copy jobs.
+- The job writes generated data to `.waypoint-test-copy-[uuid]`; files are intentionally left for manual deletion.
+- Supports `null` data for raw write-path testing and `random` data when compression/sparse-file behavior needs to be avoided.
+- Uses the same audited temp→rename streaming helper path as `copyFileAtomic`, with per-chunk progress feeding the existing bytes/sec samples.
+- Pause/resume checkpoints run inside the chunk loop, so large tests pause promptly.
+- Frontend launch lives on the disk overview header; job details show target file, mode, written bytes, remaining bytes, ETA, and write speed chart.
+
 ### Scan snapshots / history
 Currently `files` is a "current state" table — each scan upserts rows for that disk. There's no way to browse previous scan states or compare scans over time. Future work: version the `files` table per `scan_job_id` so users can browse previous scan states in the tree view. This would also enable "what changed between scans" queries.
 
