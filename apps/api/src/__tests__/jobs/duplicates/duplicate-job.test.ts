@@ -148,6 +148,8 @@ describe("DuplicateDetectionJobRunner", () => {
       "backup/vacation-1.jpg": "real duplicate",
       ".DS_Store": "metadata duplicate",
       "photos/.DS_Store": "metadata duplicate",
+      ".waypoint-disk-id": "disk identity duplicate",
+      "backup/.waypoint-disk-id": "disk identity duplicate",
       "._crossfire.lua": "resource fork duplicate",
       "scripts/._crossfire.lua": "resource fork duplicate",
     });
