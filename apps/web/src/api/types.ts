@@ -74,6 +74,7 @@ export interface DiffJobSummary {
 export interface DuplicateGroupFile {
   fileId: number;
   path: string;
+  deletedAt: string | null;
 }
 
 export interface DuplicateGroup {

@@ -97,9 +97,10 @@ function DuplicateGroupCard({
 }) {
   const [keepFileId, setKeepFileId] = useState<number | null>(null);
 
-  const selectedKeepFile = group.files.find((f) => f.fileId === keepFileId);
+  const liveFiles = group.files.filter((f) => f.deletedAt === null);
+  const selectedKeepFile = liveFiles.find((f) => f.fileId === keepFileId);
   const filesToDelete = keepFileId
-    ? group.files.filter((f) => f.fileId !== keepFileId)
+    ? liveFiles.filter((f) => f.fileId !== keepFileId)
     : [];
 
   return (
@@ -117,38 +118,55 @@ function DuplicateGroupCard({
       </div>
 
       <div className="space-y-1">
-        {group.files.map((f) => (
-          <div
-            key={f.fileId}
-            className="flex items-center gap-2 group"
-          >
-            <button
-              onClick={() => setKeepFileId(keepFileId === f.fileId ? null : f.fileId)}
-              className={`shrink-0 w-5 h-5 rounded border text-xs flex items-center justify-center transition-colors ${
-                keepFileId === f.fileId
-                  ? "border-green-500 bg-green-500/20 text-green-400"
-                  : "border-zinc-700 bg-zinc-800 text-zinc-600 hover:border-zinc-500"
-              }`}
-              title={keepFileId === f.fileId ? "Deselect" : "Keep this copy"}
+        {group.files.map((f) => {
+          const alreadyDeleted = f.deletedAt !== null;
+          return (
+            <div
+              key={f.fileId}
+              className={`flex items-center gap-2 group ${alreadyDeleted ? "opacity-50" : ""}`}
             >
-              {keepFileId === f.fileId ? "✓" : ""}
-            </button>
-            <a
-              href={`/disks/${diskId}?tab=tree&treePath=${encodeURIComponent(f.path.substring(0, f.path.lastIndexOf("/")))}`}
-              className={`font-mono text-xs truncate hover:underline ${
-                keepFileId !== null && keepFileId !== f.fileId
-                  ? "text-red-400/70 line-through"
-                  : "text-zinc-500 hover:text-zinc-300"
-              }`}
-              title={f.path}
-            >
-              {f.path}
-            </a>
-            {keepFileId === f.fileId && (
-              <span className="text-[10px] text-green-500 font-medium shrink-0">KEEP</span>
-            )}
-          </div>
-        ))}
+              {alreadyDeleted ? (
+                <span
+                  className="shrink-0 w-5 h-5 rounded border border-zinc-700 bg-zinc-800 text-xs flex items-center justify-center text-zinc-600"
+                  title="Already deleted"
+                >
+                  ×
+                </span>
+              ) : (
+                <button
+                  onClick={() => setKeepFileId(keepFileId === f.fileId ? null : f.fileId)}
+                  className={`shrink-0 w-5 h-5 rounded border text-xs flex items-center justify-center transition-colors ${
+                    keepFileId === f.fileId
+                      ? "border-green-500 bg-green-500/20 text-green-400"
+                      : "border-zinc-700 bg-zinc-800 text-zinc-600 hover:border-zinc-500"
+                  }`}
+                  title={keepFileId === f.fileId ? "Deselect" : "Keep this copy"}
+                >
+                  {keepFileId === f.fileId ? "✓" : ""}
+                </button>
+              )}
+              <a
+                href={`/disks/${diskId}?tab=tree&treePath=${encodeURIComponent(f.path.substring(0, f.path.lastIndexOf("/")))}`}
+                className={`font-mono text-xs truncate hover:underline ${
+                  alreadyDeleted
+                    ? "text-zinc-600 line-through"
+                    : keepFileId !== null && keepFileId !== f.fileId
+                      ? "text-red-400/70 line-through"
+                      : "text-zinc-500 hover:text-zinc-300"
+                }`}
+                title={f.path}
+              >
+                {f.path}
+              </a>
+              {alreadyDeleted && (
+                <span className="text-[10px] text-zinc-600 font-medium shrink-0">DELETED</span>
+              )}
+              {!alreadyDeleted && keepFileId === f.fileId && (
+                <span className="text-[10px] text-green-500 font-medium shrink-0">KEEP</span>
+              )}
+            </div>
+          );
+        })}
       </div>
 
       {selectedKeepFile && filesToDelete.length > 0 && (

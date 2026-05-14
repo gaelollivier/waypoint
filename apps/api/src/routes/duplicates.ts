@@ -141,22 +141,22 @@ duplicatesRouter.get("/", (c) => {
 
   // Fetch all file members for this page of groups in one query
   const groupIds = groups.map((g) => g.id);
-  const filesMap = new Map<number, Array<{ fileId: number; path: string }>>();
+  const filesMap = new Map<number, Array<{ fileId: number; path: string; deletedAt: string | null }>>();
 
   if (groupIds.length > 0) {
     const placeholders = groupIds.map(() => "?").join(", ");
     const fileRows = db
       .prepare(
-        `SELECT group_id, file_id, path
+        `SELECT group_id, file_id, path, deleted_at
          FROM duplicate_group_files
          WHERE group_id IN (${placeholders})
          ORDER BY group_id, path`
       )
-      .all(...groupIds) as Array<{ group_id: number; file_id: number; path: string }>;
+      .all(...groupIds) as Array<{ group_id: number; file_id: number; path: string; deleted_at: string | null }>;
 
     for (const r of fileRows) {
       if (!filesMap.has(r.group_id)) filesMap.set(r.group_id, []);
-      filesMap.get(r.group_id)!.push({ fileId: r.file_id, path: r.path });
+      filesMap.get(r.group_id)!.push({ fileId: r.file_id, path: r.path, deletedAt: r.deleted_at });
     }
   }
 
@@ -415,7 +415,21 @@ duplicatesRouter.post("/cleanup", async (c) => {
     }
   }
 
-  const deletedCount = results.filter((r) => r.status === "deleted").length;
+  // Mark successfully deleted files in the DB so the UI reflects cleanup progress
+  const successfullyDeleted = results.filter((r) => r.status === "deleted");
+  if (successfullyDeleted.length > 0) {
+    const now = new Date().toISOString();
+    const markDeleted = db.prepare(
+      "UPDATE duplicate_group_files SET deleted_at = ? WHERE group_id = ? AND file_id = ?"
+    );
+    db.transaction(() => {
+      for (const r of successfullyDeleted) {
+        markDeleted.run(now, duplicateGroupId, r.fileId);
+      }
+    })();
+  }
+
+  const deletedCount = successfullyDeleted.length;
   const errorCount = results.filter((r) => r.status === "error").length;
 
   return c.json({
