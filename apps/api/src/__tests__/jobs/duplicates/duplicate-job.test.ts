@@ -150,8 +150,6 @@ describe("DuplicateDetectionJobRunner", () => {
       "photos/.DS_Store": "metadata duplicate",
       "._crossfire.lua": "resource fork duplicate",
       "scripts/._crossfire.lua": "resource fork duplicate",
-      "__MACOSX/photos/._vacation-1.jpg": "archive metadata duplicate",
-      "exports/__MACOSX/._vacation-2.jpg": "archive metadata duplicate",
     });
     await scanDisk(db, jm, diskId, root);
 

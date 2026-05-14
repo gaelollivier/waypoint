@@ -3,6 +3,7 @@ import path from "path";
 import { JobRunner } from "../job-runner";
 import type { JobManager } from "../job-manager";
 import { trace } from "../../diag/trace";
+import { EXCLUDED_NAMES_SQL } from "../../lib/excluded-names";
 
 // How many diff_entries rows to insert per transaction batch.
 const INSERT_BATCH_SIZE = 1000;
@@ -78,7 +79,7 @@ export class DiffJobRunner extends JobRunner {
       .prepare(
         `SELECT id, path, sampled_hash, size_bytes
          FROM files
-         WHERE disk_id = ?`
+         WHERE disk_id = ? AND ${EXCLUDED_NAMES_SQL}`
       )
       .all(this.sourceDiskId) as Array<{
         id: number;
@@ -94,7 +95,7 @@ export class DiffJobRunner extends JobRunner {
       .prepare(
         `SELECT id, path, sampled_hash, size_bytes
          FROM files
-         WHERE disk_id = ?`
+         WHERE disk_id = ? AND ${EXCLUDED_NAMES_SQL}`
       )
       .all(this.destDiskId) as Array<{
         id: number;

@@ -70,7 +70,7 @@ Improvements planned but not yet scheduled into a milestone.
 
 Recently completed backlog:
 
-- Duplicate detection filters macOS metadata noise (`._*`, `.DS_Store`, `__MACOSX/`) so real user duplicates surface first.
+- macOS metadata noise (`.DS_Store`, `._*`) is globally excluded from scans, diffs, duplicate detection, and copy jobs.
 - Tree view syncs the current folder path with the URL and browser history.
 - Copy job status on the diff view links to the job details page.
 - Copy job progress shows pending files/bytes, ETA, and per-file byte progress for large files.

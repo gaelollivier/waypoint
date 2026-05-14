@@ -4,6 +4,7 @@ import { readDirectory, statFile } from "../../fs/disk-io";
 import { computeSampledHash, HASH_ALGO_VERSION } from "./hasher";
 import type { JobManager } from "../job-manager";
 import { trace } from "../../diag/trace";
+import { isExcludedName } from "../../lib/excluded-names";
 
 // How many files to stat+hash in parallel within a single directory.
 //
@@ -102,8 +103,9 @@ export async function processNextQueueEntry(
       timings.enqueue_subdirs_ms = Math.round(performance.now() - tC);
     }
 
-    // Process files in this directory (concurrent stat+hash, single batched DB write)
-    const files = dirEntries.filter((e) => e.isFile());
+    // Process files in this directory (concurrent stat+hash, single batched DB write).
+    // Filter out macOS metadata noise at scan time so it never enters the DB.
+    const files = dirEntries.filter((e) => e.isFile() && !isExcludedName(e.name));
     if (files.length > 0) {
       const tD = performance.now();
       const { count, bytes, hashPoolMs, upsertMs, selectMs } = await upsertFileBatch(
