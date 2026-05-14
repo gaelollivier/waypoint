@@ -70,7 +70,7 @@ Improvements planned but not yet scheduled into a milestone.
 
 Recently completed backlog:
 
-- macOS metadata noise (`.DS_Store`, `._*`) is globally excluded from scans, diffs, duplicate detection, and copy jobs.
+- macOS metadata noise (`.DS_Store`, `._*`) and Waypoint disk identity files (`.waypoint-disk-id`) are globally excluded from scans, diffs, duplicate detection, and copy jobs.
 - Tree view syncs the current folder path with the URL and browser history.
 - Copy job status on the diff view links to the job details page.
 - Copy job progress shows pending files/bytes, ETA, and per-file byte progress for large files.
