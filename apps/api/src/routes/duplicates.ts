@@ -1,6 +1,8 @@
 import { Hono } from "hono";
+import path from "path";
 import { getDb } from "../db/client";
 import { getDiskById } from "../disks/registry";
+import { deleteDuplicateFile } from "../fs/disk-writes";
 import { getJobManager, registerRunner, unregisterRunner } from "../jobs";
 import { DuplicateDetectionJobRunner } from "../jobs/duplicates/duplicate-job";
 
@@ -220,4 +222,189 @@ duplicatesRouter.get("/jobs", (c) => {
       completedAt: r.completed_at,
     }))
   );
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/disks/:id/duplicates/cleanup
+// Delete duplicate files, keeping the specified copy.
+//
+// SAFETY: This endpoint permanently deletes files. It enforces multiple
+// guardrails to ensure deletions are only triggered by a human via the web UI.
+// See CLAUDE.md "RULE: File deletions must NEVER be initiated by an LLM or agent".
+// ---------------------------------------------------------------------------
+
+/** Rejects user agents that don't look like a real browser. */
+function isBrowserUserAgent(ua: string | undefined): boolean {
+  if (!ua) return false;
+  // Real browsers include "Mozilla/" in their UA string.
+  // This rejects curl, httpie, python-requests, node-fetch, SDK clients, etc.
+  return ua.includes("Mozilla/");
+}
+
+interface CleanupRequestBody {
+  initiatedFromWebUI: boolean;
+  duplicateGroupId: number;
+  keepFileId: number;
+  deleteFileIds: number[];
+}
+
+duplicatesRouter.post("/cleanup", async (c) => {
+  // ---- Anti-automation guardrails ----
+
+  // 1. User-Agent must look like a real browser
+  const userAgent = c.req.header("User-Agent");
+  if (!isBrowserUserAgent(userAgent)) {
+    return c.json(
+      { error: "Deletion requests must originate from a web browser" },
+      403
+    );
+  }
+
+  // 2. Body must include the explicit web-UI flag
+  const body = await c.req.json<CleanupRequestBody>();
+  if (body.initiatedFromWebUI !== true) {
+    return c.json(
+      { error: "Deletion requests must be initiated from the web UI (initiatedFromWebUI must be true)" },
+      403
+    );
+  }
+
+  // ---- Input validation ----
+
+  const diskId = Number(c.req.param("id"));
+  const { duplicateGroupId, keepFileId, deleteFileIds } = body;
+
+  if (!Number.isInteger(duplicateGroupId) || duplicateGroupId <= 0) {
+    return c.json({ error: "Invalid duplicateGroupId" }, 400);
+  }
+  if (!Number.isInteger(keepFileId) || keepFileId <= 0) {
+    return c.json({ error: "Invalid keepFileId" }, 400);
+  }
+  if (!Array.isArray(deleteFileIds) || deleteFileIds.length === 0) {
+    return c.json({ error: "deleteFileIds must be a non-empty array" }, 400);
+  }
+  if (deleteFileIds.some((id) => !Number.isInteger(id) || id <= 0)) {
+    return c.json({ error: "All deleteFileIds must be positive integers" }, 400);
+  }
+
+  // The file to keep must not appear in the delete list
+  if (deleteFileIds.includes(keepFileId)) {
+    return c.json({ error: "keepFileId must not appear in deleteFileIds" }, 400);
+  }
+
+  const db = getDb();
+
+  // ---- Disk validation ----
+
+  const disk = getDiskById(db, diskId);
+  if (!disk) return c.json({ error: "Disk not found" }, 404);
+  if (!disk.mount_path) {
+    return c.json({ error: "Disk is not currently connected" }, 409);
+  }
+
+  // ---- Duplicate group validation ----
+
+  // Verify the group exists and belongs to a completed job for this disk
+  const group = db
+    .prepare(
+      `SELECT dg.id, dg.sampled_hash, dg.file_count
+       FROM duplicate_groups dg
+       JOIN jobs j ON j.id = dg.duplicate_job_id
+       WHERE dg.id = ?
+         AND j.target_disk_id = ?
+         AND j.status = 'completed'`
+    )
+    .get(duplicateGroupId, diskId) as {
+      id: number;
+      sampled_hash: string;
+      file_count: number;
+    } | null;
+
+  if (!group) {
+    return c.json(
+      { error: "Duplicate group not found or does not belong to a completed job for this disk" },
+      404
+    );
+  }
+
+  // Verify ALL referenced file IDs (keep + delete) belong to this group
+  const allFileIds = [keepFileId, ...deleteFileIds];
+  const placeholders = allFileIds.map(() => "?").join(", ");
+  const groupFiles = db
+    .prepare(
+      `SELECT file_id, path
+       FROM duplicate_group_files
+       WHERE group_id = ? AND file_id IN (${placeholders})`
+    )
+    .all(duplicateGroupId, ...allFileIds) as Array<{
+      file_id: number;
+      path: string;
+    }>;
+
+  const fileMap = new Map(groupFiles.map((f) => [f.file_id, f.path]));
+
+  // Every referenced file must belong to this group
+  for (const fileId of allFileIds) {
+    if (!fileMap.has(fileId)) {
+      return c.json(
+        { error: `File ${fileId} is not a member of duplicate group ${duplicateGroupId}` },
+        400
+      );
+    }
+  }
+
+  // After deletion, at least one copy must remain (the keep file)
+  // This is already guaranteed by the keepFileId not being in deleteFileIds,
+  // but verify the group has enough members
+  if (deleteFileIds.length >= group.file_count) {
+    return c.json(
+      { error: "Cannot delete all copies — at least one must remain" },
+      400
+    );
+  }
+
+  // ---- Execute deletions one by one ----
+
+  // keepPath is guaranteed present in fileMap — validated above
+  const keepPath = path.join(disk.mount_path, fileMap.get(keepFileId)!);
+
+  const results: Array<{
+    fileId: number;
+    path: string;
+    status: "deleted" | "error";
+    error?: string;
+  }> = [];
+
+  for (const fileId of deleteFileIds) {
+    // deletePath is guaranteed present in fileMap — validated above
+    const relativePath = fileMap.get(fileId)!;
+    const deletePath = path.join(disk.mount_path, relativePath);
+
+    try {
+      await deleteDuplicateFile({
+        deletePath,
+        keepPath,
+        diskMountPath: disk.mount_path,
+      });
+      results.push({ fileId, path: relativePath, status: "deleted" });
+    } catch (err: any) {
+      results.push({
+        fileId,
+        path: relativePath,
+        status: "error",
+        error: err.message,
+      });
+    }
+  }
+
+  const deletedCount = results.filter((r) => r.status === "deleted").length;
+  const errorCount = results.filter((r) => r.status === "error").length;
+
+  return c.json({
+    duplicateGroupId,
+    keepFileId,
+    deletedCount,
+    errorCount,
+    results,
+  });
 });

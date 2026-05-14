@@ -93,6 +93,21 @@ export interface DuplicatesResponse {
   groups: DuplicateGroup[];
 }
 
+export interface CleanupResult {
+  fileId: number;
+  path: string;
+  status: "deleted" | "error";
+  error?: string;
+}
+
+export interface CleanupResponse {
+  duplicateGroupId: number;
+  keepFileId: number;
+  deletedCount: number;
+  errorCount: number;
+  results: CleanupResult[];
+}
+
 export interface DuplicateJobSummary {
   id: number;
   status: Job["status"];

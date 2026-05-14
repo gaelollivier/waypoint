@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
-import type { DuplicateGroup, DuplicatesResponse } from "../api/types";
+import type { CleanupResponse, DuplicateGroup, DuplicateGroupFile, DuplicatesResponse } from "../api/types";
 import { formatBytes } from "../lib/format";
 
 const PAGE_SIZE = 50;
@@ -83,10 +83,25 @@ function ControlsBar({
 }
 
 // ---------------------------------------------------------------------------
-// Group card
+// Group card — with "keep" selection and cleanup button
 // ---------------------------------------------------------------------------
 
-function DuplicateGroupCard({ group }: { group: DuplicateGroup }) {
+function DuplicateGroupCard({
+  group,
+  diskId,
+  onCleanupRequest,
+}: {
+  group: DuplicateGroup;
+  diskId: number;
+  onCleanupRequest: (group: DuplicateGroup, keepFile: DuplicateGroupFile) => void;
+}) {
+  const [keepFileId, setKeepFileId] = useState<number | null>(null);
+
+  const selectedKeepFile = group.files.find((f) => f.fileId === keepFileId);
+  const filesToDelete = keepFileId
+    ? group.files.filter((f) => f.fileId !== keepFileId)
+    : [];
+
   return (
     <div className="px-4 py-3 space-y-2">
       <div className="flex items-center gap-3 flex-wrap text-xs">
@@ -101,16 +116,167 @@ function DuplicateGroupCard({ group }: { group: DuplicateGroup }) {
         </span>
       </div>
 
-      <div className="space-y-0.5">
+      <div className="space-y-1">
         {group.files.map((f) => (
           <div
             key={f.fileId}
-            className="font-mono text-xs text-zinc-500 truncate"
-            title={f.path}
+            className="flex items-center gap-2 group"
           >
-            {f.path}
+            <button
+              onClick={() => setKeepFileId(keepFileId === f.fileId ? null : f.fileId)}
+              className={`shrink-0 w-5 h-5 rounded border text-xs flex items-center justify-center transition-colors ${
+                keepFileId === f.fileId
+                  ? "border-green-500 bg-green-500/20 text-green-400"
+                  : "border-zinc-700 bg-zinc-800 text-zinc-600 hover:border-zinc-500"
+              }`}
+              title={keepFileId === f.fileId ? "Deselect" : "Keep this copy"}
+            >
+              {keepFileId === f.fileId ? "✓" : ""}
+            </button>
+            <span
+              className={`font-mono text-xs truncate ${
+                keepFileId !== null && keepFileId !== f.fileId
+                  ? "text-red-400/70 line-through"
+                  : "text-zinc-500"
+              }`}
+              title={f.path}
+            >
+              {f.path}
+            </span>
+            {keepFileId === f.fileId && (
+              <span className="text-[10px] text-green-500 font-medium shrink-0">KEEP</span>
+            )}
           </div>
         ))}
+      </div>
+
+      {selectedKeepFile && filesToDelete.length > 0 && (
+        <div className="pt-1">
+          <button
+            onClick={() => onCleanupRequest(group, selectedKeepFile)}
+            className="rounded bg-red-600/80 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-500 transition-colors"
+          >
+            Delete {filesToDelete.length} duplicate{filesToDelete.length > 1 ? "s" : ""}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Cleanup confirmation dialog
+// ---------------------------------------------------------------------------
+
+function CleanupConfirmDialog({
+  group,
+  keepFile,
+  isPending,
+  lastResult,
+  onConfirm,
+  onClose,
+}: {
+  group: DuplicateGroup;
+  keepFile: DuplicateGroupFile;
+  isPending: boolean;
+  lastResult: CleanupResponse | null;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  const filesToDelete = group.files.filter((f) => f.fileId !== keepFile.fileId);
+  const totalBytesFreed = group.sizeBytes * filesToDelete.length;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+      <div
+        className="w-full max-w-lg rounded-xl border border-zinc-700 bg-zinc-900 p-6 space-y-5"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 className="text-base font-semibold text-white">Confirm Deletion</h2>
+
+        {lastResult ? (
+          // Show results after cleanup
+          <div className="space-y-3">
+            <div className="text-sm text-zinc-300">
+              {lastResult.deletedCount} file{lastResult.deletedCount !== 1 ? "s" : ""} deleted
+              {lastResult.errorCount > 0 && (
+                <span className="text-red-400">
+                  , {lastResult.errorCount} error{lastResult.errorCount !== 1 ? "s" : ""}
+                </span>
+              )}
+            </div>
+
+            {lastResult.errorCount > 0 && (
+              <div className="space-y-1">
+                {lastResult.results
+                  .filter((r) => r.status === "error")
+                  .map((r) => (
+                    <div key={r.fileId} className="rounded border border-red-800/50 bg-red-950/30 px-3 py-2 text-xs text-red-400">
+                      <span className="font-mono">{r.path}</span>: {r.error}
+                    </div>
+                  ))}
+              </div>
+            )}
+
+            <div className="flex justify-end">
+              <button
+                onClick={onClose}
+                className="rounded bg-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-600 transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        ) : (
+          // Show confirmation before cleanup
+          <>
+            <div className="space-y-3">
+              <div className="rounded-lg border border-green-800/50 bg-green-950/20 px-4 py-3">
+                <div className="text-[10px] uppercase tracking-wider text-green-500 font-medium mb-1">Keeping</div>
+                <div className="font-mono text-xs text-green-400 break-all">{keepFile.path}</div>
+              </div>
+
+              <div className="rounded-lg border border-red-800/50 bg-red-950/20 px-4 py-3">
+                <div className="text-[10px] uppercase tracking-wider text-red-400 font-medium mb-1">
+                  Deleting ({filesToDelete.length} file{filesToDelete.length !== 1 ? "s" : ""})
+                </div>
+                <div className="space-y-1 max-h-48 overflow-y-auto">
+                  {filesToDelete.map((f) => (
+                    <div key={f.fileId} className="font-mono text-xs text-red-300/80 break-all">
+                      {f.path}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="text-xs text-zinc-500">
+                Space freed: <span className="text-zinc-300">{formatBytes(totalBytesFreed)}</span>
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-amber-800/50 bg-amber-950/20 px-4 py-3 text-xs text-amber-400">
+              This action is permanent. The deleted files cannot be recovered.
+              The server will verify that each file is an exact byte-for-byte
+              copy of the kept file before deleting.
+            </div>
+
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={onClose}
+                className="rounded px-4 py-2 text-sm text-zinc-400 hover:text-white transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={isPending}
+                onClick={onConfirm}
+                className="rounded bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {isPending ? "Deleting…" : "Delete Files"}
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -167,6 +333,13 @@ export function DuplicateExplorer({
   const [minCopies, setMinCopies] = useState(2);
   const [offset, setOffset] = useState(0);
 
+  const [cleanupTarget, setCleanupTarget] = useState<{
+    group: DuplicateGroup;
+    keepFile: DuplicateGroupFile;
+  } | null>(null);
+
+  const queryClient = useQueryClient();
+
   const resetOffset = () => setOffset(0);
 
   const { data, isLoading, error } = useQuery<DuplicatesResponse>({
@@ -182,6 +355,35 @@ export function DuplicateExplorer({
       }),
     retry: false,
   });
+
+  const cleanup = useMutation({
+    mutationFn: (target: { group: DuplicateGroup; keepFile: DuplicateGroupFile }) =>
+      api.duplicates.cleanup(diskId, {
+        duplicateGroupId: target.group.id,
+        keepFileId: target.keepFile.fileId,
+        deleteFileIds: target.group.files
+          .filter((f) => f.fileId !== target.keepFile.fileId)
+          .map((f) => f.fileId),
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["duplicates", diskId] });
+    },
+  });
+
+  const handleCleanupRequest = (group: DuplicateGroup, keepFile: DuplicateGroupFile) => {
+    cleanup.reset();
+    setCleanupTarget({ group, keepFile });
+  };
+
+  const handleConfirm = () => {
+    if (!cleanupTarget) return;
+    cleanup.mutate(cleanupTarget);
+  };
+
+  const handleCloseDialog = () => {
+    setCleanupTarget(null);
+    cleanup.reset();
+  };
 
   if (isLoading) {
     return (
@@ -231,7 +433,12 @@ export function DuplicateExplorer({
         ) : (
           <div className="divide-y divide-zinc-800/60">
             {data.groups.map((group) => (
-              <DuplicateGroupCard key={group.id} group={group} />
+              <DuplicateGroupCard
+                key={group.id}
+                group={group}
+                diskId={diskId}
+                onCleanupRequest={handleCleanupRequest}
+              />
             ))}
           </div>
         )}
@@ -243,6 +450,18 @@ export function DuplicateExplorer({
           total={data.totalGroups}
           onPrev={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
           onNext={() => setOffset((o) => o + PAGE_SIZE)}
+        />
+      )}
+
+      {/* Cleanup confirmation dialog */}
+      {cleanupTarget && (
+        <CleanupConfirmDialog
+          group={cleanupTarget.group}
+          keepFile={cleanupTarget.keepFile}
+          isPending={cleanup.isPending}
+          lastResult={cleanup.data ?? null}
+          onConfirm={handleConfirm}
+          onClose={handleCloseDialog}
         />
       )}
     </div>

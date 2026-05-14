@@ -73,3 +73,44 @@ decisions from being made on corrupted state.
   Internal logic errors are not in this category.
 - Add a short comment explaining *why* a value is guaranteed to be present, so
   the next reader understands the invariant and doesn't defensively weaken it.
+
+---
+
+## RULE: File deletions must NEVER be initiated by an LLM or agent
+
+**This is a hard rule with zero exceptions.**
+
+Waypoint manages irreplaceable personal data. Deleting a file is a
+**permanent, destructive** action. All deletions must be:
+
+1. **Initiated from the web UI** by a human user clicking a button.
+2. **Confirmed via a dialog** listing every file about to be deleted.
+3. **Validated server-side** before execution (see below).
+
+### Server-side guardrails (enforced in the API)
+
+Every deletion request is rejected unless **all** of the following hold:
+
+- The request includes `"initiatedFromWebUI": true` in the body.
+- The `User-Agent` header looks like a real browser (not `curl`, not an SDK,
+  not a script).
+- The files to delete are confirmed duplicates in the database.
+- At least one identical copy of each file is **not** being deleted.
+
+### What this means for Claude Code / any LLM agent
+
+- **Do NOT call the deletion endpoint.** Even if you have the right payload,
+  the server will reject non-browser user agents.
+- **Do NOT attempt to bypass the `initiatedFromWebUI` flag or User-Agent
+  check.** These exist specifically to prevent automated deletions.
+- **Do NOT write code that programmatically triggers deletions** outside of
+  the web UI's confirmation flow.
+- **Do NOT weaken, remove, or refactor away any of these guardrails.** If a
+  change touches the deletion path, the `/review` skill must be run.
+
+### Why this rule exists
+
+A single accidental bulk-delete of backup data is catastrophic and
+irreversible. Requiring human initiation via a browser UI — with an explicit
+confirmation step — is a deliberate friction layer that prevents automated
+tools from causing data loss.

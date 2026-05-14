@@ -14,10 +14,10 @@
  */
 
 import { appendFileSync, mkdirSync } from "fs";
-import { mkdir, open, rename } from "fs/promises";
+import { mkdir, open, rename, unlink } from "fs/promises";
 import path from "path";
-import { readFileStream } from "./disk-io";
-import { createStreamingHasher, finaliseHash } from "../jobs/scan/hasher";
+import { fileExists, readFileStream } from "./disk-io";
+import { computeFullHash, createStreamingHasher, finaliseHash } from "../jobs/scan/hasher";
 
 /** Yield to the event loop every 64 MB during streaming copies. */
 const YIELD_EVERY_BYTES = 64 * 1024 * 1024;
@@ -384,4 +384,75 @@ function fillRandom(chunk: Uint8Array): void {
   for (let offset = 0; offset < chunk.byteLength; offset += max) {
     crypto.getRandomValues(chunk.subarray(offset, Math.min(offset + max, chunk.byteLength)));
   }
+}
+
+// ---------------------------------------------------------------------------
+// Duplicate file deletion (for duplicate cleanup)
+// ---------------------------------------------------------------------------
+
+/**
+ * DELETE: Removes a file that has been verified to be an exact duplicate.
+ *
+ * This is the most dangerous function in the codebase. It permanently
+ * destroys data. Every precondition is checked before the unlink.
+ *
+ * Guardrails:
+ *   1. Path containment: deletePath must resolve within diskMountPath
+ *   2. Existence: both the file to delete and the file to keep must exist
+ *   3. Identity: both files must have identical BLAKE3 full-content hashes
+ *   4. Distinctness: the two paths must not resolve to the same file
+ *
+ * This function is intentionally NOT batched. Each file is deleted one at a
+ * time so that any mid-sequence failure leaves the remaining files intact.
+ */
+export async function deleteDuplicateFile(opts: {
+  deletePath: string;
+  keepPath: string;
+  diskMountPath: string;
+}): Promise<{ hash: string }> {
+  const { deletePath, keepPath, diskMountPath } = opts;
+  const resolvedMount = path.resolve(diskMountPath);
+
+  // 1. Path containment: the file being deleted must be on the expected disk
+  if (!path.resolve(deletePath).startsWith(resolvedMount)) {
+    throw new Error(
+      `deleteDuplicateFile: delete path "${deletePath}" escapes disk mount "${diskMountPath}"`
+    );
+  }
+
+  // 2. The two paths must not resolve to the same file
+  if (path.resolve(deletePath) === path.resolve(keepPath)) {
+    throw new Error(
+      `deleteDuplicateFile: delete path and keep path resolve to the same file: "${deletePath}"`
+    );
+  }
+
+  // 3. Both files must exist on disk right now
+  if (!(await fileExists(deletePath))) {
+    throw new Error(
+      `deleteDuplicateFile: file to delete does not exist: "${deletePath}"`
+    );
+  }
+  if (!(await fileExists(keepPath))) {
+    throw new Error(
+      `deleteDuplicateFile: file to keep does not exist: "${keepPath}" — refusing to delete the only copy`
+    );
+  }
+
+  // 4. Compute full BLAKE3 hashes of both files and compare
+  const [deleteHash, keepHash] = await Promise.all([
+    computeFullHash(deletePath),
+    computeFullHash(keepPath),
+  ]);
+
+  if (deleteHash !== keepHash) {
+    throw new Error(
+      `deleteDuplicateFile: hash mismatch — file to delete (${deleteHash}) differs from file to keep (${keepHash}). Refusing to delete.`
+    );
+  }
+
+  // All guardrails passed — delete the file
+  await unlink(deletePath);
+
+  return { hash: deleteHash };
 }
