@@ -1,15 +1,20 @@
 import { Database } from "bun:sqlite";
 import path from "path";
 import { runMigrations } from "./migrate";
+import { createWaypointDataDirectory } from "../fs/disk-writes";
 
-const DB_PATH = process.env.DB_PATH ?? path.join(process.cwd(), "waypoint.db");
+const DB_FILENAME = "waypoint.db";
 
 let _db: Database | null = null;
 
 export function getDb(): Database {
   if (_db) return _db;
 
-  _db = new Database(DB_PATH, { create: true });
+  const dbPath =
+    process.env.DB_PATH ??
+    path.join(createWaypointDataDirectory(), DB_FILENAME);
+
+  _db = new Database(dbPath, { create: true });
 
   // Safety and performance pragmas — applied before migrations
   _db.exec("PRAGMA journal_mode = WAL");
@@ -20,7 +25,7 @@ export function getDb(): Database {
   runMigrations(_db);
   clearStaleLocks(_db);
 
-  console.log(`Database open: ${DB_PATH}`);
+  console.log(`Database open: ${dbPath}`);
   return _db;
 }
 

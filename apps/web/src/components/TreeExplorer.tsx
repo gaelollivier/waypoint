@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useSyncExternalStore } from "react";
 import { api } from "../api/client";
 import type { TreeEntry, TreeResponse } from "../api/types";
 import { formatBytes } from "../lib/format";
+import { Tooltip } from "./Tooltip";
 
 function useSearchParam(key: string): string | null {
   const subscribe = useCallback((cb: () => void) => {
@@ -107,6 +108,28 @@ function Breadcrumb({
   );
 }
 
+const OPEN_IN_FINDER_TOOLTIP =
+  "Only works when used on the Mac running the Waypoint server.";
+
+function OpenInFinderButton({ path }: { path: string }) {
+  return (
+    <Tooltip content={OPEN_IN_FINDER_TOOLTIP}>
+      <button
+        type="button"
+        onClick={() => {
+          api.system.openInFinder(path).catch((err) => {
+            const message = err instanceof Error ? err.message : String(err);
+            alert(`Could not open Finder: ${message}`);
+          });
+        }}
+        className="rounded-md border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 transition-colors hover:border-zinc-500 hover:bg-zinc-800 hover:text-white"
+      >
+        Open in Finder
+      </button>
+    </Tooltip>
+  );
+}
+
 /**
  * Virtualized tree explorer for a disk. Uses window scroll so the whole page
  * scrolls naturally — no inner scrollbar.
@@ -144,9 +167,12 @@ export function TreeExplorer({ diskId }: { diskId: number }) {
       {tree && (
         <div className="flex items-center justify-between gap-4">
           <Breadcrumb crumbs={tree.breadcrumb} onNavigate={navigateToPath} />
-          <span className="text-xs text-zinc-600 shrink-0">
-            {formatBytes(tree.totalSizeBytes)} total
-          </span>
+          <div className="flex items-center gap-3 shrink-0">
+            {tree.parentPath && <OpenInFinderButton path={tree.parentPath} />}
+            <span className="text-xs text-zinc-600">
+              {formatBytes(tree.totalSizeBytes)} total
+            </span>
+          </div>
         </div>
       )}
 

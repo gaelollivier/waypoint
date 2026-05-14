@@ -1,8 +1,30 @@
-import { useState } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { DiffEntry, DiffKind, DiffTreeResponse } from "../api/types";
 import { formatBytes } from "../lib/format";
+import { Tooltip } from "./Tooltip";
+
+function useSearchParam(key: string): string | null {
+  const subscribe = useCallback((cb: () => void) => {
+    window.addEventListener("popstate", cb);
+    return () => window.removeEventListener("popstate", cb);
+  }, []);
+  const getSnapshot = useCallback(
+    () => new URLSearchParams(window.location.search).get(key),
+    [key]
+  );
+  return useSyncExternalStore(subscribe, getSnapshot);
+}
+
+function setSearchParam(key: string, value: string | null): void {
+  const params = new URLSearchParams(window.location.search);
+  if (value === null) params.delete(key);
+  else params.set(key, value);
+  const qs = params.toString();
+  history.pushState(null, "", window.location.pathname + (qs ? "?" + qs : ""));
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
 
 // ---------------------------------------------------------------------------
 // Diff kind config
@@ -165,9 +187,21 @@ function DiffRow({
                 </span>
               );
             })() : (
-              <span className="text-xs font-mono text-zinc-500 w-16 text-right">
-                {formatBytes(entry.sizeBytes)}
-              </span>
+              entry.diffKind === "changed" ? (
+                <span className="text-xs font-mono text-right leading-relaxed">
+                  <span className="text-zinc-500">
+                    {formatBytes(entry.destSizeBytes ?? entry.sizeBytes)}
+                  </span>
+                  <span className="text-zinc-700"> → </span>
+                  <span className="text-zinc-300">
+                    {formatBytes(entry.sourceSizeBytes ?? entry.sizeBytes)}
+                  </span>
+                </span>
+              ) : (
+                <span className="text-xs font-mono text-zinc-500 w-16 text-right">
+                  {formatBytes(entry.sizeBytes)}
+                </span>
+              )
             )}
           </div>
         </div>
@@ -215,6 +249,48 @@ function Breadcrumb({
         );
       })}
     </nav>
+  );
+}
+
+const OPEN_IN_FINDER_TOOLTIP =
+  "Only works when used on the Mac running the Waypoint server.";
+
+function OpenInFinderButton({
+  path,
+  label,
+}: {
+  path: string | null;
+  label: string;
+}) {
+  if (!path) {
+    return (
+      <Tooltip content={OPEN_IN_FINDER_TOOLTIP}>
+        <button
+          type="button"
+          disabled
+          className="rounded-md border border-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-600"
+        >
+          {label}
+        </button>
+      </Tooltip>
+    );
+  }
+
+  return (
+    <Tooltip content={OPEN_IN_FINDER_TOOLTIP}>
+      <button
+        type="button"
+        onClick={() => {
+          api.system.openInFinder(path).catch((err) => {
+            const message = err instanceof Error ? err.message : String(err);
+            alert(`Could not open Finder: ${message}`);
+          });
+        }}
+        className="rounded-md border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 transition-colors hover:border-zinc-500 hover:bg-zinc-800 hover:text-white"
+      >
+        {label}
+      </button>
+    </Tooltip>
   );
 }
 
@@ -268,8 +344,12 @@ export function DiffExplorer({
   sourceDiskId: number;
   destDiskId: number;
 }) {
-  const [parentPath, setParentPath] = useState<string>("/");
-  const [filter, setFilter] = useState<Filter>("all");
+  const parentPath = useSearchParam("diffPath") ?? "/";
+  const rawFilter = useSearchParam("diffFilter");
+  const filter: Filter =
+    rawFilter === "added" || rawFilter === "changed" || rawFilter === "removed"
+      ? rawFilter
+      : "all";
 
   const { data: page, isLoading, error } = useQuery<DiffTreeResponse>({
     queryKey: ["diff", sourceDiskId, destDiskId, parentPath],
@@ -278,8 +358,11 @@ export function DiffExplorer({
   });
 
   const navigate = (path: string | null) => {
-    setParentPath(path ?? "/");
-    setFilter("all");
+    setSearchParam("diffPath", path === null || path === "/" ? null : path);
+  };
+
+  const setFilter = (next: Filter) => {
+    setSearchParam("diffFilter", next === "all" ? null : next);
   };
 
   if (isLoading) {
@@ -316,7 +399,11 @@ export function DiffExplorer({
     <div className="space-y-4">
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <Breadcrumb crumbs={page.breadcrumb} onNavigate={navigate} />
-        <DiffSummary dir={page.currentDir} />
+        <div className="flex items-center gap-3 flex-wrap justify-end">
+          <OpenInFinderButton path={page.sourceCurrentPath} label="Open Source" />
+          <OpenInFinderButton path={page.destCurrentPath} label="Open Dest" />
+          <DiffSummary dir={page.currentDir} />
+        </div>
       </div>
 
       <FilterBar filter={filter} onChange={setFilter} page={page} />

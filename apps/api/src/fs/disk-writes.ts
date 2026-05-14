@@ -13,7 +13,7 @@
  * Before adding a new write operation here: ask whether the design can avoid it.
  */
 
-import { appendFileSync } from "fs";
+import { appendFileSync, mkdirSync } from "fs";
 import { mkdir, open, rename } from "fs/promises";
 import path from "path";
 import { readFileStream } from "./disk-io";
@@ -23,6 +23,36 @@ import { createStreamingHasher, finaliseHash } from "../jobs/scan/hasher";
 const YIELD_EVERY_BYTES = 64 * 1024 * 1024;
 
 const DISK_ID_FILENAME = ".waypoint-disk-id";
+
+// ---------------------------------------------------------------------------
+// Host application data
+// ---------------------------------------------------------------------------
+
+/**
+ * WRITE: Creates Waypoint's host-side application data directory.
+ *
+ * Guardrails:
+ *   - The caller cannot choose the path. It is always `$HOME/.waypoint`.
+ *   - The basename is asserted before mkdir so a future refactor cannot
+ *     silently redirect this helper to an unexpected directory.
+ *   - This is for host metadata storage, not backup-disk content.
+ */
+export function createWaypointDataDirectory(): string {
+  const home = process.env.HOME;
+  if (!home) {
+    throw new Error("createWaypointDataDirectory: HOME is not set");
+  }
+
+  const dirPath = path.join(home, ".waypoint");
+  if (path.basename(dirPath) !== ".waypoint") {
+    throw new Error(
+      `createWaypointDataDirectory: internal error — unexpected path ${dirPath}`
+    );
+  }
+
+  mkdirSync(dirPath, { recursive: true });
+  return dirPath;
+}
 
 // ---------------------------------------------------------------------------
 // Disk identity

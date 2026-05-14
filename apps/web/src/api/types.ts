@@ -22,6 +22,8 @@ export interface DiffEntry {
   sizeBytes: number;
   // files only
   diffKind?: DiffKind;
+  sourceSizeBytes?: number | null;
+  destSizeBytes?: number | null;
   // directories only
   addedCount?: number;
   addedBytes?: number;
@@ -38,6 +40,8 @@ export interface DiffTreeResponse {
   sourceDiskId: number;
   destDiskId: number;
   parentPath: string;
+  sourceCurrentPath: string | null;
+  destCurrentPath: string | null;
   breadcrumb: Array<{ name: string; path: string | null }>;
   totalAdded: number;
   totalAddedBytes: number;
