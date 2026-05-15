@@ -109,6 +109,30 @@ export interface CleanupResponse {
   results: CleanupResult[];
 }
 
+export interface DuplicateDirectoryGroupMember {
+  directoryId: number;
+  path: string;
+}
+
+export interface DuplicateDirectoryGroup {
+  id: number;
+  contentHash: string;
+  directoryCount: number;
+  fileCount: number;
+  totalSizeBytes: number;
+  wastedBytes: number;
+  directories: DuplicateDirectoryGroupMember[];
+}
+
+export interface DuplicateDirectoriesResponse {
+  duplicateJobId: number;
+  diskId: number;
+  totalGroups: number;
+  totalWastedBytes: number;
+  totalFileCount: number;
+  groups: DuplicateDirectoryGroup[];
+}
+
 export interface DuplicateJobSummary {
   id: number;
   status: Job["status"];
@@ -127,7 +151,8 @@ export interface Job {
     | "backup"
     | "diff"
     | "duplicate_detection"
-    | "write_speed_test";
+    | "write_speed_test"
+    | "read_speed_test";
   status: "queued" | "running" | "paused" | "completed" | "failed" | "cancelled";
   phase: string | null;
   parentJobId: number | null;

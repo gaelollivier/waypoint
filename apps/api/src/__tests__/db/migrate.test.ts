@@ -10,6 +10,8 @@ const EXPECTED_TABLES = [
   "disk_excludes",
   "disk_locks",
   "disks",
+  "duplicate_directory_group_members",
+  "duplicate_directory_groups",
   "duplicate_group_files",
   "duplicate_groups",
   "files",
@@ -44,7 +46,7 @@ describe("runMigrations", () => {
   it("sets user_version to the latest migration after migration", () => {
     const db = new Database(":memory:");
     runMigrations(db);
-    expect(getUserVersion(db)).toBe(10);
+    expect(getUserVersion(db)).toBe(12);
   });
 
   it("is idempotent: running twice does not error or duplicate tables", () => {
@@ -53,7 +55,7 @@ describe("runMigrations", () => {
     runMigrations(db);
     runMigrations(db); // second run — should be no-op
     expect(getTables(db)).toEqual(EXPECTED_TABLES);
-    expect(getUserVersion(db)).toBe(10);
+    expect(getUserVersion(db)).toBe(12);
   });
 
   it("enforces foreign keys (PRAGMA foreign_keys = ON)", () => {

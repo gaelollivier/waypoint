@@ -186,6 +186,152 @@ duplicatesRouter.get("/", (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/disks/:id/duplicates/directories
+// Browse directory-level duplicate detection results for this disk.
+// Query params:
+//   duplicateJobId — defaults to latest completed job for this disk
+//   sort           — 'wasted' (default) | 'total_size' | 'directory_count'
+//   minSize        — minimum total_size_bytes (default 0)
+//   limit          — default 50, max 200
+//   offset         — default 0
+// ---------------------------------------------------------------------------
+duplicatesRouter.get("/directories", (c) => {
+  const diskId = Number(c.req.param("id"));
+  const rawJobId = c.req.query("duplicateJobId");
+  const sort     = c.req.query("sort") ?? "wasted";
+  const minSize  = Number(c.req.query("minSize") ?? 0);
+  const limit    = Math.min(Number(c.req.query("limit") ?? 50), 200);
+  const offset   = Number(c.req.query("offset") ?? 0);
+
+  const db = getDb();
+
+  // Resolve which job to use
+  let duplicateJobId: number;
+  if (rawJobId) {
+    duplicateJobId = Number(rawJobId);
+  } else {
+    const latest = db
+      .prepare(
+        `SELECT id FROM jobs
+         WHERE type = 'duplicate_detection'
+           AND target_disk_id = ?
+           AND status = 'completed'
+         ORDER BY completed_at DESC
+         LIMIT 1`
+      )
+      .get(diskId) as { id: number } | null;
+    if (!latest) {
+      return c.json({ error: "No completed duplicate detection job found for this disk" }, 404);
+    }
+    duplicateJobId = latest.id;
+  }
+
+  // Build ORDER BY
+  // file_count sort requires a subquery since file_count lives in directories
+  const orderBy: Record<string, string> = {
+    wasted:          "ddg.wasted_bytes DESC",
+    total_size:      "ddg.total_size_bytes DESC",
+    directory_count: "ddg.directory_count DESC",
+    file_count:      `(SELECT MIN(d.file_count)
+                       FROM duplicate_directory_group_members m
+                       JOIN directories d ON d.id = m.directory_id
+                       WHERE m.group_id = ddg.id) DESC`,
+  };
+  const orderClause = orderBy[sort] ?? orderBy.wasted;
+
+  // Fetch one page of groups
+  const groups = db
+    .prepare(
+      `SELECT id, content_hash, directory_count, total_size_bytes, wasted_bytes
+       FROM duplicate_directory_groups ddg
+       WHERE ddg.duplicate_job_id = ?
+         AND ddg.total_size_bytes >= ?
+       ORDER BY ${orderClause}
+       LIMIT ? OFFSET ?`
+    )
+    .all(duplicateJobId, minSize, limit, offset) as Array<{
+      id: number;
+      content_hash: string;
+      directory_count: number;
+      total_size_bytes: number;
+      wasted_bytes: number;
+    }>;
+
+  // Fetch members for this page of groups
+  const groupIds = groups.map((g) => g.id);
+  const membersMap = new Map<number, Array<{ directoryId: number; path: string; fileCount: number }>>();
+
+  if (groupIds.length > 0) {
+    const placeholders = groupIds.map(() => "?").join(", ");
+    const memberRows = db
+      .prepare(
+        `SELECT ddgm.group_id, ddgm.directory_id, ddgm.path, d.file_count
+         FROM duplicate_directory_group_members ddgm
+         JOIN directories d ON d.id = ddgm.directory_id
+         WHERE ddgm.group_id IN (${placeholders})
+         ORDER BY ddgm.group_id, ddgm.path`
+      )
+      .all(...groupIds) as Array<{
+        group_id: number;
+        directory_id: number;
+        path: string;
+        file_count: number;
+      }>;
+
+    for (const r of memberRows) {
+      if (!membersMap.has(r.group_id)) membersMap.set(r.group_id, []);
+      membersMap.get(r.group_id)!.push({
+        directoryId: r.directory_id,
+        path: r.path,
+        fileCount: r.file_count,
+      });
+    }
+  }
+
+  // Totals (including aggregate file count across all directory groups)
+  const totals = db
+    .prepare(
+      `SELECT
+         COUNT(*) AS total_groups,
+         COALESCE(SUM(wasted_bytes), 0) AS total_wasted_bytes,
+         COALESCE(SUM(sub.file_count), 0) AS total_file_count
+       FROM duplicate_directory_groups ddg
+       LEFT JOIN (
+         SELECT ddgm.group_id, MIN(d.file_count) AS file_count
+         FROM duplicate_directory_group_members ddgm
+         JOIN directories d ON d.id = ddgm.directory_id
+         GROUP BY ddgm.group_id
+       ) sub ON sub.group_id = ddg.id
+       WHERE ddg.duplicate_job_id = ?
+         AND ddg.total_size_bytes >= ?`
+    )
+    .get(duplicateJobId, minSize) as { total_groups: number; total_wasted_bytes: number; total_file_count: number };
+
+  return c.json({
+    duplicateJobId,
+    diskId,
+    totalGroups: totals.total_groups,
+    totalWastedBytes: totals.total_wasted_bytes,
+    totalFileCount: totals.total_file_count,
+    groups: groups.map((g) => {
+      const members = membersMap.get(g.id) ?? [];
+      // All directories in a group are identical, so file count is the same
+      // for every member — take the first one.
+      const fileCount = members.length > 0 ? members[0].fileCount : 0;
+      return {
+        id: g.id,
+        contentHash: g.content_hash,
+        directoryCount: g.directory_count,
+        fileCount,
+        totalSizeBytes: g.total_size_bytes,
+        wastedBytes: g.wasted_bytes,
+        directories: members,
+      };
+    }),
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/disks/:id/duplicates/jobs
 // List all duplicate detection jobs for this disk.
 // ---------------------------------------------------------------------------

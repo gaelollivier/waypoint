@@ -6,6 +6,7 @@ import { sseRegistry } from "../jobs/sse";
 import { ScanJobRunner } from "../jobs/scan/scan-job";
 import { CopyJobRunner } from "../jobs/copy/copy-job";
 import { WriteSpeedJobRunner } from "../jobs/write-speed/write-speed-job";
+import { ReadSpeedJobRunner } from "../jobs/read-speed/read-speed-job";
 import { getDiskById } from "../disks/registry";
 
 export const jobsRouter = new Hono();
@@ -203,6 +204,30 @@ jobsRouter.post("/:id/resume", (c) => {
       totalBytes: payload.sizeBytes,
       mode: payload.mode,
       fileUuid: payload.fileUuid,
+    });
+
+    registerRunner(job.id, runner);
+    runner.start().finally(() => unregisterRunner(job.id));
+    return c.json({ ok: true, rehydrated: true });
+  }
+
+  if (job.type === "read_speed_test") {
+    if (job.target_disk_id == null) {
+      return c.json({ error: "Read speed test has no target disk" }, 500);
+    }
+    const disk = getDiskById(db, job.target_disk_id);
+    if (!disk) return c.json({ error: "Target disk no longer exists" }, 410);
+    if (!disk.is_connected || !disk.mount_path) {
+      return c.json({ error: "Target disk is not connected" }, 409);
+    }
+
+    const payload = job.payload_json ? JSON.parse(job.payload_json) : {};
+    const runner = new ReadSpeedJobRunner({
+      jobId: job.id,
+      jobManager: jm,
+      db,
+      diskId: job.target_disk_id,
+      sampleCount: payload.sampleCount ?? 5,
     });
 
     registerRunner(job.id, runner);

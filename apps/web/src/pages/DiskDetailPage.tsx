@@ -111,6 +111,27 @@ export function DiskDetailPage({ id }: { id: string }) {
     });
   };
 
+  const readSpeedTest = useMutation({
+    mutationFn: (body: { sampleCount: number }) =>
+      api.disks.readSpeedTest(diskId, body),
+    onSuccess: ({ jobId }) => {
+      queryClient.invalidateQueries({ queryKey: ["jobs", { diskId }] });
+      navigate(`/jobs/${jobId}`);
+    },
+    onError: (err: any) => alert(`Read speed test failed: ${err.message}`),
+  });
+
+  const startReadSpeedTest = () => {
+    const rawCount = prompt("Number of files to benchmark (largest files)", "5");
+    if (rawCount == null) return;
+    const count = Number(rawCount);
+    if (!Number.isInteger(count) || count <= 0) {
+      alert("Enter a positive integer.");
+      return;
+    }
+    readSpeedTest.mutate({ sampleCount: count });
+  };
+
   if (diskLoading) return <p className="text-sm text-zinc-500 p-6">Loading…</p>;
   if (!disk) return <p className="text-sm text-red-400 p-6">Disk not found.</p>;
 
@@ -126,6 +147,7 @@ export function DiskDetailPage({ id }: { id: string }) {
         disk={disk}
         onScan={() => scan.mutate()}
         onWriteSpeedTest={startWriteSpeedTest}
+        onReadSpeedTest={startReadSpeedTest}
         hasActiveJob={activeJob != null}
       />
 
@@ -181,11 +203,13 @@ function DiskHeader({
   disk,
   onScan,
   onWriteSpeedTest,
+  onReadSpeedTest,
   hasActiveJob,
 }: {
   disk: Disk;
   onScan: () => void;
   onWriteSpeedTest: () => void;
+  onReadSpeedTest: () => void;
   hasActiveJob: boolean;
 }) {
   const usedBytes =
@@ -216,6 +240,12 @@ function DiskHeader({
         <div className="flex items-center gap-2 shrink-0">
           {disk.isConnected && !hasActiveJob && (
             <>
+              <button
+                onClick={onReadSpeedTest}
+                className="rounded bg-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-700 transition-colors"
+              >
+                Test read
+              </button>
               <button
                 onClick={onWriteSpeedTest}
                 className="rounded bg-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-700 transition-colors"
@@ -869,7 +899,13 @@ function DuplicatesTab({ diskId, disk }: { diskId: number; disk: Disk }) {
   const { data: duplicateJobs = [], refetch: refetchDuplicateJobs } = useQuery<DuplicateJobSummary[]>({
     queryKey: ["duplicateJobs", diskId],
     queryFn: () => api.duplicates.jobs(diskId),
-    refetchInterval: pendingJobId ? 2_000 : false,
+    refetchInterval: (query) => {
+      const jobs = query.state.data ?? [];
+      const hasActive = jobs.some((j: DuplicateJobSummary) =>
+        j.status === "running" || j.status === "queued" || j.status === "paused"
+      );
+      return hasActive || pendingJobId != null ? 2_000 : false;
+    },
   });
 
   const latestCompleted = duplicateJobs.find((j) => j.status === "completed") ?? null;

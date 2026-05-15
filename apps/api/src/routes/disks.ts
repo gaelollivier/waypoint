@@ -8,6 +8,7 @@ import { getLockManager } from "../locks";
 import { getJobManager, registerRunner, unregisterRunner } from "../jobs";
 import { ScanJobRunner } from "../jobs/scan/scan-job";
 import { WriteSpeedJobRunner } from "../jobs/write-speed/write-speed-job";
+import { ReadSpeedJobRunner } from "../jobs/read-speed/read-speed-job";
 
 
 export const disksRouter = new Hono();
@@ -209,6 +210,72 @@ disksRouter.post("/:id/write-speed-test", async (c) => {
   runner.start().finally(() => unregisterRunner(job.id));
 
   return c.json({ jobId: job.id, filePath: `.waypoint-test-copy-${fileUuid}` }, 202);
+});
+
+// Start a read speed test (sampled + full hash benchmarking) for a disk.
+// Body: { sampleCount?: number }
+disksRouter.post("/:id/read-speed-test", async (c) => {
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<{ sampleCount?: number }>().catch(() => ({} as { sampleCount?: number }));
+  const db = getDb();
+  const disk = getDiskById(db, id);
+  if (!disk) return c.json({ error: "Disk not found" }, 404);
+  if (!disk.is_connected || !disk.mount_path) {
+    return c.json({ error: "Disk is not connected" }, 409);
+  }
+
+  const sampleCount = body.sampleCount ?? 5;
+  if (!Number.isSafeInteger(sampleCount) || sampleCount <= 0) {
+    return c.json({ error: "sampleCount must be a positive integer" }, 400);
+  }
+
+  // Check no active read speed test on this disk
+  const activeReader = db
+    .prepare(
+      `SELECT id FROM jobs
+       WHERE target_disk_id = ? AND type = 'read_speed_test'
+         AND status IN ('queued', 'running', 'paused')
+       LIMIT 1`
+    )
+    .get(id) as { id: number } | null;
+  if (activeReader) {
+    return c.json(
+      { error: `A read speed test is already active on this disk (job ${activeReader.id})` },
+      409
+    );
+  }
+
+  // Require at least one completed scan
+  const latestScan = db
+    .prepare(
+      `SELECT id FROM jobs
+       WHERE type = 'scan' AND target_disk_id = ? AND status = 'completed'
+       ORDER BY completed_at DESC LIMIT 1`
+    )
+    .get(id) as { id: number } | null;
+  if (!latestScan) {
+    return c.json({ error: "No completed scan found for this disk. Run a scan first." }, 409);
+  }
+
+  const jm = getJobManager();
+  const job = jm.createJob({
+    type: "read_speed_test",
+    targetDiskId: id,
+    payload: { sampleCount },
+  });
+
+  const runner = new ReadSpeedJobRunner({
+    jobId: job.id,
+    jobManager: jm,
+    db,
+    diskId: id,
+    sampleCount,
+  });
+
+  registerRunner(job.id, runner);
+  runner.start().finally(() => unregisterRunner(job.id));
+
+  return c.json({ jobId: job.id }, 202);
 });
 
 // Events log across all jobs for a disk (reverse-chron, filterable)

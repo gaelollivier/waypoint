@@ -1,4 +1,4 @@
-import type { CleanupResponse, Disk, DiffJobSummary, DiffTreeResponse, DuplicateJobSummary, DuplicatesResponse, Job, JobEvent, TreeResponse } from "./types";
+import type { CleanupResponse, Disk, DiffJobSummary, DiffTreeResponse, DuplicateDirectoriesResponse, DuplicateJobSummary, DuplicatesResponse, Job, JobEvent, TreeResponse } from "./types";
 
 const BASE = "/api";
 
@@ -35,6 +35,12 @@ export const api = {
       request<{ jobId: number; filePath: string }>(`/disks/${id}/write-speed-test`, {
         method: "POST",
         body: JSON.stringify(body),
+      }),
+
+    readSpeedTest: (id: number, body?: { sampleCount?: number }) =>
+      request<{ jobId: number }>(`/disks/${id}/read-speed-test`, {
+        method: "POST",
+        body: JSON.stringify(body ?? {}),
       }),
 
     events: (
@@ -114,6 +120,26 @@ export const api = {
           initiatedFromWebUI: true,
         }),
       }),
+
+    directories: (
+      diskId: number,
+      opts?: {
+        duplicateJobId?: number;
+        sort?: "wasted" | "total_size" | "directory_count" | "file_count";
+        minSize?: number;
+        limit?: number;
+        offset?: number;
+      }
+    ): Promise<DuplicateDirectoriesResponse> => {
+      const params = new URLSearchParams();
+      if (opts?.duplicateJobId != null) params.set("duplicateJobId", String(opts.duplicateJobId));
+      if (opts?.sort) params.set("sort", opts.sort);
+      if (opts?.minSize != null) params.set("minSize", String(opts.minSize));
+      if (opts?.limit != null) params.set("limit", String(opts.limit));
+      if (opts?.offset != null) params.set("offset", String(opts.offset));
+      const qs = params.toString();
+      return request<DuplicateDirectoriesResponse>(`/disks/${diskId}/duplicates/directories${qs ? "?" + qs : ""}`);
+    },
 
     list: (
       diskId: number,

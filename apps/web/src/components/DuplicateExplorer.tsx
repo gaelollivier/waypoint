@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
-import type { CleanupResponse, DuplicateGroup, DuplicateGroupFile, DuplicatesResponse } from "../api/types";
+import type { CleanupResponse, DuplicateDirectoriesResponse, DuplicateGroup, DuplicateGroupFile, DuplicatesResponse } from "../api/types";
 import { formatBytes } from "../lib/format";
 
 const PAGE_SIZE = 50;
@@ -337,6 +337,211 @@ function Pagination({
 }
 
 // ---------------------------------------------------------------------------
+// Directory duplicate group card
+// ---------------------------------------------------------------------------
+
+function DirectoryGroupCard({
+  group,
+  diskId,
+}: {
+  group: DuplicateDirectoriesResponse["groups"][number];
+  diskId: number;
+}) {
+  return (
+    <div className="px-4 py-3 space-y-2">
+      <div className="flex items-center gap-3 flex-wrap text-xs">
+        <span className="text-zinc-300 font-medium">
+          {group.directoryCount} copies
+        </span>
+        <span className="text-zinc-600">·</span>
+        <span className="text-zinc-400">
+          {group.fileCount} file{group.fileCount === 1 ? "" : "s"} each
+        </span>
+        <span className="text-zinc-600">·</span>
+        <span className="text-zinc-400">{formatBytes(group.totalSizeBytes)} each</span>
+        <span className="text-zinc-600">·</span>
+        <span className="text-amber-400 font-medium">
+          {formatBytes(group.wastedBytes)} wasted
+        </span>
+      </div>
+
+      <div className="space-y-1">
+        {group.directories.map((d) => (
+          <div key={d.directoryId} className="flex items-center gap-2">
+            <span className="shrink-0 text-xs text-zinc-600">📁</span>
+            <a
+              href={`/disks/${diskId}?tab=tree&treePath=${encodeURIComponent(d.path)}`}
+              className="font-mono text-xs text-zinc-500 truncate hover:text-zinc-300 hover:underline"
+              title={d.path}
+            >
+              {d.path}
+            </a>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Directory duplicates view
+// ---------------------------------------------------------------------------
+
+type DirSortOption = "wasted" | "total_size" | "directory_count" | "file_count";
+
+const DIR_SORT_LABELS: Record<DirSortOption, string> = {
+  wasted:          "Wasted space",
+  total_size:      "Total size",
+  directory_count: "Copy count",
+  file_count:      "File count",
+};
+
+function DirectoryDuplicatesView({
+  diskId,
+  duplicateJobId,
+}: {
+  diskId: number;
+  duplicateJobId?: number;
+}) {
+  const [sort, setSort] = useState<DirSortOption>("wasted");
+  const [minSize, setMinSize] = useState(0);
+  const [offset, setOffset] = useState(0);
+
+  const { data, isLoading, error } = useQuery<DuplicateDirectoriesResponse>({
+    queryKey: ["duplicateDirectories", diskId, duplicateJobId, sort, minSize, offset],
+    queryFn: () =>
+      api.duplicates.directories(diskId, {
+        duplicateJobId,
+        sort,
+        minSize,
+        limit: PAGE_SIZE,
+        offset,
+      }),
+    retry: false,
+  });
+
+  const selectClass =
+    "rounded bg-zinc-800 border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 focus:outline-none focus:border-blue-500";
+
+  if (isLoading) {
+    return (
+      <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-8 text-center text-sm text-zinc-500">
+        Loading directory duplicates…
+      </div>
+    );
+  }
+
+  if (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return (
+      <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-8 text-center text-sm text-red-400">
+        {msg}
+      </div>
+    );
+  }
+
+  if (!data) return null;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-3 flex-wrap">
+        <label className="text-xs text-zinc-500">Sort by</label>
+        <select
+          value={sort}
+          onChange={(e) => { setSort(e.target.value as DirSortOption); setOffset(0); }}
+          className={selectClass}
+        >
+          {(Object.keys(DIR_SORT_LABELS) as DirSortOption[]).map((k) => (
+            <option key={k} value={k}>{DIR_SORT_LABELS[k]}</option>
+          ))}
+        </select>
+
+        <select
+          value={minSize}
+          onChange={(e) => { setMinSize(Number(e.target.value)); setOffset(0); }}
+          className={selectClass}
+        >
+          {MIN_SIZE_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+      </div>
+
+      <div className="flex items-center gap-3 text-xs">
+        <span className="text-zinc-400">
+          {data.totalGroups.toLocaleString()} directory group{data.totalGroups === 1 ? "" : "s"}
+        </span>
+        <span className="text-zinc-600">·</span>
+        <span className="text-zinc-400">
+          {data.totalFileCount.toLocaleString()} file{data.totalFileCount === 1 ? "" : "s"}
+        </span>
+        <span className="text-zinc-600">·</span>
+        <span className="text-amber-400">{formatBytes(data.totalWastedBytes)} wasted</span>
+      </div>
+
+      <div className="rounded-lg border border-zinc-800 bg-zinc-900 overflow-hidden">
+        {data.groups.length === 0 ? (
+          <div className="flex items-center justify-center h-32 text-sm text-zinc-500">
+            No duplicate directories found on this disk.
+          </div>
+        ) : (
+          <div className="divide-y divide-zinc-800/60">
+            {data.groups.map((group) => (
+              <DirectoryGroupCard
+                key={group.id}
+                group={group}
+                diskId={diskId}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {data.totalGroups > PAGE_SIZE && (
+        <Pagination
+          offset={offset}
+          total={data.totalGroups}
+          onPrev={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
+          onNext={() => setOffset((o) => o + PAGE_SIZE)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Mode toggle
+// ---------------------------------------------------------------------------
+
+type ViewMode = "files" | "directories";
+
+function ViewModeToggle({
+  mode,
+  onChange,
+}: {
+  mode: ViewMode;
+  onChange: (m: ViewMode) => void;
+}) {
+  const btnClass = (active: boolean) =>
+    `px-3 py-1.5 text-xs font-medium transition-colors ${
+      active
+        ? "bg-zinc-700 text-white"
+        : "text-zinc-500 hover:text-zinc-300"
+    }`;
+
+  return (
+    <div className="inline-flex rounded border border-zinc-700 overflow-hidden">
+      <button className={btnClass(mode === "files")} onClick={() => onChange("files")}>
+        Files
+      </button>
+      <button className={btnClass(mode === "directories")} onClick={() => onChange("directories")}>
+        Directories
+      </button>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // DuplicateExplorer
 // ---------------------------------------------------------------------------
 
@@ -347,6 +552,7 @@ export function DuplicateExplorer({
   diskId: number;
   duplicateJobId?: number;
 }) {
+  const [viewMode, setViewMode] = useState<ViewMode>("files");
   const [sort, setSort] = useState<SortOption>("wasted");
   const [minSize, setMinSize] = useState(0);
   const [minCopies, setMinCopies] = useState(2);
@@ -373,6 +579,7 @@ export function DuplicateExplorer({
         offset,
       }),
     retry: false,
+    enabled: viewMode === "files",
   });
 
   const cleanup = useMutation({
@@ -404,72 +611,77 @@ export function DuplicateExplorer({
     cleanup.reset();
   };
 
-  if (isLoading) {
-    return (
-      <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-8 text-center text-sm text-zinc-500">
-        Loading duplicates…
-      </div>
-    );
-  }
-
-  if (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    return (
-      <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-8 text-center text-sm text-red-400">
-        {msg}
-      </div>
-    );
-  }
-
-  if (!data) return null;
-
   return (
     <div className="space-y-4">
-      <ControlsBar
-        sort={sort}
-        onSort={(s) => { setSort(s); resetOffset(); }}
-        minSize={minSize}
-        onMinSize={(n) => { setMinSize(n); resetOffset(); }}
-        minCopies={minCopies}
-        onMinCopies={(n) => { setMinCopies(n); resetOffset(); }}
-      />
+      <ViewModeToggle mode={viewMode} onChange={setViewMode} />
 
-      {/* Summary */}
-      <div className="flex items-center gap-3 text-xs">
-        <span className="text-zinc-400">
-          {data.totalGroups.toLocaleString()} duplicate group{data.totalGroups === 1 ? "" : "s"}
-        </span>
-        <span className="text-zinc-600">·</span>
-        <span className="text-amber-400">{formatBytes(data.totalWastedBytes)} wasted</span>
-      </div>
+      {viewMode === "directories" ? (
+        <DirectoryDuplicatesView diskId={diskId} duplicateJobId={duplicateJobId} />
+      ) : (
+        <>
+          <ControlsBar
+            sort={sort}
+            onSort={(s) => { setSort(s); resetOffset(); }}
+            minSize={minSize}
+            onMinSize={(n) => { setMinSize(n); resetOffset(); }}
+            minCopies={minCopies}
+            onMinCopies={(n) => { setMinCopies(n); resetOffset(); }}
+          />
 
-      {/* Groups list */}
-      <div className="rounded-lg border border-zinc-800 bg-zinc-900 overflow-hidden">
-        {data.groups.length === 0 ? (
-          <div className="flex items-center justify-center h-32 text-sm text-zinc-500">
-            No duplicates found on this disk.
-          </div>
-        ) : (
-          <div className="divide-y divide-zinc-800/60">
-            {data.groups.map((group) => (
-              <DuplicateGroupCard
-                key={group.id}
-                group={group}
-                diskId={diskId}
-                onCleanupRequest={handleCleanupRequest}
-              />
-            ))}
-          </div>
-        )}
-      </div>
+          {isLoading && (
+            <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-8 text-center text-sm text-zinc-500">
+              Loading duplicates…
+            </div>
+          )}
 
-      {data.totalGroups > PAGE_SIZE && (
-        <Pagination
-          offset={offset}
-          total={data.totalGroups}
-          onPrev={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
-          onNext={() => setOffset((o) => o + PAGE_SIZE)}
-        />
+          {error && (
+            <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-8 text-center text-sm text-red-400">
+              {error instanceof Error ? error.message : String(error)}
+            </div>
+          )}
+
+          {data && (
+            <>
+              {/* Summary */}
+              <div className="flex items-center gap-3 text-xs">
+                <span className="text-zinc-400">
+                  {data.totalGroups.toLocaleString()} duplicate group{data.totalGroups === 1 ? "" : "s"}
+                </span>
+                <span className="text-zinc-600">·</span>
+                <span className="text-amber-400">{formatBytes(data.totalWastedBytes)} wasted</span>
+              </div>
+
+              {/* Groups list */}
+              <div className="rounded-lg border border-zinc-800 bg-zinc-900 overflow-hidden">
+                {data.groups.length === 0 ? (
+                  <div className="flex items-center justify-center h-32 text-sm text-zinc-500">
+                    No duplicates found on this disk.
+                  </div>
+                ) : (
+                  <div className="divide-y divide-zinc-800/60">
+                    {data.groups.map((group) => (
+                      <DuplicateGroupCard
+                        key={group.id}
+                        group={group}
+                        diskId={diskId}
+                        onCleanupRequest={handleCleanupRequest}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {data.totalGroups > PAGE_SIZE && (
+                <Pagination
+                  offset={offset}
+                  total={data.totalGroups}
+                  onPrev={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
+                  onNext={() => setOffset((o) => o + PAGE_SIZE)}
+                />
+              )}
+            </>
+          )}
+        </>
       )}
 
       {/* Cleanup confirmation dialog */}
