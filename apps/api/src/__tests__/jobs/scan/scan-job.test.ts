@@ -60,8 +60,8 @@ describe("ScanJobRunner", () => {
       await runner.start();
 
       const files = db
-        .prepare("SELECT name FROM files WHERE disk_id = ? ORDER BY name")
-        .all(diskId) as Array<{ name: string }>;
+        .prepare("SELECT name FROM files WHERE scan_id = ? ORDER BY name")
+        .all(runner.jobId) as Array<{ name: string }>;
       const names = files.map((f) => f.name);
 
       expect(names).toContain("a.txt");
@@ -78,8 +78,8 @@ describe("ScanJobRunner", () => {
       await runner.start();
 
       const unhashed = db
-        .prepare("SELECT name FROM files WHERE disk_id = ? AND sampled_hash IS NULL")
-        .all(diskId);
+        .prepare("SELECT name FROM files WHERE scan_id = ? AND sampled_hash IS NULL")
+        .all(runner.jobId);
       expect(unhashed).toHaveLength(0);
     });
 
@@ -90,8 +90,8 @@ describe("ScanJobRunner", () => {
       await runner.start();
 
       const dirs = db
-        .prepare("SELECT name FROM directories WHERE disk_id = ? ORDER BY name")
-        .all(diskId) as Array<{ name: string }>;
+        .prepare("SELECT name FROM directories WHERE scan_id = ? ORDER BY name")
+        .all(runner.jobId) as Array<{ name: string }>;
       const names = dirs.map((d) => d.name);
       expect(names).toContain("subdir");
       expect(names).toContain("nested");
@@ -128,23 +128,18 @@ describe("ScanJobRunner", () => {
       const runner1 = makeRunner(db, jm, diskId, root);
       await runner1.start();
 
-      const hashBefore = (
-        db
-          .prepare("SELECT sampled_hash FROM files WHERE disk_id = ? AND name = 'a.txt'")
-          .get(diskId) as any
-      ).sampled_hash;
-
-      // Corrupt the hash in DB to detect if re-hash occurs
-      db.prepare("UPDATE files SET sampled_hash = 'FAKE' WHERE disk_id = ? AND name = 'a.txt'").run(diskId);
+      // Corrupt the hash in the first scan's DB rows to detect if re-hash occurs
+      db.prepare("UPDATE files SET sampled_hash = 'FAKE' WHERE scan_id = ? AND name = 'a.txt'").run(runner1.jobId);
 
       // Second scan — a.txt hasn't changed, so FAKE hash should be preserved
+      // (the walker reads from the previous scan's rows for hash reuse)
       const runner2 = makeRunner(db, jm, diskId, root);
       await runner2.start();
 
       const hashAfter = (
         db
-          .prepare("SELECT sampled_hash FROM files WHERE disk_id = ? AND name = 'a.txt'")
-          .get(diskId) as any
+          .prepare("SELECT sampled_hash FROM files WHERE scan_id = ? AND name = 'a.txt'")
+          .get(runner2.jobId) as any
       ).sampled_hash;
 
       expect(hashAfter).toBe("FAKE"); // shortcut kicked in, no re-hash
@@ -160,8 +155,8 @@ describe("ScanJobRunner", () => {
 
       const hashBefore = (
         db
-          .prepare("SELECT sampled_hash FROM files WHERE disk_id = ? AND name = 'a.txt'")
-          .get(diskId) as any
+          .prepare("SELECT sampled_hash FROM files WHERE scan_id = ? AND name = 'a.txt'")
+          .get(runner1.jobId) as any
       ).sampled_hash;
 
       // Modify the file (changes mtime)
@@ -174,8 +169,8 @@ describe("ScanJobRunner", () => {
 
       const hashAfter = (
         db
-          .prepare("SELECT sampled_hash FROM files WHERE disk_id = ? AND name = 'a.txt'")
-          .get(diskId) as any
+          .prepare("SELECT sampled_hash FROM files WHERE scan_id = ? AND name = 'a.txt'")
+          .get(runner2.jobId) as any
       ).sampled_hash;
 
       expect(hashAfter).not.toBe(hashBefore);
@@ -230,14 +225,14 @@ describe("ScanJobRunner", () => {
 
       // root dir should have 2 direct files (a.txt, b.txt)
       const rootDir = db
-        .prepare("SELECT * FROM directories WHERE disk_id = ? AND path = ?")
-        .get(diskId, root) as any;
+        .prepare("SELECT * FROM directories WHERE scan_id = ? AND path = ?")
+        .get(runner.jobId, root) as any;
       expect(rootDir.direct_file_count).toBe(2);
 
       // subdir should have 1 direct file (c.txt)
       const subDir = db
-        .prepare("SELECT * FROM directories WHERE disk_id = ? AND name = 'subdir'")
-        .get(diskId) as any;
+        .prepare("SELECT * FROM directories WHERE scan_id = ? AND name = 'subdir'")
+        .get(runner.jobId) as any;
       expect(subDir.direct_file_count).toBe(1);
     });
 
@@ -248,8 +243,8 @@ describe("ScanJobRunner", () => {
       await runner.start();
 
       const rootDir = db
-        .prepare("SELECT * FROM directories WHERE disk_id = ? AND path = ?")
-        .get(diskId, root) as any;
+        .prepare("SELECT * FROM directories WHERE scan_id = ? AND path = ?")
+        .get(runner.jobId, root) as any;
       // root contains all 4 files recursively
       expect(rootDir.file_count).toBe(4);
     });
@@ -262,13 +257,13 @@ describe("ScanJobRunner", () => {
 
       const totalInDb = (
         db
-          .prepare("SELECT SUM(size_bytes) AS s FROM files WHERE disk_id = ?")
-          .get(diskId) as any
+          .prepare("SELECT SUM(size_bytes) AS s FROM files WHERE scan_id = ?")
+          .get(runner.jobId) as any
       ).s;
 
       const rootDir = db
-        .prepare("SELECT total_size_bytes FROM directories WHERE disk_id = ? AND path = ?")
-        .get(diskId, root) as any;
+        .prepare("SELECT total_size_bytes FROM directories WHERE scan_id = ? AND path = ?")
+        .get(runner.jobId, root) as any;
       expect(rootDir.total_size_bytes).toBe(totalInDb);
     });
   });

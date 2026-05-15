@@ -41,6 +41,7 @@ export async function processNextQueueEntry(
   db: Database,
   scanJobId: number,
   diskId: number,
+  previousScanId: number | null,
   jobManager: JobManager
 ): Promise<{ filesIndexed: number; bytesIndexed: number } | null> {
   // Pop next pending entry atomically
@@ -74,8 +75,8 @@ export async function processNextQueueEntry(
 
   try {
     const tA = performance.now();
-    const dirId = await upsertDirectory(db, diskId, scanJobId, entry.path, entry.parent_directory_id);
-    timings.upsert_dir_ms = Math.round(performance.now() - tA);
+    const dirId = insertDirectory(db, diskId, scanJobId, entry.path, entry.parent_directory_id);
+    timings.insert_dir_ms = Math.round(performance.now() - tA);
 
     const tB = performance.now();
     const dirEntries = await readDirEntries(entry.path, scanJobId, jobManager);
@@ -108,19 +109,20 @@ export async function processNextQueueEntry(
     const files = dirEntries.filter((e) => e.isFile() && !isExcludedName(e.name));
     if (files.length > 0) {
       const tD = performance.now();
-      const { count, bytes, hashPoolMs, upsertMs, selectMs } = await upsertFileBatch(
+      const { count, bytes, hashPoolMs, insertMs, selectMs } = await insertFileBatch(
         db,
         diskId,
         dirId,
         entry.path,
         scanJobId,
+        previousScanId,
         files,
         jobManager
       );
       timings.files_total_ms = Math.round(performance.now() - tD);
       timings.files_select_ms = selectMs;
       timings.files_hash_pool_ms = hashPoolMs;
-      timings.files_upsert_ms = upsertMs;
+      timings.files_insert_ms = insertMs;
       filesIndexed += count;
       bytesIndexed += bytes;
     }
@@ -176,62 +178,64 @@ async function readDirEntries(
   }
 }
 
-async function upsertDirectory(
+function insertDirectory(
   db: Database,
   diskId: number,
   scanJobId: number,
   dirPath: string,
   parentId: number | null
-): Promise<number> {
+): number {
   const name = path.basename(dirPath) || dirPath;
-
-  const existing = db
-    .prepare("SELECT id FROM directories WHERE disk_id = ? AND path = ?")
-    .get(diskId, dirPath) as { id: number } | null;
-
-  if (existing) {
-    db.prepare(
-      `UPDATE directories SET last_scan_id = ?, parent_id = COALESCE(parent_id, ?) WHERE id = ?`
-    ).run(scanJobId, parentId, existing.id);
-    return existing.id;
-  }
 
   const row = db
     .prepare(
-      `INSERT INTO directories (disk_id, parent_id, name, path, last_scan_id)
+      `INSERT INTO directories (disk_id, scan_id, parent_id, name, path)
        VALUES (?, ?, ?, ?, ?)
        RETURNING id`
     )
-    .get(diskId, parentId, name, dirPath, scanJobId) as { id: number };
+    .get(diskId, scanJobId, parentId, name, dirPath) as { id: number };
   return row.id;
 }
 
-async function upsertFileBatch(
+async function insertFileBatch(
   db: Database,
   diskId: number,
   directoryId: number,
   dirPath: string,
   scanJobId: number,
+  previousScanId: number | null,
   entries: import("fs").Dirent[],
   jobManager: JobManager
-): Promise<{ count: number; bytes: number; selectMs: number; hashPoolMs: number; upsertMs: number }> {
-  // Single batched lookup of existing rows, instead of one SELECT per file.
+): Promise<{ count: number; bytes: number; selectMs: number; hashPoolMs: number; insertMs: number }> {
+  // Look up previous scan's rows for this directory (by path) to reuse hashes
+  // when mtime+size are unchanged.
   const tSelect = performance.now();
-  const placeholders = entries.map(() => "?").join(",");
-  const names = entries.map((e) => e.name);
-  const existingRows = db
-    .prepare(
-      `SELECT name, mtime, size_bytes, sampled_hash
-       FROM files
-       WHERE disk_id = ? AND directory_id = ? AND name IN (${placeholders})`
-    )
-    .all(diskId, directoryId, ...names) as Array<{
-    name: string;
-    mtime: string;
-    size_bytes: number;
-    sampled_hash: string | null;
-  }>;
-  const existingMap = new Map(existingRows.map((r) => [r.name, r]));
+  let existingMap = new Map<string, { mtime: string; size_bytes: number; sampled_hash: string | null }>();
+
+  if (previousScanId !== null) {
+    // Find the same directory in the previous scan by path
+    const prevDir = db
+      .prepare("SELECT id FROM directories WHERE scan_id = ? AND path = ?")
+      .get(previousScanId, dirPath) as { id: number } | null;
+
+    if (prevDir) {
+      const placeholders = entries.map(() => "?").join(",");
+      const names = entries.map((e) => e.name);
+      const existingRows = db
+        .prepare(
+          `SELECT name, mtime, size_bytes, sampled_hash
+           FROM files
+           WHERE scan_id = ? AND directory_id = ? AND name IN (${placeholders})`
+        )
+        .all(previousScanId, prevDir.id, ...names) as Array<{
+        name: string;
+        mtime: string;
+        size_bytes: number;
+        sampled_hash: string | null;
+      }>;
+      existingMap = new Map(existingRows.map((r) => [r.name, r]));
+    }
+  }
   const selectMs = Math.round(performance.now() - tSelect);
 
   type FileRecord = {
@@ -295,25 +299,19 @@ async function upsertFileBatch(
   let count = 0;
   let bytes = 0;
 
-  // Single transaction for all upserts in this directory
-  const tUpsert = performance.now();
+  // Single transaction for all inserts in this directory
+  const tInsert = performance.now();
   db.transaction(() => {
-    const upsertStmt = db.prepare(
+    const insertStmt = db.prepare(
       `INSERT INTO files
-         (disk_id, directory_id, name, path, size_bytes, mtime, sampled_hash,
-          hash_algo_version, last_scan_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT (disk_id, directory_id, name) DO UPDATE SET
-         path              = excluded.path,
-         size_bytes        = excluded.size_bytes,
-         mtime             = excluded.mtime,
-         sampled_hash      = excluded.sampled_hash,
-         hash_algo_version = excluded.hash_algo_version,
-         last_scan_id      = excluded.last_scan_id`
+         (disk_id, scan_id, directory_id, name, path, size_bytes, mtime,
+          sampled_hash, hash_algo_version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     for (const f of fileData) {
-      upsertStmt.run(
+      insertStmt.run(
         diskId,
+        scanJobId,
         directoryId,
         f.name,
         f.filePath,
@@ -321,15 +319,14 @@ async function upsertFileBatch(
         f.mtime,
         f.sampledHash,
         HASH_ALGO_VERSION,
-        scanJobId
       );
       count++;
       bytes += f.sizeBytes;
     }
   })();
-  const upsertMs = Math.round(performance.now() - tUpsert);
+  const insertMs = Math.round(performance.now() - tInsert);
 
-  return { count, bytes, selectMs, hashPoolMs, upsertMs };
+  return { count, bytes, selectMs, hashPoolMs, insertMs };
 }
 
 function markQueueEntryDone(db: Database, entryId: number): void {
@@ -361,7 +358,7 @@ function markQueueEntryDone(db: Database, entryId: number): void {
  */
 const YIELD_EVERY = 500;
 
-export async function recomputeAggregates(db: Database, diskId: number): Promise<void> {
+export async function recomputeAggregates(db: Database, scanId: number): Promise<void> {
   const t0 = performance.now();
 
   // 1. Direct (count, bytes) per directory — single grouped scan.
@@ -370,17 +367,17 @@ export async function recomputeAggregates(db: Database, diskId: number): Promise
     .prepare(
       `SELECT directory_id AS id, COUNT(*) AS direct_n, COALESCE(SUM(size_bytes), 0) AS direct_b
          FROM files
-        WHERE disk_id = ?
+        WHERE scan_id = ?
         GROUP BY directory_id`
     )
-    .all(diskId) as Array<{ id: number; direct_n: number; direct_b: number }>;
+    .all(scanId) as Array<{ id: number; direct_n: number; direct_b: number }>;
   const groupMs = Math.round(performance.now() - tGroup);
 
-  // 2. Load directory tree (id + parent_id) for this disk.
+  // 2. Load directory tree (id + parent_id) for this scan.
   const tDirs = performance.now();
   const dirRows = db
-    .prepare("SELECT id, parent_id FROM directories WHERE disk_id = ?")
-    .all(diskId) as Array<{ id: number; parent_id: number | null }>;
+    .prepare("SELECT id, parent_id FROM directories WHERE scan_id = ?")
+    .all(scanId) as Array<{ id: number; parent_id: number | null }>;
   const dirsLoadMs = Math.round(performance.now() - tDirs);
 
   // Build per-dir state, seeded with direct totals.
@@ -469,7 +466,7 @@ export async function recomputeAggregates(db: Database, diskId: number): Promise
   const writeMs = Math.round(performance.now() - tWrite);
 
   trace("aggregates_done", {
-    disk_id: diskId,
+    scan_id: scanId,
     dirs: acc.size,
     direct_groups: directRows.length,
     total_ms: Math.round(performance.now() - t0),

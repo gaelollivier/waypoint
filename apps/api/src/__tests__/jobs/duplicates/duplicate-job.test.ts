@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach, beforeAll, afterAll } from "bun:test";
-import { mkdirSync, writeFileSync, rmSync } from "fs";
+import { existsSync, mkdirSync, writeFileSync, rmSync } from "fs";
 import path from "path";
 import { Database } from "bun:sqlite";
 import { JobManager } from "../../../jobs/job-manager";
 import { ScanJobRunner } from "../../../jobs/scan/scan-job";
 import { DuplicateDetectionJobRunner } from "../../../jobs/duplicates/duplicate-job";
+import { deleteDuplicateFile } from "../../../fs/disk-writes";
 import { makeTestDb, insertDisk } from "../../helpers";
 
 const TMP_BASE = "/tmp/waypoint-duplicate-test";
@@ -166,5 +167,52 @@ describe("DuplicateDetectionJobRunner", () => {
       "vacation-1.jpg",
       "vacation-1.jpg",
     ]);
+  });
+
+  it("deleted_at column tracks cleanup and prevents double-deletion", async () => {
+    const root = path.join(TMP_BASE, "cleanup-tracking");
+    writeTree(root, {
+      "photos/img.jpg": "duplicate content",
+      "backup/img.jpg": "duplicate content",
+    });
+    await scanDisk(db, jm, diskId, root);
+    const jobId = await runDuplicateDetection(db, jm, diskId);
+
+    const groups = getGroups(db, jobId);
+    expect(groups.length).toBe(1);
+
+    const files = getGroupFiles(db, groups[0].id);
+    expect(files.length).toBe(2);
+
+    // All files start with deleted_at = null
+    const filesWithDeletedAt = db
+      .prepare("SELECT file_id, path, deleted_at FROM duplicate_group_files WHERE group_id = ? ORDER BY path")
+      .all(groups[0].id) as Array<{ file_id: number; path: string; deleted_at: string | null }>;
+    expect(filesWithDeletedAt.every((f) => f.deleted_at === null)).toBe(true);
+
+    // Delete one file and mark it
+    const keepPath = files[0].path;
+    const deletePath = files[1].path;
+    await deleteDuplicateFile({ deletePath, keepPath, diskMountPath: root });
+
+    const now = new Date().toISOString();
+    db.prepare("UPDATE duplicate_group_files SET deleted_at = ? WHERE group_id = ? AND file_id = ?")
+      .run(now, groups[0].id, files[1].file_id);
+
+    // Verify: one file marked as deleted, one still null
+    const afterCleanup = db
+      .prepare("SELECT file_id, deleted_at FROM duplicate_group_files WHERE group_id = ? ORDER BY path")
+      .all(groups[0].id) as Array<{ file_id: number; deleted_at: string | null }>;
+    expect(afterCleanup[0].deleted_at).toBeNull();
+    expect(afterCleanup[1].deleted_at).not.toBeNull();
+
+    // The deleted file no longer exists on disk
+    expect(existsSync(deletePath)).toBe(false);
+    expect(existsSync(keepPath)).toBe(true);
+
+    // Attempting to delete the same file again fails (file doesn't exist)
+    await expect(
+      deleteDuplicateFile({ deletePath, keepPath, diskMountPath: root })
+    ).rejects.toThrow("file to delete does not exist");
   });
 });

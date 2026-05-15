@@ -19,18 +19,16 @@ duplicatesRouter.post("/", async (c) => {
   const disk = getDiskById(db, diskId);
   if (!disk) return c.json({ error: "Disk not found" }, 404);
 
-  // Disk must have been scanned (files table has rows)
-  const fileCount = db
-    .prepare("SELECT COUNT(*) AS n FROM files WHERE disk_id = ?")
-    .get(diskId) as { n: number };
-  if (fileCount.n === 0) {
+  // Disk must have been scanned
+  if (!disk.last_scan_job_id) {
     return c.json({ error: "Disk has no scan data — run a scan first" }, 409);
   }
+  const scanId = disk.last_scan_job_id;
 
-  // At least one file must have a sampled_hash
+  // Verify the scan has files with hashes
   const hashCount = db
-    .prepare("SELECT COUNT(*) AS n FROM files WHERE disk_id = ? AND sampled_hash IS NOT NULL")
-    .get(diskId) as { n: number };
+    .prepare("SELECT COUNT(*) AS n FROM files WHERE scan_id = ? AND sampled_hash IS NOT NULL")
+    .get(scanId) as { n: number };
   if (hashCount.n === 0) {
     return c.json({ error: "No hashed files found — run a scan first" }, 409);
   }

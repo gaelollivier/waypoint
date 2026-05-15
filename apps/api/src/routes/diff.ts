@@ -31,17 +31,11 @@ diffRouter.post("/", async (c) => {
   const destDisk = getDiskById(db, destDiskId);
   if (!destDisk) return c.json({ error: "Destination disk not found" }, 404);
 
-  // Verify both disks have been scanned (files table has rows)
-  const sourceCount = db
-    .prepare("SELECT COUNT(*) AS n FROM files WHERE disk_id = ?")
-    .get(sourceDiskId) as { n: number };
-  if (sourceCount.n === 0) {
+  // Verify both disks have been scanned
+  if (!sourceDisk.last_scan_job_id) {
     return c.json({ error: "Source disk has no scan data — run a scan first" }, 409);
   }
-  const destCount = db
-    .prepare("SELECT COUNT(*) AS n FROM files WHERE disk_id = ?")
-    .get(destDiskId) as { n: number };
-  if (destCount.n === 0) {
+  if (!destDisk.last_scan_job_id) {
     return c.json({ error: "Destination disk has no scan data — run a scan first" }, 409);
   }
 

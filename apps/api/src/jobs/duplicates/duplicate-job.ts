@@ -36,6 +36,13 @@ export class DuplicateDetectionJobRunner extends JobRunner {
     trace("duplicate_detection_start", { job_id: this.jobId, disk_id: this.diskId });
     const t0 = performance.now();
 
+    // Resolve the latest completed scan for this disk
+    const scanRow = this.db
+      .prepare("SELECT last_scan_job_id FROM disks WHERE id = ?")
+      .get(this.diskId) as { last_scan_job_id: number | null } | null;
+    if (!scanRow?.last_scan_job_id) throw new Error("invariant: disk has no completed scan");
+    const scanId = scanRow.last_scan_job_id;
+
     // ── Phase 1: find all duplicate hashes on this disk ─────────────────────
     await this.checkPause();
 
@@ -43,14 +50,14 @@ export class DuplicateDetectionJobRunner extends JobRunner {
       .prepare(
         `SELECT sampled_hash, size_bytes, COUNT(*) AS file_count
          FROM files
-         WHERE disk_id = ?
+         WHERE scan_id = ?
            AND sampled_hash IS NOT NULL
            AND ${EXCLUDED_NAMES_SQL}
          GROUP BY sampled_hash
          HAVING file_count > 1
          ORDER BY size_bytes DESC`
       )
-      .all(this.diskId) as DuplicateGroupRow[];
+      .all(scanId) as DuplicateGroupRow[];
 
     const totalWastedBytes = groups.reduce(
       (acc, g) => acc + g.size_bytes * (g.file_count - 1),
@@ -82,7 +89,7 @@ export class DuplicateDetectionJobRunner extends JobRunner {
     const selectMembers = this.db.prepare(
       `SELECT id AS file_id, path
        FROM files
-       WHERE disk_id = ?
+       WHERE scan_id = ?
          AND sampled_hash = ?
          AND ${EXCLUDED_NAMES_SQL}`
     );
@@ -108,7 +115,7 @@ export class DuplicateDetectionJobRunner extends JobRunner {
           ) as { id: number };
 
           const members = selectMembers.all(
-            this.diskId,
+            scanId,
             g.sampled_hash
           ) as DuplicateFileRow[];
 

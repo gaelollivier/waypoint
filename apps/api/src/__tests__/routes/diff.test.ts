@@ -2,34 +2,43 @@ import { describe, it, expect, beforeEach } from "bun:test";
 import { createTestApp, req, insertDisk, type TestContext } from "./helpers";
 import { insertJob } from "../helpers";
 
+/** Creates a scan job for a disk and sets last_scan_job_id. Returns the scan job id. */
+function setupScan(ctx: TestContext, diskId: number): number {
+  const scanId = insertJob(ctx.db, { type: "scan", status: "completed", target_disk_id: diskId });
+  ctx.db.prepare("UPDATE disks SET last_scan_job_id = ? WHERE id = ?").run(scanId, diskId);
+  return scanId;
+}
+
 /** Insert a directory row and return its id. */
 function insertDirectory(
   ctx: TestContext,
   diskId: number,
+  scanId: number,
   id: number,
   name: string,
   path: string
 ): void {
   ctx.db
     .prepare(
-      "INSERT INTO directories (id, disk_id, parent_id, name, path, total_size_bytes, file_count, direct_file_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+      "INSERT INTO directories (id, disk_id, scan_id, parent_id, name, path, total_size_bytes, file_count, direct_file_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
-    .run(id, diskId, null, name, path, 0, 0, 0);
+    .run(id, diskId, scanId, null, name, path, 0, 0, 0);
 }
 
 /** Insert a file row with a sampled hash. */
 function insertFile(
   ctx: TestContext,
   diskId: number,
+  scanId: number,
   directoryId: number,
   name: string,
   filePath: string
 ): void {
   ctx.db
     .prepare(
-      "INSERT INTO files (disk_id, directory_id, name, path, size_bytes, mtime, sampled_hash, hash_algo_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+      "INSERT INTO files (disk_id, scan_id, directory_id, name, path, size_bytes, mtime, sampled_hash, hash_algo_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
-    .run(diskId, directoryId, name, filePath, 100, "2024-01-01", "abc123", 1);
+    .run(diskId, scanId, directoryId, name, filePath, 100, "2024-01-01", "abc123", 1);
 }
 
 describe("diff routes", () => {
@@ -66,9 +75,10 @@ describe("diff routes", () => {
       const sourceId = insertDisk(ctx.db);
       const destId = insertDisk(ctx.db);
 
-      // Dest has a file, source does not
-      insertDirectory(ctx, destId, 200, "DestRoot", "/mnt/dest");
-      insertFile(ctx, destId, 200, "dest.txt", "/mnt/dest/dest.txt");
+      // Dest has a scan, source does not
+      const destScanId = setupScan(ctx, destId);
+      insertDirectory(ctx, destId, destScanId, 200, "DestRoot", "/mnt/dest");
+      insertFile(ctx, destId, destScanId, 200, "dest.txt", "/mnt/dest/dest.txt");
 
       const res = await req(ctx.app, "POST", `/api/disks/${sourceId}/diff`, { destDiskId: destId });
       expect(res.status).toBe(409);
@@ -79,9 +89,10 @@ describe("diff routes", () => {
       const sourceId = insertDisk(ctx.db);
       const destId = insertDisk(ctx.db);
 
-      // Source has a file, dest does not
-      insertDirectory(ctx, sourceId, 100, "SourceRoot", "/mnt/source");
-      insertFile(ctx, sourceId, 100, "test.txt", "/mnt/source/test.txt");
+      // Source has a scan, dest does not
+      const srcScanId = setupScan(ctx, sourceId);
+      insertDirectory(ctx, sourceId, srcScanId, 100, "SourceRoot", "/mnt/source");
+      insertFile(ctx, sourceId, srcScanId, 100, "test.txt", "/mnt/source/test.txt");
 
       const res = await req(ctx.app, "POST", `/api/disks/${sourceId}/diff`, { destDiskId: destId });
       expect(res.status).toBe(409);
@@ -92,11 +103,13 @@ describe("diff routes", () => {
       const sourceId = insertDisk(ctx.db);
       const destId = insertDisk(ctx.db);
 
-      insertDirectory(ctx, sourceId, 100, "SourceRoot", "/mnt/source");
-      insertFile(ctx, sourceId, 100, "test.txt", "/mnt/source/test.txt");
+      const srcScanId = setupScan(ctx, sourceId);
+      insertDirectory(ctx, sourceId, srcScanId, 100, "SourceRoot", "/mnt/source");
+      insertFile(ctx, sourceId, srcScanId, 100, "test.txt", "/mnt/source/test.txt");
 
-      insertDirectory(ctx, destId, 200, "DestRoot", "/mnt/dest");
-      insertFile(ctx, destId, 200, "test.txt", "/mnt/dest/test.txt");
+      const destScanId = setupScan(ctx, destId);
+      insertDirectory(ctx, destId, destScanId, 200, "DestRoot", "/mnt/dest");
+      insertFile(ctx, destId, destScanId, 200, "test.txt", "/mnt/dest/test.txt");
 
       const res = await req(ctx.app, "POST", `/api/disks/${sourceId}/diff`, { destDiskId: destId });
       expect(res.status).toBe(202);
@@ -108,11 +121,13 @@ describe("diff routes", () => {
       const sourceId = insertDisk(ctx.db);
       const destId = insertDisk(ctx.db);
 
-      insertDirectory(ctx, sourceId, 100, "SourceRoot", "/mnt/source");
-      insertFile(ctx, sourceId, 100, "test.txt", "/mnt/source/test.txt");
+      const srcScanId = setupScan(ctx, sourceId);
+      insertDirectory(ctx, sourceId, srcScanId, 100, "SourceRoot", "/mnt/source");
+      insertFile(ctx, sourceId, srcScanId, 100, "test.txt", "/mnt/source/test.txt");
 
-      insertDirectory(ctx, destId, 200, "DestRoot", "/mnt/dest");
-      insertFile(ctx, destId, 200, "test.txt", "/mnt/dest/test.txt");
+      const destScanId = setupScan(ctx, destId);
+      insertDirectory(ctx, destId, destScanId, 200, "DestRoot", "/mnt/dest");
+      insertFile(ctx, destId, destScanId, 200, "test.txt", "/mnt/dest/test.txt");
 
       // First diff
       const first = await req(ctx.app, "POST", `/api/disks/${sourceId}/diff`, { destDiskId: destId });

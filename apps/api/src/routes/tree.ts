@@ -41,10 +41,29 @@ treeRouter.get("/", (c) => {
   const diskId = Number(c.req.param("id"));
   const rawParentId = c.req.query("parentId");
   const rawParentPath = c.req.query("parentPath");
+  const rawScanId = c.req.query("scanId");
 
   const db = getDb();
   const disk = getDiskById(db, diskId);
   if (!disk) return c.json({ error: "Disk not found" }, 404);
+
+  // Resolve which scan snapshot to browse. Default: latest completed scan.
+  let scanId: number;
+  if (rawScanId !== undefined) {
+    scanId = Number(rawScanId);
+  } else if (disk.last_scan_job_id) {
+    scanId = disk.last_scan_job_id;
+  } else {
+    // Disk has never been scanned
+    return c.json({
+      diskId,
+      parentId: null,
+      parentPath: null,
+      breadcrumb: [{ id: null, name: disk.label ?? "Disk", path: "" }],
+      totalSizeBytes: 0,
+      entries: [],
+    } satisfies TreeResponse);
+  }
 
   // Resolve the target directory
   let parentId: number | null = null;
@@ -53,8 +72,8 @@ treeRouter.get("/", (c) => {
 
   if (rawParentPath !== undefined) {
     const dir = db
-      .prepare("SELECT id, path, total_size_bytes FROM directories WHERE path = ? AND disk_id = ?")
-      .get(rawParentPath, diskId) as { id: number; path: string; total_size_bytes: number } | null;
+      .prepare("SELECT id, path, total_size_bytes FROM directories WHERE path = ? AND scan_id = ?")
+      .get(rawParentPath, scanId) as { id: number; path: string; total_size_bytes: number } | null;
     if (!dir) return c.json({ error: "Directory not found" }, 404);
     parentId = dir.id;
     parentPath = dir.path;
@@ -62,8 +81,8 @@ treeRouter.get("/", (c) => {
   } else if (rawParentId !== undefined) {
     parentId = Number(rawParentId);
     const dir = db
-      .prepare("SELECT id, path, total_size_bytes FROM directories WHERE id = ? AND disk_id = ?")
-      .get(parentId, diskId) as { id: number; path: string; total_size_bytes: number } | null;
+      .prepare("SELECT id, path, total_size_bytes FROM directories WHERE id = ?")
+      .get(parentId) as { id: number; path: string; total_size_bytes: number } | null;
     if (!dir) return c.json({ error: "Directory not found" }, 404);
     parentPath = dir.path;
     totalSizeBytes = dir.total_size_bytes;
@@ -71,12 +90,11 @@ treeRouter.get("/", (c) => {
     // Root: use the disk's mount path as the root directory
     const root = db
       .prepare(
-        "SELECT id, path, total_size_bytes FROM directories WHERE disk_id = ? AND parent_id IS NULL ORDER BY id ASC LIMIT 1"
+        "SELECT id, path, total_size_bytes FROM directories WHERE scan_id = ? AND parent_id IS NULL ORDER BY id ASC LIMIT 1"
       )
-      .get(diskId) as { id: number; path: string; total_size_bytes: number } | null;
+      .get(scanId) as { id: number; path: string; total_size_bytes: number } | null;
 
     if (!root) {
-      // Disk has never been scanned
       return c.json({
         diskId,
         parentId: null,
@@ -97,10 +115,10 @@ treeRouter.get("/", (c) => {
     .prepare(
       `SELECT id, name, path, total_size_bytes, file_count, direct_file_count
        FROM directories
-       WHERE disk_id = ? AND parent_id = ?
+       WHERE scan_id = ? AND parent_id = ?
        ORDER BY total_size_bytes DESC`
     )
-    .all(diskId, parentId) as Array<{
+    .all(scanId, parentId) as Array<{
       id: number;
       name: string;
       path: string;
@@ -114,10 +132,10 @@ treeRouter.get("/", (c) => {
     .prepare(
       `SELECT id, name, path, size_bytes, mtime, sampled_hash
        FROM files
-       WHERE disk_id = ? AND directory_id = ?
+       WHERE scan_id = ? AND directory_id = ?
        ORDER BY size_bytes DESC`
     )
-    .all(diskId, parentId) as Array<{
+    .all(scanId, parentId) as Array<{
       id: number;
       name: string;
       path: string;
@@ -148,7 +166,7 @@ treeRouter.get("/", (c) => {
   ].sort((a, b) => b.sizeBytes - a.sizeBytes);
 
   // Build breadcrumb by walking up via parent_id
-  const breadcrumb = buildBreadcrumb(db, diskId, parentId, disk.label);
+  const breadcrumb = buildBreadcrumb(db, parentId, disk.label);
 
   return c.json({
     diskId,
@@ -162,7 +180,6 @@ treeRouter.get("/", (c) => {
 
 function buildBreadcrumb(
   db: ReturnType<typeof getDb>,
-  diskId: number,
   dirId: number,
   diskLabel: string | null
 ): Array<{ id: number | null; name: string; path: string }> {
@@ -171,8 +188,8 @@ function buildBreadcrumb(
 
   while (current !== null) {
     const row = db
-      .prepare("SELECT id, name, path, parent_id FROM directories WHERE id = ? AND disk_id = ?")
-      .get(current, diskId) as { id: number; name: string; path: string; parent_id: number | null } | null;
+      .prepare("SELECT id, name, path, parent_id FROM directories WHERE id = ?")
+      .get(current) as { id: number; name: string; path: string; parent_id: number | null } | null;
     if (!row) break;
     crumbs.unshift({ id: row.id, name: row.name, path: row.path });
     current = row.parent_id;

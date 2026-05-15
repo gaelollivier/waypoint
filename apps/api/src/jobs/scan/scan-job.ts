@@ -26,6 +26,13 @@ export class ScanJobRunner extends JobRunner {
     trace("scan_start", { job_id: this.jobId, disk_id: this.diskId, mount: this.mountPath });
     this.initOrResumeQueue();
 
+    // Resolve the previous completed scan for this disk so the walker can
+    // reuse hashes when mtime+size are unchanged (avoids re-reading files).
+    const prevScanRow = this.db
+      .prepare("SELECT last_scan_job_id FROM disks WHERE id = ?")
+      .get(this.diskId) as { last_scan_job_id: number | null } | null;
+    const previousScanId = prevScanRow?.last_scan_job_id ?? null;
+
     let total = 0;
     let dirsProcessed = 0;
     while (true) {
@@ -35,6 +42,7 @@ export class ScanJobRunner extends JobRunner {
         this.db,
         this.jobId,
         this.diskId,
+        previousScanId,
         this.jobManager
       );
 
@@ -59,7 +67,7 @@ export class ScanJobRunner extends JobRunner {
     // writeback yields to the event loop every YIELD_EVERY rows so HTTP stays
     // responsive while ~thousands of small UPDATEs run.
     const tAgg = performance.now();
-    await recomputeAggregates(this.db, this.diskId);
+    await recomputeAggregates(this.db, this.jobId);
     trace("scan_aggregates_done", { job_id: this.jobId, ms: Math.round(performance.now() - tAgg) });
 
     // Update the disk's last_scan_at / last_scan_job_id

@@ -44,7 +44,7 @@ describe("runMigrations", () => {
   it("sets user_version to the latest migration after migration", () => {
     const db = new Database(":memory:");
     runMigrations(db);
-    expect(getUserVersion(db)).toBe(8);
+    expect(getUserVersion(db)).toBe(10);
   });
 
   it("is idempotent: running twice does not error or duplicate tables", () => {
@@ -53,7 +53,7 @@ describe("runMigrations", () => {
     runMigrations(db);
     runMigrations(db); // second run — should be no-op
     expect(getTables(db)).toEqual(EXPECTED_TABLES);
-    expect(getUserVersion(db)).toBe(8);
+    expect(getUserVersion(db)).toBe(10);
   });
 
   it("enforces foreign keys (PRAGMA foreign_keys = ON)", () => {
@@ -64,8 +64,8 @@ describe("runMigrations", () => {
     expect(() =>
       db
         .prepare(
-          `INSERT INTO files (disk_id, directory_id, name, path, size_bytes, mtime)
-           VALUES (999, 999, 'x', '/x', 0, '2024-01-01')`
+          `INSERT INTO files (disk_id, scan_id, directory_id, name, path, size_bytes, mtime)
+           VALUES (999, 999, 999, 'x', '/x', 0, '2024-01-01')`
         )
         .run()
     ).toThrow();
@@ -80,10 +80,10 @@ describe("runMigrations", () => {
         .all() as Array<{ name: string }>
     ).map((r) => r.name);
 
-    expect(indices).toContain("files_disk_path");
-    expect(indices).toContain("files_sampled_hash");
+    expect(indices).toContain("files_scan_path");
+    expect(indices).toContain("files_scan_hash");
     expect(indices).toContain("jobs_type_status");
-    expect(indices).toContain("directories_disk_path");
+    expect(indices).toContain("directories_scan_path");
     expect(indices).toContain("scan_walk_queue_job_status");
   });
 });

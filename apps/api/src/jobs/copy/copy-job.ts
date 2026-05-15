@@ -159,8 +159,13 @@ export class CopyJobRunner extends JobRunner {
       }
     }
 
-    // Post-copy: recompute directory aggregates on dest disk
-    await recomputeAggregates(this.db, this.destDiskId);
+    // Post-copy: recompute directory aggregates on dest disk's latest scan
+    const destScanRow = this.db
+      .prepare("SELECT last_scan_job_id FROM disks WHERE id = ?")
+      .get(this.destDiskId) as { last_scan_job_id: number | null } | null;
+    if (destScanRow?.last_scan_job_id) {
+      await recomputeAggregates(this.db, destScanRow.last_scan_job_id);
+    }
 
     trace("copy_end", {
       job_id: this.jobId,
@@ -609,10 +614,17 @@ export class CopyJobRunner extends JobRunner {
       ? this.destMountPath
       : path.join(this.destMountPath, dirRelPath);
 
+    // Resolve the dest disk's latest scan_id for directory/file lookups
+    const destScanRow = this.db
+      .prepare("SELECT last_scan_job_id FROM disks WHERE id = ?")
+      .get(this.destDiskId) as { last_scan_job_id: number | null } | null;
+    if (!destScanRow?.last_scan_job_id) throw new Error("invariant: dest disk has no completed scan");
+    const destScanId = destScanRow.last_scan_job_id;
+
     // Find or create directory on dest disk
     const dirRow = this.db
-      .prepare("SELECT id FROM directories WHERE disk_id = ? AND path = ?")
-      .get(this.destDiskId, dirAbsPath) as { id: number } | null;
+      .prepare("SELECT id FROM directories WHERE scan_id = ? AND path = ?")
+      .get(destScanId, dirAbsPath) as { id: number } | null;
 
     // If the directory doesn't exist in our DB yet, create it
     let directoryId: number;
@@ -625,20 +637,20 @@ export class CopyJobRunner extends JobRunner {
     // Upsert the file row
     this.db
       .prepare(
-        `INSERT INTO files (disk_id, directory_id, name, path, size_bytes, mtime, sampled_hash, full_hash, hash_algo_version, last_scan_id)
+        `INSERT INTO files (disk_id, scan_id, directory_id, name, path, size_bytes, mtime, sampled_hash, full_hash, hash_algo_version)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (disk_id, path) DO UPDATE SET
+         ON CONFLICT (scan_id, path) DO UPDATE SET
            directory_id = excluded.directory_id,
            name = excluded.name,
            size_bytes = excluded.size_bytes,
            mtime = excluded.mtime,
            sampled_hash = excluded.sampled_hash,
            full_hash = excluded.full_hash,
-           hash_algo_version = excluded.hash_algo_version,
-           last_scan_id = excluded.last_scan_id`
+           hash_algo_version = excluded.hash_algo_version`
       )
       .run(
         this.destDiskId,
+        destScanId,
         directoryId,
         fileName,
         destAbsPath,
@@ -647,7 +659,6 @@ export class CopyJobRunner extends JobRunner {
         item.sampled_hash,
         fullHash,
         HASH_ALGO_VERSION,
-        this.jobId
       );
   }
 
@@ -659,6 +670,13 @@ export class CopyJobRunner extends JobRunner {
    * convert each segment to its absolute form for both lookups and inserts.
    */
   private ensureDirectoryChain(relativePath: string): number {
+    // Resolve the dest disk's latest scan_id
+    const destScanRow = this.db
+      .prepare("SELECT last_scan_job_id FROM disks WHERE id = ?")
+      .get(this.destDiskId) as { last_scan_job_id: number | null } | null;
+    if (!destScanRow?.last_scan_job_id) throw new Error("invariant: dest disk has no completed scan");
+    const destScanId = destScanRow.last_scan_job_id;
+
     const segments = relativePath === "/" || relativePath === "."
       ? ["/"]
       : ["/" , ...relativePath.split("/").filter(Boolean)];
@@ -679,8 +697,8 @@ export class CopyJobRunner extends JobRunner {
         : path.join(this.destMountPath, currentRelPath);
 
       const existing = this.db
-        .prepare("SELECT id FROM directories WHERE disk_id = ? AND path = ?")
-        .get(this.destDiskId, absPath) as { id: number } | null;
+        .prepare("SELECT id FROM directories WHERE scan_id = ? AND path = ?")
+        .get(destScanId, absPath) as { id: number } | null;
 
       if (existing) {
         parentId = existing.id;
@@ -689,12 +707,13 @@ export class CopyJobRunner extends JobRunner {
 
       const row = this.db
         .prepare(
-          `INSERT INTO directories (disk_id, parent_id, name, path)
-           VALUES (?, ?, ?, ?)
+          `INSERT INTO directories (disk_id, scan_id, parent_id, name, path)
+           VALUES (?, ?, ?, ?, ?)
            RETURNING id`
         )
         .get(
           this.destDiskId,
+          destScanId,
           parentId,
           segment === "/" ? path.basename(this.destMountPath) : segment,
           absPath

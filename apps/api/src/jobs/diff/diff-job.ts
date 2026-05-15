@@ -69,6 +69,20 @@ export class DiffJobRunner extends JobRunner {
     const sourceMountPath = sourceDisk?.mount_path ?? "";
     const destMountPath = destDisk?.mount_path ?? "";
 
+    // Resolve the latest completed scan for each disk
+    const sourceScanRow = this.db
+      .prepare("SELECT last_scan_job_id FROM disks WHERE id = ?")
+      .get(this.sourceDiskId) as { last_scan_job_id: number | null } | null;
+    const destScanRow = this.db
+      .prepare("SELECT last_scan_job_id FROM disks WHERE id = ?")
+      .get(this.destDiskId) as { last_scan_job_id: number | null } | null;
+
+    if (!sourceScanRow?.last_scan_job_id) throw new Error("invariant: source disk has no completed scan");
+    if (!destScanRow?.last_scan_job_id) throw new Error("invariant: dest disk has no completed scan");
+
+    const sourceScanId = sourceScanRow.last_scan_job_id;
+    const destScanId = destScanRow.last_scan_job_id;
+
     // ----------------------------------------------------------------
     // 1. Load source files; build relative-path lookup map
     // ----------------------------------------------------------------
@@ -79,9 +93,9 @@ export class DiffJobRunner extends JobRunner {
       .prepare(
         `SELECT id, path, sampled_hash, size_bytes
          FROM files
-         WHERE disk_id = ? AND ${EXCLUDED_NAMES_SQL}`
+         WHERE scan_id = ? AND ${EXCLUDED_NAMES_SQL}`
       )
-      .all(this.sourceDiskId) as Array<{
+      .all(sourceScanId) as Array<{
         id: number;
         path: string;
         sampled_hash: string | null;
@@ -95,9 +109,9 @@ export class DiffJobRunner extends JobRunner {
       .prepare(
         `SELECT id, path, sampled_hash, size_bytes
          FROM files
-         WHERE disk_id = ? AND ${EXCLUDED_NAMES_SQL}`
+         WHERE scan_id = ? AND ${EXCLUDED_NAMES_SQL}`
       )
-      .all(this.destDiskId) as Array<{
+      .all(destScanId) as Array<{
         id: number;
         path: string;
         sampled_hash: string | null;
