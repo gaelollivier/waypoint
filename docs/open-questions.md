@@ -186,7 +186,7 @@ Migration 0003 used the SQLite 12-step schema change (create `jobs_new` → copy
 
 **Symptom:** Diffing SSD (disk 1) against HDD (disk 2) showed 177,459 added / 0 present — every file appeared as new, no matches.
 
-**Root cause:** `markDiskDisconnected()` set `mount_path = NULL` on the disk row. The diff job reads `mount_path` at diff time to strip the prefix from absolute file paths. With `mount_path = NULL`, the fallback was `""`, so `relPath("", "/Volumes/T7_Shield/file.txt")` returned the full absolute path instead of `/file.txt`. Since the HDD paths were properly relativized but the SSD paths weren't, nothing matched.
+**Root cause:** `markDiskDisconnected()` set `mount_path = NULL` on the disk row. The diff job reads `mount_path` at diff time to strip the prefix from absolute file paths. With `mount_path = NULL`, the fallback was `""`, so `relPath("", "/Volumes/<disk>/file.txt")` returned the full absolute path instead of `/file.txt`. Since the HDD paths were properly relativized but the SSD paths weren't, nothing matched.
 
 **Secondary symptom:** The SSD showed as "offline" in the UI despite being physically connected. The poller skips disks with `mount_path = NULL` (no path to probe), so it could never discover the disk was back.
 
@@ -198,7 +198,7 @@ Migration 0003 used the SQLite 12-step schema change (create `jobs_new` → copy
 
 ### Breadcrumb double-root — fixed 2026-05-11
 
-**Symptom:** Tree view breadcrumb showed `T7_Shield / T7_Shield / Photos - Videos / …` — the disk root appeared twice.
+**Symptom:** Tree view breadcrumb showed `<disk> / <disk> / <subdir> / …` — the disk root appeared twice.
 
 **Root cause:** `buildBreadcrumb()` in `routes/tree.ts` walked up the directory chain (which includes the root dir named after the mount point basename), then unconditionally prepended a separate disk-label crumb. Both had the same display name.
 
@@ -313,9 +313,9 @@ starved during benchmarks and the API froze (no progress updates, no page loads)
 - Communication via `postMessage`: start/pause/resume/cancel inbound, progress/done/error outbound
 - Workers replicate `disk-writes.ts` guardrails inline (path containment, exclusive create) since they can't share main-thread module singletons
 
-**Read speed test results (T7 Shield SSD, 2026-05-15):**
-- 26.5 GB MKV: full BLAKE3 hash in 98s → **258 MB/s effective throughput**
-- The T7 Shield's raw sequential read is ~1,000 MB/s, so pure-JS BLAKE3
+**Read speed test results (test SSD, 2026-05-15):**
+- Large video file: full BLAKE3 hash effective throughput ~260 MB/s
+- The SSD's raw sequential read is several times higher, so pure-JS BLAKE3
   (`@noble/hashes`) is the bottleneck, not the disk
 - This means scan and verify jobs are also CPU-bound on SSDs, not I/O-bound
 
