@@ -6,6 +6,7 @@ import { JobManager } from "../../../jobs/job-manager";
 import { ScanJobRunner } from "../../../jobs/scan/scan-job";
 import { DuplicateDetectionJobRunner } from "../../../jobs/duplicates/duplicate-job";
 import { deleteDuplicateFile } from "../../../fs/disk-writes";
+import { computeFullHashStreaming, computeSampledHash } from "../../../jobs/scan/hasher";
 import { makeTestDb, insertDisk } from "../../helpers";
 
 const TMP_BASE = "/tmp/waypoint-duplicate-test";
@@ -43,8 +44,9 @@ async function runDuplicateDetection(
   jm: JobManager,
   diskId: number
 ): Promise<number> {
-  const job = jm.createJob({ type: "duplicate_detection", targetDiskId: diskId });
-  const runner = new DuplicateDetectionJobRunner({ jobId: job.id, jobManager: jm, db, diskId });
+  const scan = db.prepare("SELECT last_scan_job_id FROM disks WHERE id = ?").get(diskId) as { last_scan_job_id: number };
+  const job = jm.createJob({ type: "duplicate_detection", targetDiskId: diskId, payload: { scanId: scan.last_scan_job_id } });
+  const runner = new DuplicateDetectionJobRunner({ jobId: job.id, jobManager: jm, db, diskId, scanId: scan.last_scan_job_id });
   await runner.start();
   return job.id;
 }
@@ -52,6 +54,8 @@ async function runDuplicateDetection(
 type DuplicateGroupRow = {
   id: number;
   duplicate_job_id: number;
+  hash_kind: "full" | "sampled";
+  content_hash: string;
   sampled_hash: string;
   file_count: number;
   size_bytes: number;
@@ -68,6 +72,27 @@ function getGroupFiles(db: Database, groupId: number): Array<{ file_id: number; 
   return db
     .prepare("SELECT file_id, path FROM duplicate_group_files WHERE group_id = ? ORDER BY path")
     .all(groupId) as Array<{ file_id: number; path: string }>;
+}
+
+
+async function makeDeleteProof(deletePath: string, keepPath: string) {
+  const [deleteFullHash, keepFullHash] = await Promise.all([
+    computeFullHashStreaming(deletePath),
+    computeFullHashStreaming(keepPath),
+  ]);
+  const [deleteActualSampledHash, keepActualSampledHash] = await Promise.all([
+    computeSampledHash(deletePath, 17),
+    computeSampledHash(keepPath, 17),
+  ]);
+  return {
+    expectedFullHash: keepFullHash,
+    deleteFullHash,
+    keepFullHash,
+    deleteExpectedSampledHash: deleteActualSampledHash,
+    keepExpectedSampledHash: keepActualSampledHash,
+    deleteActualSampledHash,
+    keepActualSampledHash,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -104,6 +129,38 @@ describe("DuplicateDetectionJobRunner", () => {
     const files = getGroupFiles(db, groups[0].id);
     expect(files.length).toBe(2);
     expect(files.every((f) => f.path.includes("vacation.jpg"))).toBe(true);
+  });
+
+
+  it("prefers full-hash evidence when available", async () => {
+    const root = path.join(TMP_BASE, "full-hash-dupes");
+    writeTree(root, {
+      "a.txt": "same content",
+      "b.txt": "same content",
+    });
+
+    const scanJob = jm.createJob({ type: "scan", targetDiskId: diskId, payload: { fullHash: true } });
+    db.prepare("UPDATE disks SET mount_path = ?, is_connected = 1 WHERE id = ?").run(root, diskId);
+    const scanRunner = new ScanJobRunner({
+      jobId: scanJob.id,
+      jobManager: jm,
+      db,
+      diskId,
+      mountPath: root,
+      fullHash: true,
+    });
+    await scanRunner.start();
+
+    const jobId = await runDuplicateDetection(db, jm, diskId);
+    const groups = getGroups(db, jobId);
+
+    const fileHash = db
+      .prepare("SELECT full_hash FROM files WHERE scan_id = ? LIMIT 1")
+      .get(scanJob.id) as { full_hash: string };
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].hash_kind).toBe("full");
+    expect(groups[0].content_hash).toBe(fileHash.full_hash);
   });
 
   it("reports zero groups when no duplicates exist", async () => {
@@ -193,7 +250,13 @@ describe("DuplicateDetectionJobRunner", () => {
     // Delete one file and mark it
     const keepPath = files[0].path;
     const deletePath = files[1].path;
-    await deleteDuplicateFile({ deletePath, keepPath, diskMountPath: root });
+    const deleteProof = await makeDeleteProof(deletePath, keepPath);
+    await deleteDuplicateFile({
+      deletePath,
+      keepPath,
+      diskMountPath: root,
+      ...deleteProof,
+    });
 
     const now = new Date().toISOString();
     db.prepare("UPDATE duplicate_group_files SET deleted_at = ? WHERE group_id = ? AND file_id = ?")
@@ -212,7 +275,12 @@ describe("DuplicateDetectionJobRunner", () => {
 
     // Attempting to delete the same file again fails (file doesn't exist)
     await expect(
-      deleteDuplicateFile({ deletePath, keepPath, diskMountPath: root })
+      deleteDuplicateFile({
+        deletePath,
+        keepPath,
+        diskMountPath: root,
+        ...deleteProof,
+      })
     ).rejects.toThrow("file to delete does not exist");
   });
 });

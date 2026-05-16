@@ -1,4 +1,8 @@
-import { describe, it, expect, beforeEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import path from "path";
+import { computeFullHashStreaming, computeSampledHash } from "../../jobs/scan/hasher";
 import { createTestApp, req, insertDisk, type TestContext } from "./helpers";
 import { insertJob } from "../helpers";
 
@@ -58,10 +62,41 @@ function insertFileWithHash(
     .run(diskId, scanId, directoryId, name, filePath, 100, "2024-01-01", hash, 1);
 }
 
+function insertFileWithFullHash(
+  ctx: TestContext,
+  diskId: number,
+  scanId: number,
+  directoryId: number,
+  name: string,
+  filePath: string,
+  sampledHash: string,
+  fullHash: string
+): void {
+  ctx.db
+    .prepare(
+      "INSERT INTO files (disk_id, scan_id, directory_id, name, path, size_bytes, mtime, sampled_hash, full_hash, hash_algo_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    .run(diskId, scanId, directoryId, name, filePath, 100, "2024-01-01", sampledHash, fullHash, 1);
+}
+
+const roots: string[] = [];
+
+function makeRoot(): string {
+  const root = mkdtempSync(path.join(tmpdir(), "waypoint-duplicates-route-"));
+  roots.push(root);
+  return root;
+}
+
 describe("duplicates routes", () => {
   let ctx: TestContext;
   beforeEach(() => {
     ctx = createTestApp();
+  });
+
+  afterEach(() => {
+    for (const root of roots.splice(0)) {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   // ── POST /api/disks/:id/duplicates ──────────────────────────────
@@ -183,6 +218,92 @@ describe("duplicates routes", () => {
       expect(res.status).toBe(200);
       expect(res.body.totalGroups).toBe(0);
       expect(res.body.groups).toEqual([]);
+    });
+  });
+
+  // ── GET /api/disks/:id/duplicates/scans ────────────────────────
+
+  describe("GET /api/disks/:id/duplicates/scans", () => {
+    it("reports full-hash coverage for selectable scans", async () => {
+      const diskId = insertDisk(ctx.db);
+      const scanId = setupScan(ctx, diskId);
+      insertDirectory(ctx, diskId, scanId, 100, "Root", "/mnt/disk");
+      insertFileWithFullHash(ctx, diskId, scanId, 100, "a.txt", "/mnt/disk/a.txt", "sample-a", "full-a");
+      insertFileWithHash(ctx, diskId, scanId, 100, "b.txt", "/mnt/disk/b.txt", "sample-b");
+
+      const res = await req(ctx.app, "GET", `/api/disks/${diskId}/duplicates/scans`);
+      expect(res.status).toBe(200);
+      expect(res.body).toHaveLength(1);
+      expect(res.body[0].id).toBe(scanId);
+      expect(res.body[0].hasAnyFullHashes).toBe(true);
+      expect(res.body[0].hasAllFullHashes).toBe(false);
+    });
+  });
+
+  // ── POST /api/disks/:id/duplicates/cleanup ──────────────────────
+
+  describe("POST /api/disks/:id/duplicates/cleanup", () => {
+    async function setupFullHashCleanupGroup() {
+      const root = makeRoot();
+      const keepPath = path.join(root, "keep.txt");
+      const deletePath = path.join(root, "delete.txt");
+      writeFileSync(keepPath, "identical content");
+      writeFileSync(deletePath, "identical content");
+
+      const diskId = insertDisk(ctx.db, { mount_path: root, is_connected: 1 });
+      const scanId = setupScan(ctx, diskId);
+      insertDirectory(ctx, diskId, scanId, 100, "Root", root);
+
+      const sampledHash = await computeSampledHash(keepPath, 17);
+      const fullHash = await computeFullHashStreaming(keepPath);
+      insertFileWithFullHash(ctx, diskId, scanId, 100, "keep.txt", keepPath, sampledHash, fullHash);
+      insertFileWithFullHash(ctx, diskId, scanId, 100, "delete.txt", deletePath, sampledHash, fullHash);
+
+      const files = ctx.db
+        .prepare("SELECT id, path FROM files WHERE scan_id = ? ORDER BY path")
+        .all(scanId) as Array<{ id: number; path: string }>;
+      const jobId = insertJob(ctx.db, { type: "duplicate_detection", status: "completed", target_disk_id: diskId });
+      ctx.db.prepare("UPDATE jobs SET payload_json = ? WHERE id = ?").run(JSON.stringify({ scanId }), jobId);
+      ctx.db.prepare(
+        "INSERT INTO duplicate_groups (id, duplicate_job_id, hash_kind, content_hash, sampled_hash, file_count, size_bytes, wasted_bytes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+      ).run(1, jobId, "full", fullHash, sampledHash, 2, 17, 17);
+      for (const file of files) {
+        ctx.db.prepare("INSERT INTO duplicate_group_files (group_id, file_id, path) VALUES (?, ?, ?)")
+          .run(1, file.id, file.path);
+      }
+      return { diskId, keepFile: files.find((f) => f.path === keepPath)!, deleteFile: files.find((f) => f.path === deletePath)! };
+    }
+
+    it("deletes when selected-scan full hashes match and fresh samples still match", async () => {
+      const { diskId, keepFile, deleteFile } = await setupFullHashCleanupGroup();
+      const res = await req(ctx.app, "POST", `/api/disks/${diskId}/duplicates/cleanup`, {
+        initiatedFromWebUI: true,
+        duplicateGroupId: 1,
+        keepFile: { fileId: keepFile.id, path: keepFile.path },
+        deleteFiles: [{ fileId: deleteFile.id, path: deleteFile.path }],
+      }, { "User-Agent": "Mozilla/5.0" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.deletedCount).toBe(1);
+      expect(existsSync(keepFile.path)).toBe(true);
+      expect(existsSync(deleteFile.path)).toBe(false);
+    });
+
+    it("bails before deletion when a file no longer matches the selected scan", async () => {
+      const { diskId, keepFile, deleteFile } = await setupFullHashCleanupGroup();
+      writeFileSync(deleteFile.path, "changed content!!");
+
+      const res = await req(ctx.app, "POST", `/api/disks/${diskId}/duplicates/cleanup`, {
+        initiatedFromWebUI: true,
+        duplicateGroupId: 1,
+        keepFile: { fileId: keepFile.id, path: keepFile.path },
+        deleteFiles: [{ fileId: deleteFile.id, path: deleteFile.path }],
+      }, { "User-Agent": "Mozilla/5.0" });
+
+      expect(res.status).toBe(409);
+      expect(res.body.error).toContain("no longer matches the selected scan");
+      expect(existsSync(keepFile.path)).toBe(true);
+      expect(existsSync(deleteFile.path)).toBe(true);
     });
   });
 

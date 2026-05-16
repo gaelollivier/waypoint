@@ -2,7 +2,9 @@ import { Hono } from "hono";
 import path from "path";
 import { getDb } from "../db/client";
 import { getDiskById } from "../disks/registry";
+import { statFile } from "../fs/disk-reads";
 import { deleteDuplicateFile } from "../fs/disk-writes";
+import { computeSampledHash } from "../jobs/scan/hasher";
 import { getJobManager, registerRunner, unregisterRunner } from "../jobs";
 import { DuplicateDetectionJobRunner } from "../jobs/duplicates/duplicate-job";
 
@@ -11,6 +13,7 @@ export const duplicatesRouter = new Hono();
 // ---------------------------------------------------------------------------
 // POST /api/disks/:id/duplicates
 // Start a duplicate detection job for this disk.
+// Body (optional): { scanId?: number } — defaults to the latest completed scan.
 // ---------------------------------------------------------------------------
 duplicatesRouter.post("/", async (c) => {
   const diskId = Number(c.req.param("id"));
@@ -19,11 +22,30 @@ duplicatesRouter.post("/", async (c) => {
   const disk = getDiskById(db, diskId);
   if (!disk) return c.json({ error: "Disk not found" }, 404);
 
+  const body = await c.req.json<{ scanId?: number }>().catch(() => ({} as { scanId?: number }));
+
   // Disk must have been scanned
   if (!disk.last_scan_job_id) {
     return c.json({ error: "Disk has no scan data — run a scan first" }, 409);
   }
-  const scanId = disk.last_scan_job_id;
+
+  const scanId = body.scanId ?? disk.last_scan_job_id;
+  if (!Number.isInteger(scanId) || scanId <= 0) {
+    return c.json({ error: "Invalid scanId" }, 400);
+  }
+
+  const scanJob = db
+    .prepare(
+      `SELECT id FROM jobs
+       WHERE id = ?
+         AND type = 'scan'
+         AND target_disk_id = ?
+         AND status = 'completed'`
+    )
+    .get(scanId, diskId);
+  if (!scanJob) {
+    return c.json({ error: "Scan not found or does not belong to this disk" }, 404);
+  }
 
   // Verify the scan has files with hashes
   const hashCount = db
@@ -51,6 +73,7 @@ duplicatesRouter.post("/", async (c) => {
   const job = jm.createJob({
     type: "duplicate_detection",
     targetDiskId: diskId,
+    payload: { scanId },
   });
 
   const runner = new DuplicateDetectionJobRunner({
@@ -58,6 +81,7 @@ duplicatesRouter.post("/", async (c) => {
     jobManager: jm,
     db,
     diskId,
+    scanId,
   });
 
   registerRunner(job.id, runner);
@@ -121,7 +145,7 @@ duplicatesRouter.get("/", (c) => {
   // Fetch one page of groups
   const groups = db
     .prepare(
-      `SELECT id, sampled_hash, file_count, size_bytes, wasted_bytes
+      `SELECT id, hash_kind, content_hash, sampled_hash, file_count, size_bytes, wasted_bytes
        FROM duplicate_groups dg
        WHERE dg.duplicate_job_id = ?
          AND dg.size_bytes >= ?
@@ -131,6 +155,8 @@ duplicatesRouter.get("/", (c) => {
     )
     .all(duplicateJobId, minSize, minCopies, limit, offset) as Array<{
       id: number;
+      hash_kind: "full" | "sampled";
+      content_hash: string;
       sampled_hash: string;
       file_count: number;
       size_bytes: number;
@@ -176,7 +202,10 @@ duplicatesRouter.get("/", (c) => {
     totalWastedBytes: totals.total_wasted_bytes,
     groups: groups.map((g) => ({
       id: g.id,
+      hashKind: g.hash_kind,
+      contentHash: g.content_hash,
       sampledHash: g.sampled_hash,
+      canDelete: g.hash_kind === "full",
       fileCount: g.file_count,
       sizeBytes: g.size_bytes,
       wastedBytes: g.wasted_bytes,
@@ -341,7 +370,7 @@ duplicatesRouter.get("/jobs", (c) => {
 
   const rows = db
     .prepare(
-      `SELECT id, status, target_disk_id, items_processed, created_at, completed_at
+      `SELECT id, status, target_disk_id, payload_json, items_processed, created_at, completed_at
        FROM jobs
        WHERE type = 'duplicate_detection' AND target_disk_id = ?
        ORDER BY id DESC
@@ -351,6 +380,7 @@ duplicatesRouter.get("/jobs", (c) => {
       id: number;
       status: string;
       target_disk_id: number;
+      payload_json: string | null;
       items_processed: number;
       created_at: string;
       completed_at: string | null;
@@ -361,11 +391,66 @@ duplicatesRouter.get("/jobs", (c) => {
       id: r.id,
       status: r.status,
       diskId: r.target_disk_id,
+      scanId: (() => {
+        if (!r.payload_json) return null;
+        const payload = JSON.parse(r.payload_json) as { scanId?: number };
+        return Number.isInteger(payload.scanId) ? payload.scanId as number : null;
+      })(),
       itemsProcessed: r.items_processed,
       createdAt: r.created_at,
       completedAt: r.completed_at,
     }))
   );
+});
+
+
+// ---------------------------------------------------------------------------
+// GET /api/disks/:id/duplicates/scans
+// List completed scans available as duplicate-detection inputs.
+// ---------------------------------------------------------------------------
+duplicatesRouter.get("/scans", (c) => {
+  const diskId = Number(c.req.param("id"));
+  const db = getDb();
+
+  const rows = db
+    .prepare(
+      `SELECT j.id,
+              j.created_at,
+              j.completed_at,
+              COALESCE(json_extract(j.payload_json, '$.fullHash'), 0) AS requested_full_hash,
+              COUNT(f.id) AS file_count,
+              COUNT(f.sampled_hash) AS sampled_hash_count,
+              COUNT(f.full_hash) AS full_hash_count
+       FROM jobs j
+       LEFT JOIN files f ON f.scan_id = j.id
+       WHERE j.type = 'scan'
+         AND j.target_disk_id = ?
+         AND j.status = 'completed'
+       GROUP BY j.id
+       ORDER BY j.id DESC
+       LIMIT 50`
+    )
+    .all(diskId) as Array<{
+      id: number;
+      created_at: string;
+      completed_at: string | null;
+      requested_full_hash: number;
+      file_count: number;
+      sampled_hash_count: number;
+      full_hash_count: number;
+    }>;
+
+  return c.json(rows.map((r) => ({
+    id: r.id,
+    createdAt: r.created_at,
+    completedAt: r.completed_at,
+    requestedFullHash: r.requested_full_hash === 1,
+    fileCount: r.file_count,
+    sampledHashCount: r.sampled_hash_count,
+    fullHashCount: r.full_hash_count,
+    hasAnyFullHashes: r.full_hash_count > 0,
+    hasAllFullHashes: r.file_count > 0 && r.full_hash_count === r.file_count,
+  })));
 });
 
 // ---------------------------------------------------------------------------
@@ -454,7 +539,8 @@ duplicatesRouter.post("/cleanup", async (c) => {
   // Verify the group exists and belongs to a completed job for this disk
   const group = db
     .prepare(
-      `SELECT dg.id, dg.sampled_hash, dg.file_count
+      `SELECT dg.id, dg.hash_kind, dg.content_hash, dg.sampled_hash, dg.file_count,
+              j.payload_json
        FROM duplicate_groups dg
        JOIN jobs j ON j.id = dg.duplicate_job_id
        WHERE dg.id = ?
@@ -463,8 +549,11 @@ duplicatesRouter.post("/cleanup", async (c) => {
     )
     .get(duplicateGroupId, diskId) as {
       id: number;
+      hash_kind: "full" | "sampled";
+      content_hash: string;
       sampled_hash: string;
       file_count: number;
+      payload_json: string | null;
     } | null;
 
   if (!group) {
@@ -474,21 +563,42 @@ duplicatesRouter.post("/cleanup", async (c) => {
     );
   }
 
+  if (group.hash_kind !== "full") {
+    return c.json(
+      { error: "Duplicate cleanup requires full-hash-backed duplicate groups" },
+      409
+    );
+  }
+
+  if (!group.payload_json) {
+    throw new Error(`invariant: duplicate group ${duplicateGroupId} job missing payload_json`);
+  }
+  const duplicateJobPayload = JSON.parse(group.payload_json) as { scanId?: number };
+  if (!Number.isInteger(duplicateJobPayload.scanId)) {
+    throw new Error(`invariant: duplicate group ${duplicateGroupId} job payload missing scanId`);
+  }
+  const selectedScanId = duplicateJobPayload.scanId as number;
+
   // Verify ALL referenced file IDs (keep + delete) belong to this group
   const allFileIds = [keepFileId, ...deleteFileIds];
   const placeholders = allFileIds.map(() => "?").join(", ");
   const groupFiles = db
     .prepare(
-      `SELECT file_id, path
-       FROM duplicate_group_files
-       WHERE group_id = ? AND file_id IN (${placeholders})`
+      `SELECT dgf.file_id, dgf.path, f.scan_id, f.sampled_hash, f.full_hash, f.size_bytes
+       FROM duplicate_group_files dgf
+       JOIN files f ON f.id = dgf.file_id
+       WHERE dgf.group_id = ? AND dgf.file_id IN (${placeholders})`
     )
     .all(duplicateGroupId, ...allFileIds) as Array<{
       file_id: number;
       path: string;
+      scan_id: number;
+      sampled_hash: string | null;
+      full_hash: string | null;
+      size_bytes: number;
     }>;
 
-  const fileMap = new Map(groupFiles.map((f) => [f.file_id, f.path]));
+  const fileMap = new Map(groupFiles.map((f) => [f.file_id, f]));
 
   // Every referenced file must belong to this group
   for (const fileId of allFileIds) {
@@ -505,12 +615,30 @@ duplicatesRouter.post("/cleanup", async (c) => {
   // don't match what the DB has, something is wrong and we must not proceed.
   const sentFiles = [keepFile, ...deleteFiles];
   for (const sent of sentFiles) {
-    const dbPath = fileMap.get(sent.fileId);
-    if (dbPath !== sent.path) {
+    const dbFile = fileMap.get(sent.fileId);
+    if (!dbFile) throw new Error(`invariant: file ${sent.fileId} disappeared from fileMap after validation`);
+    if (dbFile.path !== sent.path) {
       return c.json(
-        { error: `Path mismatch for file ${sent.fileId}: UI sent "${sent.path}" but DB has "${dbPath}"` },
+        { error: `Path mismatch for file ${sent.fileId}: UI sent "${sent.path}" but DB has "${dbFile.path}"` },
         409
       );
+    }
+  }
+
+  for (const file of groupFiles) {
+    if (file.scan_id !== selectedScanId) {
+      throw new Error(
+        `invariant: duplicate group ${duplicateGroupId} contains file ${file.file_id} from scan ${file.scan_id}, expected ${selectedScanId}`
+      );
+    }
+    if (file.full_hash !== group.content_hash) {
+      return c.json(
+        { error: `Stored full hash mismatch for file ${file.file_id}; refusing to delete` },
+        409
+      );
+    }
+    if (file.sampled_hash == null) {
+      throw new Error(`invariant: full-hash duplicate file ${file.file_id} is missing sampled_hash`);
     }
   }
 
@@ -524,11 +652,39 @@ duplicatesRouter.post("/cleanup", async (c) => {
     );
   }
 
-  // ---- Execute deletions one by one ----
+  // ---- Re-check selected-scan freshness on disk ----
 
   // Paths in duplicate_group_files are absolute (written by the scan job),
   // so we use them directly — no mount_path prefix needed.
-  const keepPath = fileMap.get(keepFileId)!;
+  const currentSamples = new Map<number, string>();
+  for (const fileId of allFileIds) {
+    const file = fileMap.get(fileId);
+    if (!file) throw new Error(`invariant: file ${fileId} disappeared from fileMap before recheck`);
+
+    try {
+      const currentStat = await statFile(file.path);
+      const currentSampledHash = await computeSampledHash(file.path, currentStat.size);
+      currentSamples.set(fileId, currentSampledHash);
+      if (currentSampledHash !== file.sampled_hash) {
+        return c.json(
+          { error: `File ${fileId} no longer matches the selected scan; rerun duplicate detection before deleting` },
+          409
+        );
+      }
+    } catch (err: any) {
+      return c.json(
+        { error: `Could not re-check file ${fileId} before deletion: ${err.message}` },
+        409
+      );
+    }
+  }
+
+  // ---- Execute deletions one by one ----
+
+  const keepRecord = fileMap.get(keepFileId);
+  if (!keepRecord) throw new Error(`invariant: keep file ${keepFileId} missing before deletion`);
+  const keepActualSampledHash = currentSamples.get(keepFileId);
+  if (!keepActualSampledHash) throw new Error(`invariant: keep file ${keepFileId} missing recomputed sampled hash`);
 
   const results: Array<{
     fileId: number;
@@ -538,21 +694,29 @@ duplicatesRouter.post("/cleanup", async (c) => {
   }> = [];
 
   for (const fileId of deleteFileIds) {
-    // filePath is guaranteed present in fileMap — validated above
-    const filePath = fileMap.get(fileId)!;
-    const deletePath = filePath;
+    const deleteRecord = fileMap.get(fileId);
+    if (!deleteRecord) throw new Error(`invariant: delete file ${fileId} missing before deletion`);
+    const deleteActualSampledHash = currentSamples.get(fileId);
+    if (!deleteActualSampledHash) throw new Error(`invariant: delete file ${fileId} missing recomputed sampled hash`);
 
     try {
       await deleteDuplicateFile({
-        deletePath,
-        keepPath,
+        deletePath: deleteRecord.path,
+        keepPath: keepRecord.path,
         diskMountPath: disk.mount_path,
+        expectedFullHash: group.content_hash,
+        deleteFullHash: deleteRecord.full_hash!,
+        keepFullHash: keepRecord.full_hash!,
+        deleteExpectedSampledHash: deleteRecord.sampled_hash!,
+        keepExpectedSampledHash: keepRecord.sampled_hash!,
+        deleteActualSampledHash,
+        keepActualSampledHash,
       });
-      results.push({ fileId, path: filePath, status: "deleted" });
+      results.push({ fileId, path: deleteRecord.path, status: "deleted" });
     } catch (err: any) {
       results.push({
         fileId,
-        path: filePath,
+        path: deleteRecord.path,
         status: "error",
         error: err.message,
       });

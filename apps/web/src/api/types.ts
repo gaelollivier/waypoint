@@ -79,7 +79,10 @@ export interface DuplicateGroupFile {
 
 export interface DuplicateGroup {
   id: number;
+  hashKind: "full" | "sampled";
+  contentHash: string;
   sampledHash: string;
+  canDelete: boolean;
   fileCount: number;
   sizeBytes: number;
   wastedBytes: number;
@@ -137,9 +140,22 @@ export interface DuplicateJobSummary {
   id: number;
   status: Job["status"];
   diskId: number;
+  scanId: number | null;
   itemsProcessed: number;
   createdAt: string;
   completedAt: string | null;
+}
+
+export interface DuplicateScanSummary {
+  id: number;
+  createdAt: string;
+  completedAt: string | null;
+  requestedFullHash: boolean;
+  fileCount: number;
+  sampledHashCount: number;
+  fullHashCount: number;
+  hasAnyFullHashes: boolean;
+  hasAllFullHashes: boolean;
 }
 
 export interface Job {

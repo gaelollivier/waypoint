@@ -1,7 +1,7 @@
 import { useState, useCallback, useSyncExternalStore } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
-import type { Disk, DiffJobSummary, DuplicateJobSummary, Job, JobEvent } from "../api/types";
+import type { Disk, DiffJobSummary, DuplicateJobSummary, DuplicateScanSummary, Job, JobEvent } from "../api/types";
 import { StatusBadge } from "../components/StatusBadge";
 import { JobDetails } from "../components/JobDetails";
 import { TreeExplorer } from "../components/TreeExplorer";
@@ -968,6 +968,12 @@ function DiffProgressCard({
 function DuplicatesTab({ diskId, disk }: { diskId: number; disk: Disk }) {
   const queryClient = useQueryClient();
   const [pendingJobId, setPendingJobId] = useState<number | null>(null);
+  const [selectedScanId, setSelectedScanId] = useState<number | null>(null);
+
+  const { data: scans = [] } = useQuery<DuplicateScanSummary[]>({
+    queryKey: ["duplicateScans", diskId],
+    queryFn: () => api.duplicates.scans(diskId),
+  });
 
   const { data: duplicateJobs = [], refetch: refetchDuplicateJobs } = useQuery<DuplicateJobSummary[]>({
     queryKey: ["duplicateJobs", diskId],
@@ -981,7 +987,11 @@ function DuplicatesTab({ diskId, disk }: { diskId: number; disk: Disk }) {
     },
   });
 
-  const latestCompleted = duplicateJobs.find((j) => j.status === "completed") ?? null;
+  const effectiveSelectedScanId = selectedScanId ?? scans[0]?.id ?? null;
+  const selectedScan = scans.find((scan) => scan.id === effectiveSelectedScanId) ?? null;
+  const latestCompleted = duplicateJobs.find((j) =>
+    j.status === "completed" && j.scanId === effectiveSelectedScanId
+  ) ?? null;
   const activeJob = duplicateJobs.find((j) =>
     j.status === "running" || j.status === "queued" || j.status === "paused"
   ) ?? null;
@@ -993,19 +1003,35 @@ function DuplicatesTab({ diskId, disk }: { diskId: number; disk: Disk }) {
   }
 
   const startDetection = useMutation({
-    mutationFn: () => api.duplicates.start(diskId),
+    mutationFn: () => api.duplicates.start(diskId, effectiveSelectedScanId != null ? { scanId: effectiveSelectedScanId } : undefined),
     onSuccess: (res) => {
       setPendingJobId(res.jobId);
       queryClient.invalidateQueries({ queryKey: ["duplicateJobs", diskId] });
+      queryClient.invalidateQueries({ queryKey: ["duplicateScans", diskId] });
     },
     onError: (err: any) => alert(`Failed to start: ${err.message}`),
   });
 
-  const canStart = !activeJob && disk.lastScanAt != null && !startDetection.isPending;
+  const canStart = !activeJob && effectiveSelectedScanId != null && !startDetection.isPending;
 
   return (
     <div className="space-y-5">
       <div className="flex items-center gap-3 flex-wrap">
+        <select
+          value={effectiveSelectedScanId ?? ""}
+          onChange={(e) => setSelectedScanId(e.target.value === "" ? null : Number(e.target.value))}
+          disabled={scans.length === 0 || activeJob != null}
+          className="rounded bg-zinc-800 border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 focus:outline-none focus:border-blue-500 disabled:opacity-40"
+        >
+          {scans.length === 0 ? (
+            <option value="">No completed scans</option>
+          ) : scans.map((scan) => (
+            <option key={scan.id} value={scan.id}>
+              Scan #{scan.id}{scan.hasAllFullHashes ? " · full hashes" : scan.hasAnyFullHashes ? " · partial full hashes" : " · sampled only"}
+            </option>
+          ))}
+        </select>
+
         <button
           disabled={!canStart}
           onClick={() => startDetection.mutate()}
@@ -1020,6 +1046,12 @@ function DuplicatesTab({ diskId, disk }: { diskId: number; disk: Disk }) {
           </span>
         )}
       </div>
+
+      {selectedScan && !selectedScan.hasAllFullHashes && (
+        <div className="rounded-lg border border-amber-800/50 bg-amber-950/20 px-4 py-3 text-sm text-amber-300">
+          Scan #{selectedScan.id} does not have full hashes for every file. Duplicate detection can still run, but cleanup will only be available for groups backed by full hashes. Choose an earlier full-hash scan if you want cleanup-ready results.
+        </div>
+      )}
 
       {/* No scan yet */}
       {!disk.lastScanAt && (

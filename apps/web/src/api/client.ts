@@ -1,4 +1,4 @@
-import type { CleanupResponse, Disk, DiffJobSummary, DiffTreeResponse, DuplicateDirectoriesResponse, DuplicateJobSummary, DuplicatesResponse, Job, JobEvent, TreeResponse } from "./types";
+import type { CleanupResponse, Disk, DiffJobSummary, DiffTreeResponse, DuplicateDirectoriesResponse, DuplicateJobSummary, DuplicateScanSummary, DuplicatesResponse, Job, JobEvent, TreeResponse } from "./types";
 
 const BASE = "/api";
 
@@ -102,8 +102,14 @@ export const api = {
   },
 
   duplicates: {
-    start: (diskId: number) =>
-      request<{ jobId: number }>(`/disks/${diskId}/duplicates`, { method: "POST" }),
+    start: (diskId: number, body?: { scanId?: number }) =>
+      request<{ jobId: number }>(`/disks/${diskId}/duplicates`, {
+        method: "POST",
+        body: JSON.stringify(body ?? {}),
+      }),
+
+    scans: (diskId: number) =>
+      request<DuplicateScanSummary[]>(`/disks/${diskId}/duplicates/scans`),
 
     jobs: (diskId: number) =>
       request<DuplicateJobSummary[]>(`/disks/${diskId}/duplicates/jobs`),

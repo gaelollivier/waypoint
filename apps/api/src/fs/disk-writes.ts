@@ -17,7 +17,7 @@ import { appendFileSync, mkdirSync } from "fs";
 import { mkdir, open, rename, unlink } from "fs/promises";
 import path from "path";
 import { fileExists, readFileStream } from "./disk-reads";
-import { computeFullHashStreaming, createStreamingHasher, finaliseHash } from "../jobs/scan/hasher";
+import { createStreamingHasher, finaliseHash } from "../jobs/scan/hasher";
 
 /** Yield to the event loop every 64 MB during streaming copies. */
 const YIELD_EVERY_BYTES = 64 * 1024 * 1024;
@@ -426,16 +426,22 @@ function fillRandom(chunk: Uint8Array): void {
 // ---------------------------------------------------------------------------
 
 /**
- * DELETE: Removes a file that has been verified to be an exact duplicate.
+ * DELETE: Removes a file after duplicate-cleanup evidence has been verified.
  *
  * This is the most dangerous function in the codebase. It permanently
  * destroys data. Every precondition is checked before the unlink.
  *
  * Guardrails:
- *   1. Path containment: deletePath must resolve within diskMountPath
+ *   1. Path containment: deletePath and keepPath must resolve within diskMountPath
  *   2. Existence: both the file to delete and the file to keep must exist
- *   3. Identity: both files must have identical BLAKE3 full-content hashes
- *   4. Distinctness: the two paths must not resolve to the same file
+ *   3. Persisted identity: both files must carry the same selected-scan full hash
+ *   4. Freshness: both files' freshly recomputed sampled hashes must still match
+ *      the sampled hashes recorded by that same selected scan
+ *   5. Distinctness: the two paths must not resolve to the same file
+ *
+ * The route recomputes sampled hashes immediately before calling this gateway;
+ * this function re-validates the resulting proof bundle before unlinking so the
+ * only write-capable function still owns the final deletion decision.
  *
  * This function is intentionally NOT batched. Each file is deleted one at a
  * time so that any mid-sequence failure leaves the remaining files intact.
@@ -444,8 +450,26 @@ export async function deleteDuplicateFile(opts: {
   deletePath: string;
   keepPath: string;
   diskMountPath: string;
-}): Promise<{ hash: string }> {
-  const { deletePath, keepPath, diskMountPath } = opts;
+  expectedFullHash: string;
+  deleteFullHash: string;
+  keepFullHash: string;
+  deleteExpectedSampledHash: string;
+  keepExpectedSampledHash: string;
+  deleteActualSampledHash: string;
+  keepActualSampledHash: string;
+}): Promise<{ fullHash: string }> {
+  const {
+    deletePath,
+    keepPath,
+    diskMountPath,
+    expectedFullHash,
+    deleteFullHash,
+    keepFullHash,
+    deleteExpectedSampledHash,
+    keepExpectedSampledHash,
+    deleteActualSampledHash,
+    keepActualSampledHash,
+  } = opts;
   const resolvedMount = path.resolve(diskMountPath);
 
   // 1. Path containment: both files must be on the expected disk
@@ -479,20 +503,27 @@ export async function deleteDuplicateFile(opts: {
     );
   }
 
-  // 4. Compute full BLAKE3 hashes of both files via streaming (safe for any file size)
-  const [deleteHash, keepHash] = await Promise.all([
-    computeFullHashStreaming(deletePath),
-    computeFullHashStreaming(keepPath),
-  ]);
-
-  if (deleteHash !== keepHash) {
+  // 4. Both files must have been proven identical by the selected scan.
+  if (deleteFullHash !== expectedFullHash || keepFullHash !== expectedFullHash) {
     throw new Error(
-      `deleteDuplicateFile: hash mismatch — file to delete (${deleteHash}) differs from file to keep (${keepHash}). Refusing to delete.`
+      "deleteDuplicateFile: selected-scan full-hash proof does not match for both files. Refusing to delete."
+    );
+  }
+
+  // 5. Both files must still match that selected scan right now.
+  if (deleteActualSampledHash !== deleteExpectedSampledHash) {
+    throw new Error(
+      "deleteDuplicateFile: sampled hash mismatch for file to delete. Refusing to delete."
+    );
+  }
+  if (keepActualSampledHash !== keepExpectedSampledHash) {
+    throw new Error(
+      "deleteDuplicateFile: sampled hash mismatch for file to keep. Refusing to delete."
     );
   }
 
   // All guardrails passed — delete the file
   await unlink(deletePath);
 
-  return { hash: deleteHash };
+  return { fullHash: expectedFullHash };
 }

@@ -109,6 +109,13 @@ function DuplicateGroupCard({
         <span className="text-zinc-300 font-medium">
           {group.fileCount} copies
         </span>
+        <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium uppercase ${
+          group.hashKind === "full"
+            ? "bg-green-950/40 text-green-400"
+            : "bg-amber-950/40 text-amber-400"
+        }`}>
+          {group.hashKind}
+        </span>
         <span className="text-zinc-600">·</span>
         <span className="text-zinc-400">{formatBytes(group.sizeBytes)} each</span>
         <span className="text-zinc-600">·</span>
@@ -170,13 +177,17 @@ function DuplicateGroupCard({
       </div>
 
       {selectedKeepFile && filesToDelete.length > 0 && (
-        <div className="pt-1">
+        <div className="pt-1 flex items-center gap-3">
           <button
+            disabled={!group.canDelete}
             onClick={() => onCleanupRequest(group, selectedKeepFile)}
-            className="rounded bg-red-600/80 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-500 transition-colors"
+            className="rounded bg-red-600/80 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
             Delete {filesToDelete.length} duplicate{filesToDelete.length > 1 ? "s" : ""}
           </button>
+          {!group.canDelete && (
+            <span className="text-xs text-amber-400">Cleanup requires full-hash evidence.</span>
+          )}
         </div>
       )}
     </div>
@@ -275,8 +286,9 @@ function CleanupConfirmDialog({
 
             <div className="rounded-lg border border-amber-800/50 bg-amber-950/20 px-4 py-3 text-xs text-amber-400">
               This action is permanent. The deleted files cannot be recovered.
-              The server will verify that each file is an exact byte-for-byte
-              copy of the kept file before deleting.
+              The server will require full-hash evidence from the selected scan
+              and re-check fresh sampled hashes for the kept and deleted files
+              before deleting.
             </div>
 
             <div className="flex justify-end gap-3">

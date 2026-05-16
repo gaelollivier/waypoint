@@ -68,7 +68,7 @@ Improvements planned but not yet scheduled into a milestone.
 | Move duplicate detection off the main thread | Phase 1 GROUP BY and Phase 3 batch inserts block the event loop with synchronous SQLite. Server becomes very slow during large jobs. Options: Bun worker thread with its own SQLite connection, or paginated Phase 1 query with yields. (Speed-test jobs already moved to workers.) |
 | Scan ETA: switch from bytes/sec to files/sec + inode count | `bytesProcessed` is the sum of stat'd file sizes, not bytes read — a single large file causes a massive rate spike. Scan time is uniform per-inode (stat cost), so `filesPerSec` against `df -i` inode count is a much more stable ETA. Also consider widening the 5s rolling window or using an EMA. |
 | Copy job: rich insight view (match scan job pattern) | Same philosophy as scan jobs — show a rich view of all available job insights in both the diff view (where the copy is initiated) and the job details page. Reuse the same component. |
-| Duplicate cleanup as a job with progress | Deletion is slow (full BLAKE3 re-hash per file). Should be a proper job with progress/pause/resume so the UI shows status rather than hanging on a single POST. |
+| Duplicate cleanup as a job with progress | Cleanup re-checks fresh sampled hashes for the kept + deleted files before unlinking. It should become a proper job with progress/pause/resume so the UI shows status rather than hanging on a single POST for large batches. |
 | fullHash scan UI | Backend supports `POST /:id/scan { fullHash: true }`; expose it as a toggle on the disk page. |
 
 Recently completed backlog:

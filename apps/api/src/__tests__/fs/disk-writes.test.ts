@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "os";
 import path from "path";
 import { deleteDuplicateFile, writeGeneratedTestFileAtomic } from "../../fs/disk-writes";
+import { computeFullHashStreaming, computeSampledHash } from "../../jobs/scan/hasher";
 import { JobManager } from "../../jobs/job-manager";
 import { ScanJobRunner } from "../../jobs/scan/scan-job";
 import { DuplicateDetectionJobRunner } from "../../jobs/duplicates/duplicate-job";
@@ -14,6 +15,27 @@ function makeRoot(): string {
   const root = mkdtempSync(path.join(tmpdir(), "waypoint-disk-writes-"));
   roots.push(root);
   return root;
+}
+
+
+async function makeDeleteProof(deletePath: string, keepPath: string) {
+  const [deleteFullHash, keepFullHash] = await Promise.all([
+    computeFullHashStreaming(deletePath),
+    computeFullHashStreaming(keepPath),
+  ]);
+  const [deleteActualSampledHash, keepActualSampledHash] = await Promise.all([
+    computeSampledHash(deletePath, readFileSync(deletePath).byteLength),
+    computeSampledHash(keepPath, readFileSync(keepPath).byteLength),
+  ]);
+  return {
+    expectedFullHash: keepFullHash,
+    deleteFullHash,
+    keepFullHash,
+    deleteExpectedSampledHash: deleteActualSampledHash,
+    keepExpectedSampledHash: keepActualSampledHash,
+    deleteActualSampledHash,
+    keepActualSampledHash,
+  };
 }
 
 afterEach(() => {
@@ -102,9 +124,10 @@ describe("deleteDuplicateFile", () => {
       deletePath,
       keepPath,
       diskMountPath: root,
+      ...(await makeDeleteProof(deletePath, keepPath)),
     });
 
-    expect(result.hash).toBeTruthy();
+    expect(result.fullHash).toBeTruthy();
     expect(existsSync(keepPath)).toBe(true);
     expect(existsSync(deletePath)).toBe(false);
   });
@@ -120,6 +143,7 @@ describe("deleteDuplicateFile", () => {
         deletePath: path.join(otherRoot, "escape.txt"),
         keepPath: path.join(root, "keep.txt"),
         diskMountPath: root,
+        ...(await makeDeleteProof(path.join(otherRoot, "escape.txt"), path.join(root, "keep.txt"))),
       })
     ).rejects.toThrow("escapes disk mount");
   });
@@ -134,11 +158,12 @@ describe("deleteDuplicateFile", () => {
         deletePath: filePath,
         keepPath: filePath,
         diskMountPath: root,
+        ...(await makeDeleteProof(filePath, filePath)),
       })
     ).rejects.toThrow("same file");
   });
 
-  it("rejects when hashes differ", async () => {
+  it("rejects when selected-scan full-hash proof differs", async () => {
     const root = makeRoot();
     const keepPath = path.join(root, "keep.txt");
     const deletePath = path.join(root, "delete.txt");
@@ -146,8 +171,13 @@ describe("deleteDuplicateFile", () => {
     writeFileSync(deletePath, "content B");
 
     await expect(
-      deleteDuplicateFile({ deletePath, keepPath, diskMountPath: root })
-    ).rejects.toThrow("hash mismatch");
+      deleteDuplicateFile({
+        deletePath,
+        keepPath,
+        diskMountPath: root,
+        ...(await makeDeleteProof(deletePath, keepPath)),
+      })
+    ).rejects.toThrow("full-hash proof");
 
     // Both files must survive
     expect(existsSync(keepPath)).toBe(true);
@@ -169,16 +199,16 @@ describe("deleteDuplicateFile", () => {
     const diskId = insertDisk(db, { mount_path: root, is_connected: 1 });
 
     // Scan
-    const scanJob = jm.createJob({ type: "scan", targetDiskId: diskId });
+    const scanJob = jm.createJob({ type: "scan", targetDiskId: diskId, payload: { fullHash: true } });
     const scanRunner = new ScanJobRunner({
-      jobId: scanJob.id, jobManager: jm, db, diskId, mountPath: root,
+      jobId: scanJob.id, jobManager: jm, db, diskId, mountPath: root, fullHash: true,
     });
     await scanRunner.start();
 
     // Duplicate detection
-    const dupJob = jm.createJob({ type: "duplicate_detection", targetDiskId: diskId });
+    const dupJob = jm.createJob({ type: "duplicate_detection", targetDiskId: diskId, payload: { scanId: scanJob.id } });
     const dupRunner = new DuplicateDetectionJobRunner({
-      jobId: dupJob.id, jobManager: jm, db, diskId,
+      jobId: dupJob.id, jobManager: jm, db, diskId, scanId: scanJob.id,
     });
     await dupRunner.start();
 
@@ -198,13 +228,26 @@ describe("deleteDuplicateFile", () => {
     const keepPath = files[0].path;
     const deletePath = files[1].path;
 
+    const scanFiles = db
+      .prepare("SELECT path, sampled_hash, full_hash FROM files WHERE scan_id = ? ORDER BY path")
+      .all(scanJob.id) as Array<{ path: string; sampled_hash: string; full_hash: string }>;
+    const keepScan = scanFiles.find((f) => f.path === keepPath)!;
+    const deleteScan = scanFiles.find((f) => f.path === deletePath)!;
+
     const result = await deleteDuplicateFile({
       deletePath,
       keepPath,
       diskMountPath: disk.mount_path,
+      expectedFullHash: keepScan.full_hash,
+      deleteFullHash: deleteScan.full_hash,
+      keepFullHash: keepScan.full_hash,
+      deleteExpectedSampledHash: deleteScan.sampled_hash,
+      keepExpectedSampledHash: keepScan.sampled_hash,
+      deleteActualSampledHash: deleteScan.sampled_hash,
+      keepActualSampledHash: keepScan.sampled_hash,
     });
 
-    expect(result.hash).toBeTruthy();
+    expect(result.fullHash).toBeTruthy();
     // files[0] = backup/img.jpg (kept), files[1] = photos/img.jpg (deleted)
     expect(existsSync(path.join(root, "backup", "img.jpg"))).toBe(true);
     expect(existsSync(path.join(root, "photos", "img.jpg"))).toBe(false);

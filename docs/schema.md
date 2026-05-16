@@ -121,6 +121,24 @@ Rows can be deleted on scan completion (or kept for debugging). One transaction 
 
 ---
 
+### `duplicate_groups`
+Per-file duplicate groups emitted by a duplicate-detection job. The job payload records the selected `scanId`, and the group records which hash evidence was used for that scan snapshot.
+
+| Field | Notes |
+|---|---|
+| `id` | PK |
+| `duplicate_job_id` | FK to `jobs.id` |
+| `hash_kind` | `full` when grouped by persisted `full_hash`; otherwise `sampled` |
+| `content_hash` | The actual hash used to form the group (`full_hash` preferred, sampled fallback) |
+| `sampled_hash` | Sampled hash retained for display / freshness rechecks |
+| `file_count` | Number of copies in the group |
+| `size_bytes` | Per-file size |
+| `wasted_bytes` | `size_bytes * (file_count - 1)` |
+
+Only `hash_kind = 'full'` groups are eligible for destructive cleanup. Cleanup still recomputes fresh sampled hashes for the kept file and every file to delete before unlinking.
+
+---
+
 ### `copy_items`
 Per-file copy state for an active copy job. Lets the copy job resume mid-stream and surface per-file errors.
 

@@ -46,7 +46,7 @@ describe("runMigrations", () => {
   it("sets user_version to the latest migration after migration", () => {
     const db = new Database(":memory:");
     runMigrations(db);
-    expect(getUserVersion(db)).toBe(12);
+    expect(getUserVersion(db)).toBe(13);
   });
 
   it("is idempotent: running twice does not error or duplicate tables", () => {
@@ -55,7 +55,7 @@ describe("runMigrations", () => {
     runMigrations(db);
     runMigrations(db); // second run — should be no-op
     expect(getTables(db)).toEqual(EXPECTED_TABLES);
-    expect(getUserVersion(db)).toBe(12);
+    expect(getUserVersion(db)).toBe(13);
   });
 
   it("enforces foreign keys (PRAGMA foreign_keys = ON)", () => {

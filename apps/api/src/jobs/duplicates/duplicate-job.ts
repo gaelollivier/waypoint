@@ -8,6 +8,8 @@ import { EXCLUDED_NAMES_SQL } from "../../lib/excluded-names";
 const INSERT_BATCH_SIZE = 500;
 
 interface DuplicateGroupRow {
+  hash_kind: "full" | "sampled";
+  content_hash: string;
   sampled_hash: string;
   size_bytes: number;
   file_count: number;
@@ -21,40 +23,42 @@ interface DuplicateFileRow {
 export class DuplicateDetectionJobRunner extends JobRunner {
   private db: Database;
   private diskId: number;
+  private scanId: number;
 
   constructor(opts: {
     jobId: number;
     jobManager: JobManager;
     db: Database;
     diskId: number;
+    scanId: number;
   }) {
     super(opts.jobId, opts.jobManager);
     this.db = opts.db;
     this.diskId = opts.diskId;
+    this.scanId = opts.scanId;
   }
 
   protected async execute(): Promise<void> {
     trace("duplicate_detection_start", { job_id: this.jobId, disk_id: this.diskId });
     const t0 = performance.now();
 
-    // Resolve the latest completed scan for this disk
-    const scanRow = this.db
-      .prepare("SELECT last_scan_job_id FROM disks WHERE id = ?")
-      .get(this.diskId) as { last_scan_job_id: number | null } | null;
-    if (!scanRow?.last_scan_job_id) throw new Error("invariant: disk has no completed scan");
-    const scanId = scanRow.last_scan_job_id;
+    const scanId = this.scanId;
 
     // ── Phase 1: find all duplicate hashes on this disk ─────────────────────
     await this.checkPause();
 
     const groups = this.db
       .prepare(
-        `SELECT sampled_hash, size_bytes, COUNT(*) AS file_count
+        `SELECT CASE WHEN full_hash IS NOT NULL THEN 'full' ELSE 'sampled' END AS hash_kind,
+                COALESCE(full_hash, sampled_hash) AS content_hash,
+                MIN(sampled_hash) AS sampled_hash,
+                size_bytes,
+                COUNT(*) AS file_count
          FROM files
          WHERE scan_id = ?
            AND sampled_hash IS NOT NULL
            AND ${EXCLUDED_NAMES_SQL}
-         GROUP BY sampled_hash
+         GROUP BY hash_kind, content_hash, size_bytes
          HAVING file_count > 1
          ORDER BY size_bytes DESC`
       )
@@ -82,8 +86,8 @@ export class DuplicateDetectionJobRunner extends JobRunner {
 
     const insertGroup = this.db.prepare(
       `INSERT INTO duplicate_groups
-         (duplicate_job_id, sampled_hash, file_count, size_bytes, wasted_bytes)
-       VALUES (?, ?, ?, ?, ?)
+         (duplicate_job_id, hash_kind, content_hash, sampled_hash, file_count, size_bytes, wasted_bytes)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        RETURNING id`
     );
 
@@ -91,7 +95,9 @@ export class DuplicateDetectionJobRunner extends JobRunner {
       `SELECT id AS file_id, path
        FROM files
        WHERE scan_id = ?
-         AND sampled_hash = ?
+         AND CASE WHEN full_hash IS NOT NULL THEN 'full' ELSE 'sampled' END = ?
+         AND COALESCE(full_hash, sampled_hash) = ?
+         AND size_bytes = ?
          AND ${EXCLUDED_NAMES_SQL}`
     );
 
@@ -109,6 +115,8 @@ export class DuplicateDetectionJobRunner extends JobRunner {
           const wastedBytes = g.size_bytes * (g.file_count - 1);
           const { id: groupId } = insertGroup.get(
             this.jobId,
+            g.hash_kind,
+            g.content_hash,
             g.sampled_hash,
             g.file_count,
             g.size_bytes,
@@ -117,7 +125,9 @@ export class DuplicateDetectionJobRunner extends JobRunner {
 
           const members = selectMembers.all(
             scanId,
-            g.sampled_hash
+            g.hash_kind,
+            g.content_hash,
+            g.size_bytes
           ) as DuplicateFileRow[];
 
           for (const m of members) {
