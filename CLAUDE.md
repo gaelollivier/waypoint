@@ -114,3 +114,49 @@ A single accidental bulk-delete of backup data is catastrophic and
 irreversible. Requiring human initiation via a browser UI — with an explicit
 confirmation step — is a deliberate friction layer that prevents automated
 tools from causing data loss.
+
+---
+
+## RULE: Never put the user's personal data in checked-in artifacts
+
+This repo is open source. Anything that lands in git history (commits,
+docs, code comments, READMEs) is permanent and public-adjacent. Treat all
+data the tool reads from the user's disks as sensitive.
+
+### What this means
+
+Do NOT include any of the following in commit messages, code comments,
+docs (`README.md`, `docs/**`, `CLAUDE.md`, etc.), or any other file in
+the repository:
+
+- Specific file or folder names from the user's disks (e.g. real video
+  filenames, photo album names, paths under `/Volumes/<their-disk>/...`).
+- Specific file sizes tied to an identifiable real file ("the 9.14 GB
+  video", "the 26 GB MKV").
+- The user's live disk labels (the labels in the local SQLite DB).
+- Output snippets pasted into chat that contain any of the above.
+
+Numbers and ratios about the system are fine ("scan throughput ~800 MB/s",
+"~3.5 TB across ~173K files"). Specifics tied to identifiable user content
+are not.
+
+### How to apply
+
+- Before writing a commit message, scan it for any string that came from
+  reading the SQLite DB, a scan output, or a `/Volumes/...` path. Strip it.
+- In bench / debug output the user pastes back, treat the data as
+  sensitive. Discuss numbers in chat; redact specifics before they land
+  in any file.
+- If a result genuinely requires a path to make sense, use a redacted
+  placeholder like `/Volumes/<disk>/file.ext` or `<large video file>`.
+- For existing leaks already in pushed commits, flag to the user and let
+  them choose remediation (rewriting history is destructive and requires
+  explicit instruction). Sanitize the working tree at minimum.
+
+### Why this rule exists
+
+Test data and bench output that mention real personal content can leak
+through commit messages and bug post-mortems without anyone noticing.
+Even after redaction in a new commit, prior commits are still in public
+git history. The only durable defense is to never write the data down in
+the first place.
