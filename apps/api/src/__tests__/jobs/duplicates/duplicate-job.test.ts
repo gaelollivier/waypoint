@@ -8,6 +8,7 @@ import { DuplicateDetectionJobRunner } from "../../../jobs/duplicates/duplicate-
 import { deleteDuplicateFile } from "../../../fs/disk-writes";
 import { computeFullHashStreaming, computeSampledHash } from "../../../jobs/scan/hasher";
 import { makeTestDb, insertDisk } from "../../helpers";
+import { EXCLUDED_NAMES_SQL } from "../../../lib/excluded-names";
 
 const TMP_BASE = "/tmp/waypoint-duplicate-test";
 
@@ -108,6 +109,33 @@ describe("DuplicateDetectionJobRunner", () => {
     db = makeTestDb();
     jm = new JobManager(db);
     diskId = insertDisk(db, { mount_path: "/tmp/waypoint-duplicate-test/disk-a" });
+  });
+
+
+  it("uses dedicated indexes for hot member lookups", () => {
+    const fullPlan = db.prepare(
+      `EXPLAIN QUERY PLAN
+       SELECT id, path
+       FROM files
+       WHERE scan_id = ?
+         AND full_hash = ?
+         AND size_bytes = ?
+         AND ${EXCLUDED_NAMES_SQL}`
+    ).all(1, "full", 100) as Array<{ detail: string }>;
+
+    const sampledPlan = db.prepare(
+      `EXPLAIN QUERY PLAN
+       SELECT id, path
+       FROM files
+       WHERE scan_id = ?
+         AND full_hash IS NULL
+         AND sampled_hash = ?
+         AND size_bytes = ?
+         AND ${EXCLUDED_NAMES_SQL}`
+    ).all(1, "sampled", 100) as Array<{ detail: string }>;
+
+    expect(fullPlan.some((row) => row.detail.includes("files_scan_full_hash_size"))).toBe(true);
+    expect(sampledPlan.some((row) => row.detail.includes("files_scan_sampled_only_hash_size"))).toBe(true);
   });
 
   it("finds real duplicates (identical content at different paths)", async () => {

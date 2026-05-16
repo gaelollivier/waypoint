@@ -96,5 +96,6 @@ Recently completed backlog:
 - **All errors are logged per-file in SQLite** — nothing silent, everything retryable.
 - **Permission errors during scans are non-fatal** (logged, indexing continues).
 - **Scans index everything**; exclusion patterns apply only at copy time.
+- **Database queries need an explicit index story.** Most production queries should have deliberate backing indexes; if a query intentionally scans or cannot use an index well, call out that tradeoff explicitly.
 - **Resume robustness**: copy logic always re-checks per-file state at the destination on encounter (does it exist? hash match?). Don't trust the persisted plan blindly.
 - The project is named **Waypoint**. GitHub: github.com/gaelollivier/waypoint.

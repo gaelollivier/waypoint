@@ -47,22 +47,44 @@ export class DuplicateDetectionJobRunner extends JobRunner {
     // ── Phase 1: find all duplicate hashes on this disk ─────────────────────
     await this.checkPause();
 
+    // Keep the full-hash and sampled-only branches separate so SQLite can use
+    // the matching partial index for each branch. Do not collapse this back to
+    // CASE/COALESCE predicates: that makes the hot duplicate queries
+    // non-sargable and caused multi-second event-loop stalls at real scale.
     const groups = this.db
       .prepare(
-        `SELECT CASE WHEN full_hash IS NOT NULL THEN 'full' ELSE 'sampled' END AS hash_kind,
-                COALESCE(full_hash, sampled_hash) AS content_hash,
-                MIN(sampled_hash) AS sampled_hash,
-                size_bytes,
-                COUNT(*) AS file_count
-         FROM files
-         WHERE scan_id = ?
-           AND sampled_hash IS NOT NULL
-           AND ${EXCLUDED_NAMES_SQL}
-         GROUP BY hash_kind, content_hash, size_bytes
-         HAVING file_count > 1
+        `SELECT * FROM (
+           SELECT 'full' AS hash_kind,
+                  full_hash AS content_hash,
+                  MIN(sampled_hash) AS sampled_hash,
+                  size_bytes,
+                  COUNT(*) AS file_count
+           FROM files
+           WHERE scan_id = ?
+             AND full_hash IS NOT NULL
+             AND sampled_hash IS NOT NULL
+             AND ${EXCLUDED_NAMES_SQL}
+           GROUP BY full_hash, size_bytes
+           HAVING file_count > 1
+
+           UNION ALL
+
+           SELECT 'sampled' AS hash_kind,
+                  sampled_hash AS content_hash,
+                  sampled_hash,
+                  size_bytes,
+                  COUNT(*) AS file_count
+           FROM files
+           WHERE scan_id = ?
+             AND full_hash IS NULL
+             AND sampled_hash IS NOT NULL
+             AND ${EXCLUDED_NAMES_SQL}
+           GROUP BY sampled_hash, size_bytes
+           HAVING file_count > 1
+         )
          ORDER BY size_bytes DESC`
       )
-      .all(scanId) as DuplicateGroupRow[];
+      .all(scanId, scanId) as DuplicateGroupRow[];
 
     const totalWastedBytes = groups.reduce(
       (acc, g) => acc + g.size_bytes * (g.file_count - 1),
@@ -91,12 +113,24 @@ export class DuplicateDetectionJobRunner extends JobRunner {
        RETURNING id`
     );
 
-    const selectMembers = this.db.prepare(
+    // These are intentionally separate index-friendly lookups. The previous
+    // CASE/COALESCE form defeated the hash indexes and effectively rescanned
+    // the snapshot once per duplicate group.
+    const selectFullHashMembers = this.db.prepare(
       `SELECT id AS file_id, path
        FROM files
        WHERE scan_id = ?
-         AND CASE WHEN full_hash IS NOT NULL THEN 'full' ELSE 'sampled' END = ?
-         AND COALESCE(full_hash, sampled_hash) = ?
+         AND full_hash = ?
+         AND size_bytes = ?
+         AND ${EXCLUDED_NAMES_SQL}`
+    );
+
+    const selectSampledHashMembers = this.db.prepare(
+      `SELECT id AS file_id, path
+       FROM files
+       WHERE scan_id = ?
+         AND full_hash IS NULL
+         AND sampled_hash = ?
          AND size_bytes = ?
          AND ${EXCLUDED_NAMES_SQL}`
     );
@@ -123,11 +157,10 @@ export class DuplicateDetectionJobRunner extends JobRunner {
             wastedBytes
           ) as { id: number };
 
-          const members = selectMembers.all(
-            scanId,
-            g.hash_kind,
-            g.content_hash,
-            g.size_bytes
+          const members = (
+            g.hash_kind === "full"
+              ? selectFullHashMembers.all(scanId, g.content_hash, g.size_bytes)
+              : selectSampledHashMembers.all(scanId, g.content_hash, g.size_bytes)
           ) as DuplicateFileRow[];
 
           for (const m of members) {

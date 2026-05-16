@@ -20,6 +20,9 @@ Before making changes in this repository, read:
   anywhere else in `apps/api/src/` (tests excepted).
 - **Fail fast on internal invariants.** Don't paper over impossible
   states with `?? fallback`, `continue`, or warn-and-proceed. Throw.
+- **Database queries need an explicit index story.** For non-trivial queries,
+  verify the backing index and query shape; if a query intentionally scans or
+  cannot use an index well, call that out explicitly and decide if it is acceptable.
 - **File deletions must NEVER be initiated by an LLM or agent.** Deletions
   are gated on a browser User-Agent + an explicit `initiatedFromWebUI`
   flag in the body, both server-validated. Do not write code that bypasses

@@ -76,6 +76,33 @@ decisions from being made on corrupted state.
 
 ---
 
+## RULE: Database queries must be backed by deliberate indexes
+
+Waypoint operates over large scan snapshots. A query that is logically correct
+but accidentally scans a whole snapshot on a hot path can freeze the server and
+make safety-critical UI state stale.
+
+### What this means
+
+- When adding or changing a non-trivial query, **always check whether its filter
+  and join shape have an appropriate backing index**.
+- Prefer sargable predicates on real columns. Be suspicious of `CASE`,
+  `COALESCE`, functions, or casts in hot `WHERE` clauses when they prevent an
+  otherwise useful index from being used.
+- Most production queries should have a deliberate index story. If a query is
+  intentionally allowed to scan, call that out explicitly in code/docs and make
+  the tradeoff visible for review.
+- When a query is performance-sensitive or runs per item/group, verify the plan
+  with `EXPLAIN QUERY PLAN` or equivalent before considering the change done.
+
+### Why
+
+A single bad query shape can turn an O(log n) lookup into repeated full-snapshot
+scans. Duplicate detection already hit this failure mode once: an expression-
+based lookup defeated the hash index and caused long event-loop stalls.
+
+---
+
 ## RULE: File deletions must NEVER be initiated by an LLM or agent
 
 **This is a hard rule with zero exceptions.**
