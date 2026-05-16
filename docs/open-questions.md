@@ -300,6 +300,44 @@ Implemented behavior:
   3. On confirm, moves files to `.waypoint-quarantine/` on the same disk (consistent with the quarantine-not-delete safety model in `decisions.md`).
 - **Note**: This supersedes the narrower "orphaned temp file cleanup" item mentioned in `decisions.md` § Acknowledged review gaps. The `.write-speed-tmp-*` pattern (used during atomic writes for speed tests) should also be included.
 
+### Speed test jobs moved to Worker threads — 2026-05-15
+
+Both `read_speed_test` and `write_speed_test` jobs now run their heavy work in
+Bun Worker threads. Without this, the main-thread event loop was completely
+starved during benchmarks and the API froze (no progress updates, no page loads).
+
+**Architecture:**
+- Worker scripts: `jobs/read-speed/read-speed-worker.ts`, `jobs/write-speed/write-speed-worker.ts`
+- Workers do all filesystem I/O and BLAKE3 hashing off the main thread
+- Main thread handles: job lifecycle, DB queries, lock manager, SSE progress
+- Communication via `postMessage`: start/pause/resume/cancel inbound, progress/done/error outbound
+- Workers replicate `disk-writes.ts` guardrails inline (path containment, exclusive create) since they can't share main-thread module singletons
+
+**Read speed test results (T7 Shield SSD, 2026-05-15):**
+- 26.5 GB MKV: full BLAKE3 hash in 98s → **258 MB/s effective throughput**
+- The T7 Shield's raw sequential read is ~1,000 MB/s, so pure-JS BLAKE3
+  (`@noble/hashes`) is the bottleneck, not the disk
+- This means scan and verify jobs are also CPU-bound on SSDs, not I/O-bound
+
+### BLAKE3 hashing throughput — BACKLOG
+
+- **Problem**: Pure-JS BLAKE3 via `@noble/hashes` tops out at ~260 MB/s on
+  this machine. SSDs are 3–4× faster. This makes the full-hash verify job and
+  copy-job inline hashing CPU-bound, not I/O-bound.
+- **Options to investigate**:
+  1. **BLAKE3 WASM build** — `@aspect-build/aspect-cli` or `aspect-build/aspect-cli`
+     ship a WASM BLAKE3; check if Bun's WASM runtime is faster than pure JS.
+  2. **Native addon via FFI** — Bun supports FFI to C/Rust. The reference BLAKE3
+     C implementation with SIMD hits ~5 GB/s. Would require building a `.dylib`.
+  3. **`bun:ffi` + system `b3sum`** — shell out to the `b3sum` CLI (Homebrew).
+     Simplest but adds a dependency and loses streaming integration.
+  4. **Move hashing to Worker threads** (already done for speed tests) — doesn't
+     make hashing faster, but at least keeps the API responsive. Already done for
+     speed tests; scan/copy/verify still hash on the main thread.
+- **Impact**: At 260 MB/s, a full verify of 3.5 TB takes ~3.7 hours. At 1 GB/s
+  (native BLAKE3 + SSD speed) it would be ~1 hour. For HDDs (~150 MB/s) the
+  disk is the bottleneck regardless, so this only matters for SSD workflows.
+
 ### User collaboration preferences
 
 - Testing flow is **UI-only**. Do not give curl commands as testing instructions. Curl is only acceptable for backend-state debugging when explicitly asked.
