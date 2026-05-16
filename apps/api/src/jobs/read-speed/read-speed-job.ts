@@ -11,10 +11,8 @@ interface FileTarget {
 interface FileResult {
   path: string;
   sizeBytes: number;
-  sampledHashMs: number;
-  sampledHashMBps: number;
-  fullHashMs: number;
-  fullHashMBps: number;
+  hashMs: number;
+  mbps: number;
 }
 
 interface ReadSpeedProgress {
@@ -22,8 +20,7 @@ interface ReadSpeedProgress {
   filesTotal: number;
   results: FileResult[];
   summary?: {
-    avgSampledMBps: number;
-    avgFullMBps: number;
+    avgMbps: number;
     totalBytes: number;
     totalMs: number;
   };
@@ -100,8 +97,7 @@ export class ReadSpeedJobRunner extends JobRunner {
         new URL("./read-speed-worker.ts", import.meta.url).href
       );
 
-      let totalSampledMs = 0;
-      let totalFullMs = 0;
+      let totalMs = 0;
       let totalBytes = 0;
 
       this.worker.onmessage = (event: MessageEvent) => {
@@ -112,8 +108,7 @@ export class ReadSpeedJobRunner extends JobRunner {
 
             this.progress.results.push(result);
             this.progress.filesCompleted += 1;
-            totalSampledMs += result.sampledHashMs;
-            totalFullMs += result.fullHashMs;
+            totalMs += result.hashMs;
             totalBytes += result.sizeBytes;
 
             this.incrementProgress({
@@ -125,21 +120,21 @@ export class ReadSpeedJobRunner extends JobRunner {
             this.logEvent(
               "info",
               "file_benchmarked",
-              `${result.path}: sampled ${result.sampledHashMBps} MB/s (${result.sampledHashMs}ms), full ${result.fullHashMBps} MB/s (${result.fullHashMs}ms)`,
+              `${result.path}: ${result.mbps} MB/s (${result.hashMs}ms, ${formatBytes(result.sizeBytes)})`,
               result
             );
             break;
           }
 
           case "done": {
-            const mbps = (bytes: number, ms: number) =>
-              ms > 0 ? (bytes / (1024 * 1024)) / (ms / 1000) : 0;
+            const avgMbps = totalMs > 0
+              ? Math.round(((totalBytes / (1024 * 1024)) / (totalMs / 1000)) * 10) / 10
+              : 0;
 
             this.progress.summary = {
-              avgSampledMBps: Math.round(mbps(totalBytes, totalSampledMs) * 10) / 10,
-              avgFullMBps: Math.round(mbps(totalBytes, totalFullMs) * 10) / 10,
+              avgMbps,
               totalBytes,
-              totalMs: Math.round(totalSampledMs + totalFullMs),
+              totalMs: Math.round(totalMs),
             };
 
             this.broadcastProgress();
@@ -147,15 +142,14 @@ export class ReadSpeedJobRunner extends JobRunner {
             this.logEvent(
               "info",
               "progress_milestone",
-              `Read speed test complete: sampled avg ${this.progress.summary.avgSampledMBps} MB/s, full avg ${this.progress.summary.avgFullMBps} MB/s over ${formatBytes(totalBytes)}`
+              `Read speed test complete: avg ${avgMbps} MB/s over ${formatBytes(totalBytes)}`
             );
 
             trace("read_speed_end", {
               job_id: this.jobId,
               files_benchmarked: files.length,
               total_bytes: totalBytes,
-              avg_sampled_mbps: this.progress.summary.avgSampledMBps,
-              avg_full_mbps: this.progress.summary.avgFullMBps,
+              avg_mbps: avgMbps,
             });
 
             this.worker?.terminate();

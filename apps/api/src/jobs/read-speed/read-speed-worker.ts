@@ -3,7 +3,7 @@
  *
  * Runs file reads + BLAKE3 hashing entirely off the main thread so the API
  * event loop stays responsive. The main thread sends a list of files; this
- * worker hashes each one (sampled + full) and reports results back.
+ * worker reads each one fully through BLAKE3 and reports timing back.
  *
  * Protocol (postMessage):
  *   Main → Worker:  { type: "start", files: Array<{ path, sizeBytes }> }
@@ -13,15 +13,7 @@
  *   Worker → Main:  { type: "error", message: string }
  */
 
-import { _BLAKE3, blake3 } from "@noble/hashes/blake3.js";
-import { bytesToHex } from "@noble/hashes/utils.js";
-
-// -- Sampled hash constants (must match hasher.ts) --------------------------
-
-const FULL_HASH_THRESHOLD = 100 * 1024;
-const HEADER_SIZE = 8 * 1024;
-const SAMPLE_SIZE = 10 * 1024;
-const FOOTER_SIZE = 8 * 1024;
+import { _BLAKE3 } from "@noble/hashes/blake3.js";
 
 // -- Types ------------------------------------------------------------------
 
@@ -33,10 +25,8 @@ interface FileTarget {
 interface FileResult {
   path: string;
   sizeBytes: number;
-  sampledHashMs: number;
-  sampledHashMBps: number;
-  fullHashMs: number;
-  fullHashMBps: number;
+  hashMs: number;
+  mbps: number;
 }
 
 type InboundMessage =
@@ -62,41 +52,11 @@ async function checkPauseOrCancel(): Promise<void> {
   if (cancelled) throw new Error("cancelled");
 }
 
-function mbps(bytes: number, ms: number): number {
+function toMbps(bytes: number, ms: number): number {
   return ms > 0 ? (bytes / (1024 * 1024)) / (ms / 1000) : 0;
 }
 
-// -- Hashing (replicated from hasher.ts to avoid main-thread module deps) ---
-
-async function computeSampledHash(filePath: string, sizeBytes: number): Promise<void> {
-  if (sizeBytes <= FULL_HASH_THRESHOLD) {
-    const buf = await Bun.file(filePath).arrayBuffer();
-    blake3(new Uint8Array(buf));
-    return;
-  }
-
-  const hasher = new _BLAKE3();
-
-  const sizeBuf = new Uint8Array(8);
-  const view = new DataView(sizeBuf.buffer);
-  view.setBigUint64(0, BigInt(sizeBytes), true);
-  hasher.update(sizeBuf);
-
-  const feed = async (start: number, end: number): Promise<void> => {
-    const buf = await Bun.file(filePath).slice(start, end).arrayBuffer();
-    hasher.update(new Uint8Array(buf));
-  };
-
-  await feed(0, HEADER_SIZE);
-  for (let i = 1; i <= 4; i++) {
-    const offset = Math.floor((sizeBytes / 5) * i) - Math.floor(SAMPLE_SIZE / 2);
-    const start = Math.max(HEADER_SIZE, Math.min(offset, sizeBytes - FOOTER_SIZE - SAMPLE_SIZE));
-    await feed(start, start + SAMPLE_SIZE);
-  }
-  await feed(Math.max(0, sizeBytes - FOOTER_SIZE), sizeBytes);
-
-  hasher.digest();
-}
+// -- Hashing ----------------------------------------------------------------
 
 async function computeFullHashStreaming(filePath: string): Promise<void> {
   const stream = Bun.file(filePath).stream();
@@ -116,21 +76,15 @@ async function run(files: FileTarget[]): Promise<void> {
   for (const file of files) {
     await checkPauseOrCancel();
 
-    const sampledStart = performance.now();
-    await computeSampledHash(file.path, file.sizeBytes);
-    const sampledMs = performance.now() - sampledStart;
-
-    const fullStart = performance.now();
+    const t0 = performance.now();
     await computeFullHashStreaming(file.path);
-    const fullMs = performance.now() - fullStart;
+    const hashMs = performance.now() - t0;
 
     const result: FileResult = {
       path: file.path,
       sizeBytes: file.sizeBytes,
-      sampledHashMs: Math.round(sampledMs),
-      sampledHashMBps: Math.round(mbps(file.sizeBytes, sampledMs) * 10) / 10,
-      fullHashMs: Math.round(fullMs),
-      fullHashMBps: Math.round(mbps(file.sizeBytes, fullMs) * 10) / 10,
+      hashMs: Math.round(hashMs),
+      mbps: Math.round(toMbps(file.sizeBytes, hashMs) * 10) / 10,
     };
 
     postMessage({ type: "file_done", result });
