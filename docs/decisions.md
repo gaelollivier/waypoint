@@ -6,12 +6,13 @@ Settled decisions from the research phase. These are not up for re-discussion un
 
 ## Safety constraints (hard, non-negotiable)
 
-- **Additive-only writes.** The backup copy job only ever creates new files. It never overwrites, renames, or deletes files at the destination.
-- **Zero deletion code in the codebase.** Not in the copy job, not in the diff view, not in cleanup actions, not anywhere. The tool never calls `unlink`/`rm`/equivalent on user files. The user does all final deletions themselves via Finder.
-- **Move-to-quarantine instead of delete.** When the tool needs to "clean up" something (orphan temp files, etc.), it MOVES the file to a quarantine directory on the same disk (`.waypoint-quarantine/` at the disk root). User reviews and deletes from quarantine themselves. Quarantine moves never overwrite — collisions get a uuid suffix.
+- **Additive-only backup writes.** The backup copy job only ever creates new files. It never overwrites destination files and never propagates source deletions onto a backup disk.
+- **Deletion is allowed only for narrow, human-initiated flows with explicit server-side guardrails.** There is no generic delete capability. The browser UI must show the exact paths, the request must echo those reviewed paths back to the server, and each deletion flow must prove a use-case-specific safety condition before acting.
+- **Duplicate cleanup** is the current destructive flow for user files. The user chooses the kept copy in a confirmation dialog, and the server verifies that a distinct identical copy remains before each delete. Today this is a direct UI/API flow rather than a job.
+- **Waypoint temp-file cleanup** is the planned destructive flow for tool-created artifacts. It may delete only explicitly reviewed paths whose names match tightly allowed Waypoint temp-file patterns such as `.backup-tmp-*` or `.waypoint-test-copy-*`; arbitrary-path cleanup is never allowed.
 - **No sync semantics.** Files removed from the source are never removed from the destination. The backup is a one-way accumulation.
 - **If a file already exists at the destination:** hash it and compare to the source hash. If they match → skip, log as `already_present_verified`. If they don't match → error, log, surface for manual review. Never overwrite.
-- **Orphaned temp files** (from interrupted copies) are detected and logged. Cleanup is a user-triggered action that MOVES them to quarantine, never deletes.
+- **Orphaned temp files** (from interrupted copies) are detected and logged. Future cleanup is a user-triggered guarded deletion flow, not an automatic background action.
 - **Scanning is read-only.** No writes to source or destination during scan/inspect operations, except to the SQLite metadata DB on the host.
 - **All write/move/rename operations are gated by an existence check** at the call site (target path must not exist) and are covered by tests that assert no-overwrite. This is enforced as a code-level invariant, not just convention.
 
@@ -105,7 +106,7 @@ Acceptable for v1 given the user's hardware (slow HDD where full verify is hours
 ## Concurrency / locking
 
 - **Operations are categorized by what they modify on the disk itself**, not by what they read.
-  - **Writers** (modify disk contents): `copy`, `write_speed_test`, quarantine moves.
+  - **Writers** (modify disk contents): lock-managed job flows such as `copy`, `write_speed_test`, and future guarded temp-file cleanup.
   - **Readers** (only read disk; any state changes go to the host DB): `scan`, `verify`, diff queries, tree browsing.
 - **Write lock per disk.** Held by the active writer for that disk. Blocks all other operations on that disk while active.
 - **Paused write lock** allows readers to run on the same disk. Blocks other writers. Resume re-acquires the exclusive write lock.
@@ -162,7 +163,7 @@ not re-report these unless the underlying design changes.
   real concern for this use case, and a previous implementation was messy.
   May reconsider if the need arises.
 - **Orphaned temp file cleanup:** By design for now. Future iterations will add
-  cleanup functionality (move to `.waypoint-quarantine/`).
+  guarded cleanup functionality for Waypoint-created artifacts.
 - **Sampled hash can miss changes in un-sampled regions:** By design. Documented
   in the "Risk acknowledgment for sampled verify" section above. Full verify job
   is the planned mitigation.

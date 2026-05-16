@@ -62,7 +62,7 @@ Every file across every disk. Current state only — no history. Re-scans update
 | `size_bytes` | |
 | `mtime` | Modification time from filesystem |
 | `sampled_hash` | BLAKE3 of size + sampled bytes (or full content for files ≤ 100KB). Primary change-detection identity. |
-| `full_hash` | BLAKE3 of full file content. Nullable. Populated only when the file passed through a copy job (or future full-verify). |
+| `full_hash` | BLAKE3 of full file content. Nullable. Populated by copy jobs, opt-in `fullHash` scans, and future full-verify flows; carried forward across later scans when the sampled hash still matches. |
 | `hash_algo_version` | Bumped if sampling layout or algo changes — allows lazy re-hash on mismatch |
 | `last_scan_id` | Last scan that confirmed this file |
 | `last_verified_at` | Timestamp of last successful verify (for the verify job) |
@@ -250,7 +250,7 @@ On startup: any `disk_locks` row whose `held_by_job_id` is in a terminal status 
 ---
 
 ### `quarantine_items`
-Files the tool has moved to `.waypoint-quarantine/` on a disk. The tool never deletes; quarantine is the destination for any "cleanup" action. User reviews and removes via Finder.
+Legacy table from the earlier quarantine-based cleanup design. The current safety philosophy has moved toward narrow guarded deletion flows instead: duplicate cleanup is browser-confirmed and requires a kept identical copy, while future Waypoint temp-file cleanup should delete only explicitly reviewed paths that match allowed tool-generated filename patterns. This table still exists in the schema today but is not the target model for future cleanup work.
 
 | Field | Notes |
 |---|---|

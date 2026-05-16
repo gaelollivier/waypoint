@@ -15,7 +15,7 @@ A personal backup tool for rotating cold-storage USB drives.
 - Rich web UI for disk inspection, backup state, and job monitoring
 - SQLite database is independently queryable with any standard tool
 
-**Safety model:** the tool never calls `unlink`/`rm` on user files. Cleanup moves files to `.waypoint-quarantine/` on the same disk; the user deletes from quarantine via Finder.
+**Safety model:** normal backup behavior is additive-only: Waypoint never overwrites destination files and never propagates source deletions to backups. Deletion is allowed only for narrow, human-initiated flows with server-enforced guardrails: duplicate cleanup requires a verified kept copy to remain, and future Waypoint temp-file cleanup will be limited to explicitly reviewed paths that match tightly allowed temp-file patterns.
 
 ---
 

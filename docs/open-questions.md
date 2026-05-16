@@ -28,7 +28,7 @@ Sampled BLAKE3 by default. Full BLAKE3 computed for free during copy and stored 
 
 ### 4. Orphaned temp files — RESOLVED
 
-Detect at start of every copy job + via a UI button. The "cleanup" action MOVES orphans to `.waypoint-quarantine/` on the same disk — never deletes. See `decisions.md` → Safety constraints and `schema.md` → `quarantine_items`.
+Detect at start of every copy job + via a UI button. The cleanup action is a guarded deletion flow: the UI lists every candidate path for human review, echoes the reviewed paths back to the server, and the server accepts only tightly allowed Waypoint temp-file patterns. This is separate from duplicate cleanup, whose guardrail is the verified kept copy. See `decisions.md` → Safety constraints.
 
 ---
 
@@ -153,7 +153,7 @@ Composite backup job (scan→scan→diff→copy as one unit) is deferred to M11.
 
 **Excludes**: hardcoded for now. Exclude editor deferred to M14 polish.
 
-**`only_on_dest` (removed)**: shown in the diff tree as red entries. No action taken — safety model means we never delete from dest. Informational only.
+**`only_on_dest` (removed)**: shown in the diff tree as red entries. No action taken — backup semantics are additive-only, so source deletions are never propagated to destination disks. Informational only.
 
 ### M9 Diff — implemented 2026-05-09
 
@@ -257,8 +257,8 @@ Pre-flight check sums all pending bytes and compares to free space + 1GB margin.
 ### No excludes for now
 Full backup — all files from the diff are copied. Exclude patterns deferred to M14 (exclude editor UI).
 
-### Orphaned temp files: track, don't move or delete
-On resume, orphaned temp files (`.backup-tmp-<uuid>`) from interrupted copies are logged and the copy_item is reset to `pending`. The temp file is left on disk. Cleanup/quarantine tooling is a future milestone (M14).
+### Orphaned temp files: track, don't clean up automatically
+On resume, orphaned temp files (`.backup-tmp-<uuid>`) from interrupted copies are logged and the copy_item is reset to `pending`. The temp file is left on disk. Guarded cleanup tooling is a future milestone (M14).
 
 ### Cancel leaves dirty state
 Cancelling a copy job leaves in_progress items and orphaned temp files. Cleanup tooling deferred.
@@ -303,7 +303,8 @@ Implemented behavior:
 - **Proposed fix**: A user-triggered "Clean up Waypoint files" action on the disk page that:
   1. Scans the disk root for files matching `.backup-tmp-*` and `.waypoint-test-copy-*`.
   2. Shows a confirmation dialog listing every file and its size.
-  3. On confirm, moves files to `.waypoint-quarantine/` on the same disk (consistent with the quarantine-not-delete safety model in `decisions.md`).
+  3. On confirm, sends those exact reviewed paths back to the server.
+  4. The server deletes only paths that both match the reviewed list and satisfy the allowed Waypoint temp-file naming patterns.
 - **Note**: This supersedes the narrower "orphaned temp file cleanup" item mentioned in `decisions.md` § Acknowledged review gaps. The `.write-speed-tmp-*` pattern (used during atomic writes for speed tests) should also be included.
 
 ### Speed test jobs moved to Worker threads — 2026-05-15

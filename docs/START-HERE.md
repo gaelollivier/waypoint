@@ -2,7 +2,7 @@
 
 Personal backup tool for cold storage drives. SSD source → multiple HDDs (one connected at a time, manually rotated). Custom build — no existing tool covers all requirements.
 
-**Safety is the top priority.** The tool never calls `unlink`/`rm` on user files. All "cleanup" operations move files to a quarantine directory; the user does final deletions themselves. All write/move/rename operations are gated by an existence check and covered by tests asserting no-overwrite.
+**Safety is the top priority.** Backup operations are additive-only: the tool never overwrites destination files and never propagates source deletions to backups. Deletion is allowed only in narrow, human-initiated flows with server-enforced guardrails: duplicate cleanup requires an explicitly kept identical copy to remain, and future Waypoint temp-file cleanup will be limited to explicitly reviewed paths that match tightly allowed temp-file patterns. All write/move/rename operations are gated by an existence check and covered by tests asserting no-overwrite.
 
 ---
 
@@ -51,7 +51,7 @@ Personal backup tool for cold storage drives. SSD source → multiple HDDs (one 
 | 11 | Copy job (temp→rename, inline full hash, resume-safe, full UI) | ✅ Done |
 | 12 | Write speed test job (generated data → `.waypoint-test-copy-[uuid]`, pause/resume, throughput UI) | ✅ Done |
 | 13 | Verify job (re-hash files, surface mismatches) | 🔲 |
-| 14 | Quarantine & cleanup (orphan temp files → .waypoint-quarantine/) | 🔲 |
+| 14 | Guarded cleanup (orphan temp files with reviewed-path + filename-pattern deletion rules) | 🔲 |
 | 15 | Polish (ETAs, exclude editor, error review UI, SMART data) | 🔲 |
 | 16 | Backup composite (scan→scan→diff→copy pipeline, pause-as-unit) | 🔲 |
 
@@ -88,7 +88,10 @@ Recently completed backlog:
 
 ## Key things to keep in mind
 
-- **The tool never deletes user files.** All cleanups move to `.waypoint-quarantine/`. User deletes from quarantine themselves via Finder.
+- **Backup behavior is additive-only.** Source deletions are never mirrored onto destination disks, and existing destination files are never overwritten.
+- **Deletion is allowed only for narrow guarded workflows.** Every destructive flow must be human-initiated from the web UI, must echo back the exact reviewed paths, and must have a use-case-specific server-side proof before deletion.
+- **Duplicate cleanup** proves that an identical kept copy remains.
+- **Waypoint temp-file cleanup** will only allow explicitly reviewed paths that match tightly whitelisted temp-file naming patterns.
 - **All write/move/rename operations check existence first** and are tested to assert no-overwrite. Code-level invariant.
 - **All errors are logged per-file in SQLite** — nothing silent, everything retryable.
 - **Permission errors during scans are non-fatal** (logged, indexing continues).
