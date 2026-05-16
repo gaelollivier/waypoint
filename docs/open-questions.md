@@ -16,7 +16,7 @@ All v1 design questions are resolved. This file is kept as a record of how each 
 
 ### 1. fsync strategy during file copies — RESOLVED
 
-No per-file fsync. Safety chain = temp→rename + inline hash + verify job. See `decisions.md` → Atomic writes.
+No per-file fsync. Safety chain = temp→rename + inline hash + later fullHash scans + diffs. See `decisions.md` → Atomic writes.
 
 ### 2. Walk queue and resumable scanning — RESOLVED
 
@@ -243,7 +243,7 @@ Added a tracked pre-commit hook (`.githooks/pre-commit`) that runs `tsc --noEmit
 ## M11 Copy job — design decisions (2026-05-12)
 
 ### No post-write hash verification during copy
-The copy job computes the full BLAKE3 hash inline during the streaming read (it's free — every byte flows through the hasher). But it does NOT re-hash the temp file after writing to verify what landed on disk. The verify job is the authoritative correctness check for on-disk integrity. Removing this simplifies `copyFileAtomic` significantly — no `expectedSampledHash` parameter, no `HashMismatchError` path, no `computeSampledHash` call on the temp file.
+The copy job computes the full BLAKE3 hash inline during the streaming read (it's free — every byte flows through the hasher). But it does NOT re-hash the temp file after writing to verify what landed on disk. Later fullHash scans + diffs are the authoritative correctness check for on-disk integrity. Removing this simplifies `copyFileAtomic` significantly — no `expectedSampledHash` parameter, no `HashMismatchError` path, no `computeSampledHash` call on the temp file.
 
 ### Source re-validation before each copy
 Before copying each file, the copy job: (1) re-stats the source file (mtime + size), comparing to the stored `files` row; (2) re-computes the sampled hash on the source file, comparing to the stored `sampled_hash`. If either differs → skip with `skipped_source_changed`. This prevents copying stale data. The overhead is minimal (SSD reads, ~6 small slices for sampled hash).
@@ -329,8 +329,8 @@ starved during benchmarks and the API froze (no progress updates, no page loads)
 ### BLAKE3 hashing throughput — DONE 2026-05-16
 
 - **Problem**: Pure-JS BLAKE3 via `@noble/hashes` topped out at ~260 MB/s,
-  making the read-speed test, scan, copy, and (future) verify jobs CPU-bound
-  rather than I/O-bound on SSDs.
+  making the read-speed test, scan, copy, and future fullHash-based integrity
+  workflows CPU-bound rather than I/O-bound on SSDs.
 - **Decision**: Swapped to `@napi-rs/blake-hash`, a maintained native Rust
   (NAPI) binding to the official BLAKE3 crate with SIMD/NEON. Byte-identical
   BLAKE3 output, so the DB stays valid — no rehash needed.
@@ -367,7 +367,7 @@ sampled hashing for change detection.
   button on the disk page).
 - **Walker behaviour**: in addition to computing `sampled_hash`, each file
   is streamed through BLAKE3 and the digest stored in `files.full_hash`.
-- **Reuse logic** (applies to all scans, not just fullHash):
+- **Reuse logic**:
   - `sampled_hash` is reused from the previous scan when `mtime + size` are
     unchanged. Same as before.
   - `full_hash` is reused when the *sampled_hash* itself matches the prior
@@ -375,10 +375,13 @@ sampled hashing for change detection.
     extremely high probability that bytes are identical — stronger than
     mtime+size, which a plain `touch` would invalidate even though content
     is the same.
-  - Carry-forward fires in non-fullHash scans too, so accumulated
-    full_hash data is preserved across plain re-scans rather than being
+  - Carry-forward fires only in non-fullHash scans, so accumulated
+    full_hash data is preserved across quick re-scans rather than being
     silently dropped when a new scan row is created.
-- **Cost on a fresh full-hash scan** ≈ reading every byte once
+  - fullHash scans deliberately do **not** carry forward prior `full_hash`
+    values. They always re-read every byte so they can detect corruption
+    outside sampled regions.
+- **Cost on a full-hash scan** ≈ reading every byte once
   (~800 MB/s on the test SSD, measured 870 MB/s steady-state during the
   first production run on 2026-05-16).
 

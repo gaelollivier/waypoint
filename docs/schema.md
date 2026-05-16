@@ -62,10 +62,10 @@ Every file across every disk. Current state only — no history. Re-scans update
 | `size_bytes` | |
 | `mtime` | Modification time from filesystem |
 | `sampled_hash` | BLAKE3 of size + sampled bytes (or full content for files ≤ 100KB). Primary change-detection identity. |
-| `full_hash` | BLAKE3 of full file content. Nullable. Populated by copy jobs, opt-in `fullHash` scans, and future full-verify flows; carried forward across later scans when the sampled hash still matches. |
+| `full_hash` | BLAKE3 of full file content. Nullable. Populated by copy jobs and opt-in `fullHash` scans; carried forward only across later plain scans when the sampled hash still matches. FullHash scans always recompute it from disk. |
 | `hash_algo_version` | Bumped if sampling layout or algo changes — allows lazy re-hash on mismatch |
 | `last_scan_id` | Last scan that confirmed this file |
-| `last_verified_at` | Timestamp of last successful verify (for the verify job) |
+| `last_verified_at` | Legacy placeholder from the earlier dedicated verify-job design. |
 
 Indices: `UNIQUE (disk_id, directory_id, name)`, `UNIQUE (disk_id, path)`, `(sampled_hash)` for cross-disk lookup / diff joins, `(disk_id, last_scan_id)` for "files not seen in latest scan."
 

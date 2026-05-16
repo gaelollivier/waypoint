@@ -54,7 +54,7 @@ Measured on the source SSD (photo/video-heavy personal library):
 - **Implementation**: `@napi-rs/blake-hash` (native Rust NAPI binding to the official BLAKE3 crate). Saturates SSD read speed (~890 MB/s on the test SSD). Earlier we used `@noble/hashes` pure-JS BLAKE3 but it capped at ~260 MB/s — see `open-questions.md` → "BLAKE3 hashing throughput".
 - **Two hashes per file** (both BLAKE3, stored on the `files` row):
   - `sampled_hash` — primary identity for change detection. Always populated.
-  - `full_hash` — content hash of every byte. Nullable. Populated by (a) copy jobs (computed for free during the streaming read), (b) opt-in `fullHash` scan mode, and (c) carry-forward from a prior scan when the sampled hash still matches. Used by future "full verify" mode.
+  - `full_hash` — content hash of every byte. Nullable. Populated by (a) copy jobs (computed for free during the streaming read), (b) opt-in `fullHash` scan mode, and (c) carry-forward from a prior scan during plain re-scans when the sampled hash still matches.
 - **Sampled hash definition** (Spacedrive's pattern):
   - Files ≤ 100KB: full hash (no useful sampling for tiny files).
   - Files > 100KB: BLAKE3 over `(size as 8 bytes) || header[0..8KB] || sample₁[10KB] || sample₂[10KB] || sample₃[10KB] || sample₄[10KB] || footer[last 8KB]`. Sample positions evenly spaced through the interior. Size prefix prevents collisions across files of different sizes with identical sampled bytes.
@@ -62,22 +62,20 @@ Measured on the source SSD (photo/video-heavy personal library):
 ### Per-job hashing behavior
 
 - **Initial scan (default)**: compute `sampled_hash` for every file. Do not compute `full_hash`.
-- **Initial scan, fullHash mode**: opt-in via `POST /api/disks/:id/scan { "fullHash": true }`. In addition to `sampled_hash`, streams every file through BLAKE3 and stores `full_hash`. Bottlenecked by disk read speed (~800 MB/s on SSD). Use when you want to populate `full_hash` ahead of a future full-verify scrub without going through a copy.
+- **FullHash scan mode**: opt-in via `POST /api/disks/:id/scan { "fullHash": true }`. In addition to `sampled_hash`, streams every file through BLAKE3 and stores a freshly computed `full_hash`. It always re-reads every byte, even if a prior scan already has a matching full hash, so it can detect corruption outside sampled regions. Bottlenecked by disk read speed (~800 MB/s on SSD). A fullHash scan of each disk followed by a diff provides the byte-level verification workflow.
 - **Re-scan**: filter by mtime+size first (free, from `stat()`); only re-compute `sampled_hash` if mtime or size changed, or if the file is newly discovered. Files unchanged on filesystem are not re-read.
-- **Re-scan, full_hash reuse**: when a prior scan row exists and its `sampled_hash` equals the newly computed `sampled_hash`, the stored `full_hash` is carried forward. This holds even in plain (non-fullHash) re-scans, so accumulated `full_hash` data isn't dropped when a new scan row is created. Uses sampled-hash equality rather than mtime+size, so a plain `touch` doesn't trigger a full re-read.
-- **Copy job**: compute `full_hash` inline during the sequential read pass (every byte flows through the BLAKE3 hasher — free). Store `full_hash` on both the source and destination `files` rows. Source is re-validated before copy (re-stat + re-compute sampled hash); if source changed since scan, the file is skipped. No post-write hash verification — the verify job is the authoritative on-disk correctness check.
-- **Verify job (default = sampled mode)**: re-compute `sampled_hash` from disk, compare to stored `sampled_hash`. Catches change in the sampled regions; does NOT detect bit rot in unsampled regions of large files.
-- **Verify job (full mode, future v1.x)**: re-compute `full_hash` from disk, compare to stored `full_hash`. The "true scrub." Skipped if `full_hash` is null on a file (file was never copied through this tool, only scanned).
+- **Plain re-scan, full_hash reuse**: when a prior scan row exists and its `sampled_hash` equals the newly computed `sampled_hash`, the stored `full_hash` is carried forward. This applies only to non-fullHash scans so accumulated `full_hash` data isn't dropped when a quick snapshot is created. Uses sampled-hash equality rather than mtime+size, so a plain `touch` doesn't discard known hash coverage.
+- **Copy job**: compute `full_hash` inline during the sequential read pass (every byte flows through the BLAKE3 hasher — free). Store `full_hash` on both the source and destination `files` rows. Source is re-validated before copy (re-stat + re-compute sampled hash); if source changed since scan, the file is skipped. No post-write hash verification — a later fullHash scan + diff is the authoritative on-disk correctness check.
 
-### Risk acknowledgment for sampled verify
+### Risk acknowledgment for sampled scans
 
 For large files (e.g. 100GB videos), sampled hashing covers ~58KB out of ~10⁸KB = 0.00006% of the file. Bit rot in the unsampled 99.99% is undetected by default verify. This is a known tradeoff:
 
 - Step up from current state (rsync-only, zero integrity): meaningful improvement.
 - Step down from a full-verify backup tool: real coverage gap.
-- Mitigation path: the future "full verify" mode is the answer for periodic deep scrubs. Sampled verify is the cheap continuous check.
+- Mitigation path: periodic fullHash scans are the deep scrub. Plain sampled scans are the cheap continuous check.
 
-Acceptable for v1 given the user's hardware (slow HDD where full verify is hours-long) and current baseline.
+Acceptable for v1 given the user's hardware (slow HDD where a full scan is hours-long) and current baseline.
 
 ## Atomic writes
 
@@ -88,8 +86,8 @@ Acceptable for v1 given the user's hardware (slow HDD where full verify is hours
   - Encodes intent in the path: `*.backup-tmp-*` = "we crashed during this write" vs canonical-path hash mismatch = "previously-good file corrupted." Different recovery semantics.
   - Concurrent retries can't collide on the same canonical path.
   - Cost is one rename per file (a single inode op, free on the same filesystem).
-- **No per-file fsync.** Per-file fsync on a 5400rpm HDD destroys throughput. Crash safety relies on (a) the temp→rename pattern preventing partial files at canonical paths, (b) the verify job as the true correctness guarantee that bytes are durably on disk. The verify job is the authoritative check, not the copy job.
-- **Inline hashing during copy**: BLAKE3 hasher accumulates incrementally as bytes are read from source and written to destination temp file. Produces `full_hash` for free from the sequential read. Single read pass, no post-write re-hash. Rename always proceeds after write completes — the verify job is the authoritative integrity check.
+- **No per-file fsync.** Per-file fsync on a 5400rpm HDD destroys throughput. Crash safety relies on (a) the temp→rename pattern preventing partial files at canonical paths, and (b) later fullHash scans + diffs as the authoritative correctness check that bytes are durably on disk.
+- **Inline hashing during copy**: BLAKE3 hasher accumulates incrementally as bytes are read from source and written to destination temp file. Produces `full_hash` for free from the sequential read. Single read pass, no post-write re-hash. Rename always proceeds after write completes — later fullHash scans + diffs are the authoritative integrity check.
 
 ## Architecture
 
@@ -165,12 +163,12 @@ not re-report these unless the underlying design changes.
 - **Orphaned temp file cleanup:** By design for now. Future iterations will add
   guarded cleanup functionality for Waypoint-created artifacts.
 - **Sampled hash can miss changes in un-sampled regions:** By design. Documented
-  in the "Risk acknowledgment for sampled verify" section above. Full verify job
-  is the planned mitigation.
+  in the "Risk acknowledgment for sampled scans" section above. Periodic
+  fullHash scans are the mitigation.
 - **Same-disk diff not blocked:** By design. A same-disk diff is read-only and
   harmless; blocking it is unnecessary complexity.
 - **Copy hash verifies source bytes, not written bytes:** By design for this
-  milestone. The verify job (coming later) is the authoritative on-disk
+  milestone. Later fullHash scans + diffs are the authoritative on-disk
   correctness check.
 
 ## Explicit non-goals (v1)

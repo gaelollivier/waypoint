@@ -228,7 +228,7 @@ describe("ScanJobRunner", () => {
       expect(withFull.n).toBe(0);
     });
 
-    it("reuses full_hash when the sampled_hash still matches the prior scan", async () => {
+    it("recomputes full_hash even when the sampled_hash still matches the prior scan", async () => {
       const root = makeFixtureTree("full-hash-reuse");
       db.prepare("UPDATE disks SET mount_path = ?, is_connected = 1 WHERE id = ?").run(root, diskId);
 
@@ -247,10 +247,11 @@ describe("ScanJobRunner", () => {
           .get(runner2.jobId) as any
       ).full_hash;
 
-      expect(hashAfter).toBe("SENTINEL");
+      expect(hashAfter).not.toBe("SENTINEL");
+      expect(hashAfter).toMatch(/^[0-9a-f]{64}$/);
     });
 
-    it("reuses full_hash after a touch (mtime bumped, content unchanged)", async () => {
+    it("recomputes full_hash after a touch even when content is unchanged", async () => {
       const root = makeFixtureTree("full-hash-touch");
       db.prepare("UPDATE disks SET mount_path = ?, is_connected = 1 WHERE id = ?").run(root, diskId);
 
@@ -275,9 +276,10 @@ describe("ScanJobRunner", () => {
           .get(runner2.jobId) as any
       ).full_hash;
 
-      // The sampled hash recomputed and matches the prior row's sampled hash
-      // (content unchanged), so full_hash is reused — SENTINEL preserved.
-      expect(hashAfter).toBe("SENTINEL");
+      // Full-hash scans are integrity scans, so the full hash is recomputed
+      // even when the sampled hash proves the file content appears unchanged.
+      expect(hashAfter).not.toBe("SENTINEL");
+      expect(hashAfter).toMatch(/^[0-9a-f]{64}$/);
     });
 
     it("recomputes full_hash when content changes (sampled_hash differs)", async () => {

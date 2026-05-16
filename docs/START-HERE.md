@@ -22,7 +22,7 @@ Personal backup tool for cold storage drives. SSD source → multiple HDDs (one 
 
 ## Status
 
-**Implementation in progress.** Design phase complete; milestones 1–12 done plus an out-of-band read-speed-test job, append-only scan snapshots, and an opt-in fullHash scan mode. Next up: M13 — verify job. See `open-questions.md` for details.
+**Implementation in progress.** Design phase complete; milestones 1–12 done plus an out-of-band read-speed-test job, append-only scan snapshots, and an opt-in fullHash scan mode. FullHash scans now provide the planned deep-verification workflow when paired with diffs, so the next milestone map will be revisited before M13 work begins. See `open-questions.md` for details.
 
 **Stack**: TypeScript + Bun, Hono (HTTP), React + Vite (UI), `bun:sqlite`, BLAKE3 via `@napi-rs/blake-hash` (saturates SSD read speed), SSE for progress.
 
@@ -50,7 +50,7 @@ Personal backup tool for cold storage drives. SSD source → multiple HDDs (one 
 | 10 | Duplicate file detection (job, API, UI tab) | ✅ Done |
 | 11 | Copy job (temp→rename, inline full hash, resume-safe, full UI) | ✅ Done |
 | 12 | Write speed test job (generated data → `.waypoint-test-copy-[uuid]`, pause/resume, throughput UI) | ✅ Done |
-| 13 | Verify job (re-hash files, surface mismatches) | 🔲 |
+| 13 | Verify workflow (superseded candidate: fullHash scans + diff may replace a dedicated job) | 🔲 |
 | 14 | Guarded cleanup (orphan temp files with reviewed-path + filename-pattern deletion rules) | 🔲 |
 | 15 | Polish (ETAs, exclude editor, error review UI, SMART data) | 🔲 |
 | 16 | Backup composite (scan→scan→diff→copy pipeline, pause-as-unit) | 🔲 |
@@ -82,7 +82,7 @@ Recently completed backlog:
 - Read speed test job (Bun Worker, full BLAKE3 hash over the N largest files from the latest scan).
 - Append-only scan snapshots: each scan creates independent file/directory rows keyed by `scan_id`, so previous scan states are queryable for diff/history rather than overwritten.
 - BLAKE3 swapped from pure-JS `@noble/hashes` (~265 MB/s) to native `@napi-rs/blake-hash` (~890 MB/s, saturates SSD). Byte-identical output, no DB rehash. Scan/copy/read-speed-test now disk-bound rather than CPU-bound.
-- Opt-in `fullHash` scan mode (`POST /:id/scan { fullHash: true }`) that also writes `full_hash` for every file; full_hash carry-forward uses sampled-hash equality so `touch` doesn't invalidate it.
+- Opt-in `fullHash` scan mode (`POST /:id/scan { fullHash: true }`) that re-reads every byte and writes a fresh `full_hash` for every file; plain re-scans can still carry `full_hash` forward when sampled hashes match.
 
 ---
 

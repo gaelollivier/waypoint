@@ -211,9 +211,10 @@ async function insertFileBatch(
   fullHashMode: boolean
 ): Promise<{ count: number; bytes: number; selectMs: number; hashPoolMs: number; insertMs: number }> {
   // Look up previous scan's rows for this directory (by path) to reuse hashes
-  // when mtime+size are unchanged. We always carry full_hash forward when it
-  // exists in the prior row — that way a non-fullHash scan doesn't lose hash
-  // data accumulated by an earlier fullHash scan.
+  // when mtime+size are unchanged. Plain scans may carry full_hash forward so
+  // they don't lose data accumulated by an earlier fullHash scan. Full-hash
+  // scans deliberately do not reuse full_hash: their purpose is to re-read
+  // every byte from disk and catch latent corruption.
   const tSelect = performance.now();
   let existingMap = new Map<
     string,
@@ -279,17 +280,14 @@ async function insertFileBatch(
         sampledHash = await computeSampledHash(filePath, sizeBytes);
       }
 
-      // Reuse full_hash whenever the sampled hash still matches the prior
-      // row's. Sampled hash is a content fingerprint (size prefix + header +
-      // 4 interior samples + footer), so a match implies extremely high
-      // probability the content is unchanged — far stronger than mtime+size,
-      // which a plain `touch` would invalidate even though bytes are equal.
-      // This carry-forward also fires in non-fullHash scans so previously
-      // accumulated full_hash data isn't silently dropped.
-      if (existing?.full_hash && existing.sampled_hash === sampledHash) {
-        fullHash = existing.full_hash;
-      } else if (fullHashMode) {
+      // Full-hash scans are integrity scans: always re-read every byte so bit
+      // flips outside sampled regions are detected. Plain scans may carry an
+      // existing full_hash forward when a fresh or reused sampled hash still
+      // matches the prior row, preserving accumulated hash coverage cheaply.
+      if (fullHashMode) {
         fullHash = await computeFullHashStreaming(filePath);
+      } else if (existing?.full_hash && existing.sampled_hash === sampledHash) {
+        fullHash = existing.full_hash;
       }
 
       fileData.push({ name: entry.name, filePath, sizeBytes, mtime, sampledHash, fullHash });

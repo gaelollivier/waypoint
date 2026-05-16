@@ -313,7 +313,7 @@ function ScanOptionsDialog({
         <div className="space-y-1">
           <h2 className="text-base font-semibold text-white">Start Scan</h2>
           <p className="text-sm text-zinc-500">
-            Choose whether this scan should also compute a full hash for every file.
+            Choose whether this scan should read every byte and compute a fresh full hash for every file.
           </p>
         </div>
 
@@ -326,10 +326,10 @@ function ScanOptionsDialog({
           />
           <span className="space-y-1">
             <span className="block text-sm font-medium text-zinc-200">
-              Compute full hashes for every file
+              Read every byte and compute full hashes
             </span>
             <span className="block text-xs leading-relaxed text-zinc-500">
-              Slower than a standard scan, but it records full hashes for later workflows such as faster duplicate cleanup.
+              Slower than a standard scan, but it can catch corruption outside sampled regions and records fresh full hashes for later workflows such as faster duplicate cleanup.
             </span>
           </span>
         </label>
