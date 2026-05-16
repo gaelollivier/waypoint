@@ -273,15 +273,20 @@ async function insertFileBatch(
       let fullHash: string | null = null;
 
       if (unchanged && existing.sampled_hash) {
-        // mtime+size unchanged — reuse stored hash, skip I/O
+        // mtime+size unchanged — reuse stored sampled hash, skip I/O
         sampledHash = existing.sampled_hash;
       } else {
         sampledHash = await computeSampledHash(filePath, sizeBytes);
       }
 
-      if (unchanged && existing.full_hash) {
-        // Carry full_hash forward whenever available, even in non-fullHash
-        // scans — losing it would force a re-read on the next fullHash scan.
+      // Reuse full_hash whenever the sampled hash still matches the prior
+      // row's. Sampled hash is a content fingerprint (size prefix + header +
+      // 4 interior samples + footer), so a match implies extremely high
+      // probability the content is unchanged — far stronger than mtime+size,
+      // which a plain `touch` would invalidate even though bytes are equal.
+      // This carry-forward also fires in non-fullHash scans so previously
+      // accumulated full_hash data isn't silently dropped.
+      if (existing?.full_hash && existing.sampled_hash === sampledHash) {
         fullHash = existing.full_hash;
       } else if (fullHashMode) {
         fullHash = await computeFullHashStreaming(filePath);

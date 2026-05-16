@@ -228,7 +228,7 @@ describe("ScanJobRunner", () => {
       expect(withFull.n).toBe(0);
     });
 
-    it("reuses full_hash from a prior scan when mtime+size match", async () => {
+    it("reuses full_hash when the sampled_hash still matches the prior scan", async () => {
       const root = makeFixtureTree("full-hash-reuse");
       db.prepare("UPDATE disks SET mount_path = ?, is_connected = 1 WHERE id = ?").run(root, diskId);
 
@@ -248,6 +248,61 @@ describe("ScanJobRunner", () => {
       ).full_hash;
 
       expect(hashAfter).toBe("SENTINEL");
+    });
+
+    it("reuses full_hash after a touch (mtime bumped, content unchanged)", async () => {
+      const root = makeFixtureTree("full-hash-touch");
+      db.prepare("UPDATE disks SET mount_path = ?, is_connected = 1 WHERE id = ?").run(root, diskId);
+
+      const runner1 = makeFullHashRunner(db, jm, diskId, root);
+      await runner1.start();
+
+      // Sentinel the full_hash so a re-read would replace it with a real hex digest.
+      db.prepare("UPDATE files SET full_hash = 'SENTINEL' WHERE scan_id = ? AND name = 'a.txt'").run(runner1.jobId);
+
+      // Simulate `touch` — bump mtime, keep content identical.
+      const filePath = path.join(root, "a.txt");
+      const future = new Date(Date.now() + 60_000);
+      const { utimesSync } = await import("fs");
+      utimesSync(filePath, future, future);
+
+      const runner2 = makeFullHashRunner(db, jm, diskId, root);
+      await runner2.start();
+
+      const hashAfter = (
+        db
+          .prepare("SELECT full_hash FROM files WHERE scan_id = ? AND name = 'a.txt'")
+          .get(runner2.jobId) as any
+      ).full_hash;
+
+      // The sampled hash recomputed and matches the prior row's sampled hash
+      // (content unchanged), so full_hash is reused — SENTINEL preserved.
+      expect(hashAfter).toBe("SENTINEL");
+    });
+
+    it("recomputes full_hash when content changes (sampled_hash differs)", async () => {
+      const root = makeFixtureTree("full-hash-content-change");
+      db.prepare("UPDATE disks SET mount_path = ?, is_connected = 1 WHERE id = ?").run(root, diskId);
+
+      const runner1 = makeFullHashRunner(db, jm, diskId, root);
+      await runner1.start();
+      db.prepare("UPDATE files SET full_hash = 'SENTINEL' WHERE scan_id = ? AND name = 'a.txt'").run(runner1.jobId);
+
+      // Modify content so the sampled hash will differ.
+      await new Promise((r) => setTimeout(r, 10));
+      writeFileSync(path.join(root, "a.txt"), "totally different content here");
+
+      const runner2 = makeFullHashRunner(db, jm, diskId, root);
+      await runner2.start();
+
+      const hashAfter = (
+        db
+          .prepare("SELECT full_hash FROM files WHERE scan_id = ? AND name = 'a.txt'")
+          .get(runner2.jobId) as any
+      ).full_hash;
+
+      expect(hashAfter).not.toBe("SENTINEL");
+      expect(hashAfter).toMatch(/^[0-9a-f]{64}$/);
     });
 
     it("carries full_hash forward even when the next scan is non-fullHash", async () => {
