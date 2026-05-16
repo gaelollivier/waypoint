@@ -28,8 +28,11 @@ export const api = {
     update: (id: number, body: Partial<{ label: string; kind: "ssd" | "hdd" }>) =>
       request<Disk>(`/disks/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
 
-    scan: (id: number) =>
-      request<{ jobId: number }>(`/disks/${id}/scan`, { method: "POST" }),
+    scan: (id: number, body?: { fullHash?: boolean }) =>
+      request<{ jobId: number }>(`/disks/${id}/scan`, {
+        method: "POST",
+        body: JSON.stringify(body ?? {}),
+      }),
 
     writeSpeedTest: (id: number, body: { sizeBytes: number; mode: "null" | "random" }) =>
       request<{ jobId: number; filePath: string }>(`/disks/${id}/write-speed-test`, {

@@ -54,6 +54,7 @@ function setSearchParams(updates: Record<string, string | null>) {
 export function DiskDetailPage({ id }: { id: string }) {
   const diskId = Number(id);
   const queryClient = useQueryClient();
+  const [showScanDialog, setShowScanDialog] = useState(false);
 
   // Tab state from URL — defaults to "overview"
   const rawTab = useSearchParam("tab");
@@ -79,8 +80,9 @@ export function DiskDetailPage({ id }: { id: string }) {
   const activeJob = jobs.find((j) => ACTIVE.includes(j.status)) ?? null;
 
   const scan = useMutation({
-    mutationFn: () => api.disks.scan(diskId),
+    mutationFn: (body: { fullHash: boolean }) => api.disks.scan(diskId, body),
     onSuccess: () => {
+      setShowScanDialog(false);
       queryClient.invalidateQueries({ queryKey: ["jobs", { diskId }] });
     },
     onError: (err: any) => alert(`Scan failed: ${err.message}`),
@@ -145,7 +147,7 @@ export function DiskDetailPage({ id }: { id: string }) {
 
       <DiskHeader
         disk={disk}
-        onScan={() => scan.mutate()}
+        onScan={() => setShowScanDialog(true)}
         onWriteSpeedTest={startWriteSpeedTest}
         onReadSpeedTest={startReadSpeedTest}
         hasActiveJob={activeJob != null}
@@ -193,6 +195,14 @@ export function DiskDetailPage({ id }: { id: string }) {
       {tab === "duplicates" && <DuplicatesTab diskId={diskId} disk={disk} />}
 
       {tab === "events" && <EventsTab diskId={diskId} jobs={jobs} />}
+
+      {showScanDialog && (
+        <ScanOptionsDialog
+          isPending={scan.isPending}
+          onConfirm={(fullHash) => scan.mutate({ fullHash })}
+          onClose={() => setShowScanDialog(false)}
+        />
+      )}
     </div>
   );
 }
@@ -277,6 +287,69 @@ function DiskHeader({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Scan options dialog ──────────────────────────────────────────────────────
+
+function ScanOptionsDialog({
+  isPending,
+  onConfirm,
+  onClose,
+}: {
+  isPending: boolean;
+  onConfirm: (fullHash: boolean) => void;
+  onClose: () => void;
+}) {
+  const [fullHash, setFullHash] = useState(false);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+      <div
+        className="w-full max-w-md rounded-xl border border-zinc-700 bg-zinc-900 p-6 space-y-5"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="space-y-1">
+          <h2 className="text-base font-semibold text-white">Start Scan</h2>
+          <p className="text-sm text-zinc-500">
+            Choose whether this scan should also compute a full hash for every file.
+          </p>
+        </div>
+
+        <label className="flex items-start gap-3 rounded-lg border border-zinc-800 bg-zinc-950/40 p-4 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={fullHash}
+            onChange={(e) => setFullHash(e.target.checked)}
+            className="mt-0.5 h-4 w-4 rounded border-zinc-600 bg-zinc-800 text-blue-600 focus:ring-blue-500"
+          />
+          <span className="space-y-1">
+            <span className="block text-sm font-medium text-zinc-200">
+              Compute full hashes for every file
+            </span>
+            <span className="block text-xs leading-relaxed text-zinc-500">
+              Slower than a standard scan, but it records full hashes for later workflows such as faster duplicate cleanup.
+            </span>
+          </span>
+        </label>
+
+        <div className="flex justify-end gap-3">
+          <button
+            onClick={onClose}
+            className="rounded px-4 py-2 text-sm text-zinc-400 hover:text-white transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            disabled={isPending}
+            onClick={() => onConfirm(fullHash)}
+            className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {isPending ? "Starting…" : "Start Scan"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
