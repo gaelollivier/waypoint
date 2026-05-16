@@ -10,7 +10,7 @@
     "test:watch": "NODE_ENV=test bun test --watch"
   },
   "dependencies": {
-    "@noble/hashes": "^2.2.0",
+    "@napi-rs/blake-hash": "^1.3.6",
     "hono": "^4.12.17"
   },
   "devDependencies": {

@@ -1,6 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { _BLAKE3 } from "@noble/hashes/blake3.js";
-import { bytesToHex } from "@noble/hashes/utils.js";
+import { Blake3Hasher } from "@napi-rs/blake-hash";
 import { JobRunner } from "../job-runner";
 import type { JobManager } from "../job-manager";
 import { trace } from "../../diag/trace";
@@ -273,9 +272,9 @@ export class DuplicateDetectionJobRunner extends JobRunner {
       }
 
       entries.sort();
-      const hasher = new _BLAKE3();
+      const hasher = new Blake3Hasher();
       hasher.update(encoder.encode(entries.join("\n")));
-      contentHashes.set(dir.id, bytesToHex(hasher.digest()));
+      contentHashes.set(dir.id, hasher.digest("hex"));
     }
 
     // Write content hashes to directories table

@@ -7,5 +7,10 @@
     "dev": "bun run --cwd apps/api dev & bun run --cwd apps/web dev",
     "build": "bun run --cwd apps/web build && bun run --cwd apps/api build",
     "prepare": "git config core.hooksPath .githooks"
+  },
+  "dependencies": {
+    "@napi-rs/blake-hash": "^1.3.6",
+    "@noble/hashes": "^2.2.0",
+    "hash-wasm": "^4.12.0"
   }
 }

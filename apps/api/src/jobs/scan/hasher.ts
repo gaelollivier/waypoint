@@ -1,5 +1,4 @@
-import { _BLAKE3, blake3 } from "@noble/hashes/blake3.js";
-import { bytesToHex } from "@noble/hashes/utils.js";
+import { Blake3Hasher, blake3 } from "@napi-rs/blake-hash";
 import { readFileSlice, readFileAll, readFileStream } from "../../fs/disk-reads";
 
 export const HASH_ALGO_VERSION = 1;
@@ -30,7 +29,7 @@ export async function computeSampledHash(filePath: string, sizeBytes: number): P
     return computeFullHash(filePath);
   }
 
-  const hasher = new _BLAKE3();
+  const hasher = new Blake3Hasher();
 
   // Size prefix: 8 bytes little-endian (BigInt for > 32-bit sizes)
   const sizeBuf = new Uint8Array(8);
@@ -57,7 +56,7 @@ export async function computeSampledHash(filePath: string, sizeBytes: number): P
   // Footer
   await feed(Math.max(0, sizeBytes - FOOTER_SIZE), sizeBytes);
 
-  return bytesToHex(hasher.digest());
+  return hasher.digest("hex");
 }
 
 /**
@@ -71,7 +70,7 @@ export async function computeSampledHash(filePath: string, sizeBytes: number): P
  */
 export async function computeFullHash(filePath: string): Promise<string> {
   const buf = await readFileAll(filePath);
-  return bytesToHex(blake3(new Uint8Array(buf)));
+  return blake3(new Uint8Array(buf)).toString("hex");
 }
 
 /**
@@ -97,10 +96,10 @@ export async function computeFullHashStreaming(filePath: string): Promise<string
  * Returns a streaming BLAKE3 hasher for use during file copy (accumulate
  * as bytes are read, finalise with .digest() at the end).
  */
-export function createStreamingHasher(): InstanceType<typeof _BLAKE3> {
-  return new _BLAKE3();
+export function createStreamingHasher(): Blake3Hasher {
+  return new Blake3Hasher();
 }
 
-export function finaliseHash(hasher: InstanceType<typeof _BLAKE3>): string {
-  return bytesToHex(hasher.digest());
+export function finaliseHash(hasher: Blake3Hasher): string {
+  return hasher.digest("hex");
 }

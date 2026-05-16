@@ -13,7 +13,7 @@
  *   Worker → Main:  { type: "error", message: string }
  */
 
-import { _BLAKE3 } from "@noble/hashes/blake3.js";
+import { Blake3Hasher } from "@napi-rs/blake-hash";
 
 // -- Types ------------------------------------------------------------------
 
@@ -60,14 +60,14 @@ function toMbps(bytes: number, ms: number): number {
 
 async function computeFullHashStreaming(filePath: string): Promise<void> {
   const stream = Bun.file(filePath).stream();
-  const hasher = new _BLAKE3();
+  const hasher = new Blake3Hasher();
   const reader = stream.getReader();
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     hasher.update(value);
   }
-  hasher.digest();
+  hasher.digest("hex");
 }
 
 // -- Main benchmark logic ---------------------------------------------------
