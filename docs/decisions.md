@@ -50,17 +50,20 @@ Measured on the source SSD (photo/video-heavy personal library):
 ## Hashing
 
 - **BLAKE3** everywhere. Not SHA-256 (slower), not xxHash (not cryptographic enough for integrity verification).
+- **Implementation**: `@napi-rs/blake-hash` (native Rust NAPI binding to the official BLAKE3 crate). Saturates SSD read speed (~890 MB/s on the test SSD). Earlier we used `@noble/hashes` pure-JS BLAKE3 but it capped at ~260 MB/s — see `open-questions.md` → "BLAKE3 hashing throughput".
 - **Two hashes per file** (both BLAKE3, stored on the `files` row):
   - `sampled_hash` — primary identity for change detection. Always populated.
-  - `full_hash` — opportunistic, computed for free during copy. Nullable. Used by future "full verify" mode.
+  - `full_hash` — content hash of every byte. Nullable. Populated by (a) copy jobs (computed for free during the streaming read), (b) opt-in `fullHash` scan mode, and (c) carry-forward from a prior scan when the sampled hash still matches. Used by future "full verify" mode.
 - **Sampled hash definition** (Spacedrive's pattern):
   - Files ≤ 100KB: full hash (no useful sampling for tiny files).
   - Files > 100KB: BLAKE3 over `(size as 8 bytes) || header[0..8KB] || sample₁[10KB] || sample₂[10KB] || sample₃[10KB] || sample₄[10KB] || footer[last 8KB]`. Sample positions evenly spaced through the interior. Size prefix prevents collisions across files of different sizes with identical sampled bytes.
 
 ### Per-job hashing behavior
 
-- **Initial scan**: compute `sampled_hash` for every file. Do not compute `full_hash`.
+- **Initial scan (default)**: compute `sampled_hash` for every file. Do not compute `full_hash`.
+- **Initial scan, fullHash mode**: opt-in via `POST /api/disks/:id/scan { "fullHash": true }`. In addition to `sampled_hash`, streams every file through BLAKE3 and stores `full_hash`. Bottlenecked by disk read speed (~800 MB/s on SSD). Use when you want to populate `full_hash` ahead of a future full-verify scrub without going through a copy.
 - **Re-scan**: filter by mtime+size first (free, from `stat()`); only re-compute `sampled_hash` if mtime or size changed, or if the file is newly discovered. Files unchanged on filesystem are not re-read.
+- **Re-scan, full_hash reuse**: when a prior scan row exists and its `sampled_hash` equals the newly computed `sampled_hash`, the stored `full_hash` is carried forward. This holds even in plain (non-fullHash) re-scans, so accumulated `full_hash` data isn't dropped when a new scan row is created. Uses sampled-hash equality rather than mtime+size, so a plain `touch` doesn't trigger a full re-read.
 - **Copy job**: compute `full_hash` inline during the sequential read pass (every byte flows through the BLAKE3 hasher — free). Store `full_hash` on both the source and destination `files` rows. Source is re-validated before copy (re-stat + re-compute sampled hash); if source changed since scan, the file is skipped. No post-write hash verification — the verify job is the authoritative on-disk correctness check.
 - **Verify job (default = sampled mode)**: re-compute `sampled_hash` from disk, compare to stored `sampled_hash`. Catches change in the sampled regions; does NOT detect bit rot in unsampled regions of large files.
 - **Verify job (full mode, future v1.x)**: re-compute `full_hash` from disk, compare to stored `full_hash`. The "true scrub." Skipped if `full_hash` is null on a file (file was never copied through this tool, only scanned).

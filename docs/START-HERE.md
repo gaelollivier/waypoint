@@ -22,13 +22,13 @@ Personal backup tool for cold storage drives. SSD source → multiple HDDs (one 
 
 ## Status
 
-**Implementation in progress.** Design phase complete; milestones 1–12 done. M12 (write speed test job) complete. Next up: M13 — verify job. See `open-questions.md` for details.
+**Implementation in progress.** Design phase complete; milestones 1–12 done plus an out-of-band read-speed-test job, append-only scan snapshots, and an opt-in fullHash scan mode. Next up: M13 — verify job. See `open-questions.md` for details.
 
-**Stack**: TypeScript + Bun, Hono (HTTP), React + Vite (UI), `bun:sqlite`, BLAKE3, SSE for progress.
+**Stack**: TypeScript + Bun, Hono (HTTP), React + Vite (UI), `bun:sqlite`, BLAKE3 via `@napi-rs/blake-hash` (saturates SSD read speed), SSE for progress.
 
-**Scale baseline measured**: ~177K files / ~3.5TB on the source SSD. Standard SQLite indices are sufficient.
+**Scale baseline measured**: ~173K files / ~3.55TB on the source SSD. Standard SQLite indices are sufficient.
 
-**Test suite**: `bun test` in `apps/api/` — 102 tests across 8 files. Pre-commit hook runs `tsc --noEmit` (web) + `bun test` (API) on every commit.
+**Test suite**: `bun test` in `apps/api/` — 209 tests across 15 files. Pre-commit hook runs `tsc --noEmit` (web) + `bun test` (API) on every commit.
 
 **Diagnostic trace**: when `WAYPOINT_TRACE` is unset or non-zero, the API writes JSONL trace lines to `/tmp/waypoint-trace.log` (path overridable via `WAYPOINT_TRACE_PATH`). Includes `loop_stall` events whenever the main event loop blocks >250ms. Used to root-cause the M6 freeze (correlated-LIKE end-of-scan UPDATE, see `open-questions.md`). Set `WAYPOINT_TRACE=0` to disable.
 
@@ -65,11 +65,11 @@ Improvements planned but not yet scheduled into a milestone.
 
 | Item | Notes |
 |---|---|
-| Move heavy jobs off the main thread | Duplicate detection blocks the event loop with synchronous SQLite (GROUP BY in Phase 1, batch inserts in Phase 3). Server becomes very slow during large jobs. Options: Bun worker thread with its own SQLite connection, or paginated Phase 1 query with yields. |
+| Move duplicate detection off the main thread | Phase 1 GROUP BY and Phase 3 batch inserts block the event loop with synchronous SQLite. Server becomes very slow during large jobs. Options: Bun worker thread with its own SQLite connection, or paginated Phase 1 query with yields. (Speed-test jobs already moved to workers.) |
 | Scan ETA: switch from bytes/sec to files/sec + inode count | `bytesProcessed` is the sum of stat'd file sizes, not bytes read — a single large file causes a massive rate spike. Scan time is uniform per-inode (stat cost), so `filesPerSec` against `df -i` inode count is a much more stable ETA. Also consider widening the 5s rolling window or using an EMA. |
-| Scan snapshots / history | Version `files` table per `scan_job_id` so users can browse previous scan states and compare scans over time. Currently `files` is overwritten on each scan. |
 | Copy job: rich insight view (match scan job pattern) | Same philosophy as scan jobs — show a rich view of all available job insights in both the diff view (where the copy is initiated) and the job details page. Reuse the same component. |
 | Duplicate cleanup as a job with progress | Deletion is slow (full BLAKE3 re-hash per file). Should be a proper job with progress/pause/resume so the UI shows status rather than hanging on a single POST. |
+| fullHash scan UI | Backend supports `POST /:id/scan { fullHash: true }`; expose it as a toggle on the disk page. |
 
 Recently completed backlog:
 
@@ -79,6 +79,10 @@ Recently completed backlog:
 - Copy job progress shows pending files/bytes, ETA, and per-file byte progress for large files.
 - Copy job milestone marked complete after successful manual copy testing.
 - Write speed test job writes generated null/random data to `.waypoint-test-copy-[uuid]`, uses the same temp→rename streaming write path as copy, supports pause/resume, and shows live write-speed states/charts.
+- Read speed test job (Bun Worker, full BLAKE3 hash over the N largest files from the latest scan).
+- Append-only scan snapshots: each scan creates independent file/directory rows keyed by `scan_id`, so previous scan states are queryable for diff/history rather than overwritten.
+- BLAKE3 swapped from pure-JS `@noble/hashes` (~265 MB/s) to native `@napi-rs/blake-hash` (~890 MB/s, saturates SSD). Byte-identical output, no DB rehash. Scan/copy/read-speed-test now disk-bound rather than CPU-bound.
+- Opt-in `fullHash` scan mode (`POST /:id/scan { fullHash: true }`) that also writes `full_hash` for every file; full_hash carry-forward uses sampled-hash equality so `touch` doesn't invalidate it.
 
 ---
 

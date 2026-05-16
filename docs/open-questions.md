@@ -75,7 +75,13 @@ First UI-driven test scan run on the source SSD. Surfaced the following items, c
 ### Event-loop starvation during fast scans — 2026-05-07
 
 - Symptom: with SCAN_CONCURRENCY=32 the SSD scan hit ~12k files/sec, then the API stopped responding to **any** HTTP request (healthz timed out, jobs list timed out). Once the scan finished the API became responsive again. Process was alive throughout — pure event-loop starvation.
-- Root cause: bun:sqlite is sync, `@noble/hashes/blake3` is sync pure JS. Each "worker" returns from its tiny `await file.slice().arrayBuffer()` in roughly the same tick, then runs a long synchronous tail (BLAKE3 update + the batched `INSERT … ON CONFLICT` transaction). With 32 of those interleaved, the loop never yielded long enough for Hono to accept connections.
+- Root cause: bun:sqlite is sync, BLAKE3 update is sync (true for both the
+  original `@noble/hashes` and the current `@napi-rs/blake-hash` binding —
+  the napi call returns synchronously per chunk). Each "worker" returns from
+  its tiny `await file.slice().arrayBuffer()` in roughly the same tick, then
+  runs a long synchronous tail (hash update + the batched `INSERT … ON
+  CONFLICT` transaction). With 32 of those interleaved, the loop never
+  yielded long enough for Hono to accept connections.
 - **Cheap fix applied**:
   - `SCAN_CONCURRENCY` 32 → 8 (less back-to-back sync work piling up).
   - Added `await new Promise(r => setImmediate(r))` between directories in `scan-job.ts::execute` so the loop breathes after each batched DB write.
@@ -314,29 +320,66 @@ starved during benchmarks and the API froze (no progress updates, no page loads)
 - Workers replicate `disk-writes.ts` guardrails inline (path containment, exclusive create) since they can't share main-thread module singletons
 
 **Read speed test results (test SSD, 2026-05-15):**
-- Large video file: full BLAKE3 hash effective throughput ~260 MB/s
-- The SSD's raw sequential read is several times higher, so pure-JS BLAKE3
-  (`@noble/hashes`) is the bottleneck, not the disk
-- This means scan and verify jobs are also CPU-bound on SSDs, not I/O-bound
+- Initial measurement with `@noble/hashes` pure-JS BLAKE3: ~260 MB/s effective
+  throughput on a large video file. The SSD's raw sequential read is several
+  times higher, so the JS hasher was the bottleneck, not the disk.
+- Resolved 2026-05-16 by swapping to `@napi-rs/blake-hash` — see next section.
 
-### BLAKE3 hashing throughput — BACKLOG
+### BLAKE3 hashing throughput — DONE 2026-05-16
 
-- **Problem**: Pure-JS BLAKE3 via `@noble/hashes` tops out at ~260 MB/s on
-  this machine. SSDs are 3–4× faster. This makes the full-hash verify job and
-  copy-job inline hashing CPU-bound, not I/O-bound.
-- **Options to investigate**:
-  1. **BLAKE3 WASM build** — `@aspect-build/aspect-cli` or `aspect-build/aspect-cli`
-     ship a WASM BLAKE3; check if Bun's WASM runtime is faster than pure JS.
-  2. **Native addon via FFI** — Bun supports FFI to C/Rust. The reference BLAKE3
-     C implementation with SIMD hits ~5 GB/s. Would require building a `.dylib`.
-  3. **`bun:ffi` + system `b3sum`** — shell out to the `b3sum` CLI (Homebrew).
-     Simplest but adds a dependency and loses streaming integration.
-  4. **Move hashing to Worker threads** (already done for speed tests) — doesn't
-     make hashing faster, but at least keeps the API responsive. Already done for
-     speed tests; scan/copy/verify still hash on the main thread.
-- **Impact**: At 260 MB/s, a full verify of 3.5 TB takes ~3.7 hours. At 1 GB/s
-  (native BLAKE3 + SSD speed) it would be ~1 hour. For HDDs (~150 MB/s) the
-  disk is the bottleneck regardless, so this only matters for SSD workflows.
+- **Problem**: Pure-JS BLAKE3 via `@noble/hashes` topped out at ~260 MB/s,
+  making the read-speed test, scan, copy, and (future) verify jobs CPU-bound
+  rather than I/O-bound on SSDs.
+- **Decision**: Swapped to `@napi-rs/blake-hash`, a maintained native Rust
+  (NAPI) binding to the official BLAKE3 crate with SIMD/NEON. Byte-identical
+  BLAKE3 output, so the DB stays valid — no rehash needed.
+- **Why not other options that were on the table:**
+  - `hash-wasm` (WASM): faster than noble (~480 MB/s) but no WASM SIMD, still
+    capped well below disk speed.
+  - `bun:ffi` + libblake3: another ~2–6× faster per call, but `bun:ffi` is
+    marked experimental and we'd vendor binaries per platform. Saved as a
+    fallback if napi-rs ever becomes the bottleneck — at MB-scale chunks the
+    NAPI overhead is negligible, so this isn't expected.
+  - `b3sum` CLI: loses streaming integration, adds an install dependency.
+  - `Bun.CryptoHasher` SHA-256: ties napi for throughput but isn't BLAKE3,
+    would force a full DB rehash, and offers no upside.
+- **Benchmarks (post-swap, on the test SSD, 9 GB media file):**
+  - raw read ceiling: 891.9 MB/s
+  - `@noble/hashes` (before): 273.8 MB/s
+  - `@napi-rs/blake-hash` (after): 891.9 MB/s — saturates the disk
+- **Production read-speed test (5 files, ~75 GB total):** average 844 MB/s
+  through the unmodified job runner, end-to-end.
+- **Bench scripts checked in:** `scripts/bench-raw-read.ts` (ceiling probe)
+  and `scripts/bench-hash.ts` (variant comparison) — keep them around for
+  re-running if napi-rs is ever superseded.
+
+### fullHash scan mode — DONE 2026-05-16
+
+Now that BLAKE3 saturates disk read speed, computing the full content hash
+during a whole-disk scan is viable (not just during copy). Added an opt-in
+mode rather than making it default — most scan use cases still only need
+sampled hashing for change detection.
+
+- **API**: `POST /api/disks/:id/scan` accepts `{ fullHash: true }` in the
+  body. Without the flag, scan behaviour is unchanged. UI integration is
+  deferred — for now this is triggered programmatically (curl or a future
+  button on the disk page).
+- **Walker behaviour**: in addition to computing `sampled_hash`, each file
+  is streamed through BLAKE3 and the digest stored in `files.full_hash`.
+- **Reuse logic** (applies to all scans, not just fullHash):
+  - `sampled_hash` is reused from the previous scan when `mtime + size` are
+    unchanged. Same as before.
+  - `full_hash` is reused when the *sampled_hash* itself matches the prior
+    row's. The sampled hash is a content fingerprint, so equality implies
+    extremely high probability that bytes are identical — stronger than
+    mtime+size, which a plain `touch` would invalidate even though content
+    is the same.
+  - Carry-forward fires in non-fullHash scans too, so accumulated
+    full_hash data is preserved across plain re-scans rather than being
+    silently dropped when a new scan row is created.
+- **Cost on a fresh full-hash scan** ≈ reading every byte once
+  (~800 MB/s on the test SSD, measured 870 MB/s steady-state during the
+  first production run on 2026-05-16).
 
 ### User collaboration preferences
 

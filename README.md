@@ -26,7 +26,7 @@ A personal backup tool for rotating cold-storage USB drives.
 | Runtime | [Bun](https://bun.sh) |
 | API | [Hono](https://hono.dev) |
 | Database | `bun:sqlite` (WAL mode) |
-| Hashing | BLAKE3 (sampled for speed) |
+| Hashing | BLAKE3 via `@napi-rs/blake-hash` (sampled per file, optional full-hash scan mode) |
 | Frontend | React + Vite |
 | Progress | Server-Sent Events |
 
