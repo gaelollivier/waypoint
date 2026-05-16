@@ -13,7 +13,7 @@ typical application.
   Any bug that corrupts, truncates, overwrites, or silently skips a file on the
   backup disk could mean permanent data loss.
 - **The I/O contract:**
-  - ALL read operations go through `apps/api/src/fs/disk-io.ts`.
+  - ALL read operations go through `apps/api/src/fs/disk-reads.ts`.
   - ALL write operations go through `apps/api/src/fs/disk-writes.ts`.
   - No other source file (outside `__tests__/`) may import from `fs`,
     `fs/promises`, or use `Bun.file` / `Bun.write` / `Bun.spawnSync` directly.
@@ -23,7 +23,7 @@ typical application.
 ### 1. Enforce the I/O boundary (check this first)
 
 Search every `.ts` file under `apps/api/src/` (excluding `__tests__/`,
-`disk-io.ts`, and `disk-writes.ts`) for direct filesystem imports or calls:
+`disk-reads.ts`, and `disk-writes.ts`) for direct filesystem imports or calls:
 
 - `from "fs"` or `from "fs/promises"`
 - `Bun.file(` or `Bun.write(`
@@ -47,9 +47,9 @@ Read `apps/api/src/fs/disk-writes.ts` completely. For every exported function:
 - Are there any write functions not yet used (i.e. dead code being added
   prematurely)? Flag as WARNING — unused write surface is unnecessary risk.
 
-### 3. Audit disk-io.ts for accidental write capability
+### 3. Audit disk-reads.ts for accidental write capability
 
-Read `apps/api/src/fs/disk-io.ts` completely. Verify:
+Read `apps/api/src/fs/disk-reads.ts` completely. Verify:
 - No function in this file can modify any file on disk.
 - `Bun.spawnSync` calls are read-only tools (`df`, `diskutil`) — not shells or
   commands that could write.

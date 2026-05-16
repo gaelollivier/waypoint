@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import path from "path";
-import { readDirectory, statFile } from "../../fs/disk-io";
+import { readDirectory, statFile } from "../../fs/disk-reads";
 import { computeSampledHash, HASH_ALGO_VERSION } from "./hasher";
 import type { JobManager } from "../job-manager";
 import { trace } from "../../diag/trace";

@@ -1,5 +1,5 @@
 import path from "path";
-import { fileExists, readTextFile } from "../fs/disk-io";
+import { fileExists, readTextFile } from "../fs/disk-reads";
 import { writeDiskIdDotfile } from "../fs/disk-writes";
 
 const DISK_ID_FILENAME = ".waypoint-disk-id";

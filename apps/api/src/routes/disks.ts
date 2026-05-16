@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { getDb } from "../db/client";
 import { ensureDiskId } from "../disks/identity";
 import { detectDiskKind } from "../disks/detect";
-import { listVolumes } from "../fs/disk-io";
+import { listVolumes } from "../fs/disk-reads";
 import { registerDisk, getAllDisks, getDiskById, updateDisk } from "../disks/registry";
 import { getLockManager } from "../locks";
 import { getJobManager, registerRunner, unregisterRunner } from "../jobs";
@@ -152,7 +152,7 @@ disksRouter.post("/:id/scan", async (c) => {
 // Body: { sizeBytes?: number, mode?: "null" | "random" }
 disksRouter.post("/:id/write-speed-test", async (c) => {
   const id = Number(c.req.param("id"));
-  const body = await c.req.json<{ sizeBytes?: number; mode?: "null" | "random" }>().catch(() => ({}));
+  const body = await c.req.json<{ sizeBytes?: number; mode?: "null" | "random" }>().catch((): { sizeBytes?: number; mode?: "null" | "random" } => ({}));
   const db = getDb();
   const disk = getDiskById(db, id);
   if (!disk) return c.json({ error: "Disk not found" }, 404);

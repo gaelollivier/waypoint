@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import path from "path";
 import { getDb } from "../db/client";
-import { openPathInFinder } from "../fs/disk-io";
+import { openPathInFinder } from "../fs/disk-writes";
 
 export const systemRouter = new Hono();
 

@@ -86,7 +86,7 @@ First UI-driven test scan run on the source SSD. Surfaced the following items, c
 - **Problem**: ETA uses `remainingBytes / bytesPerSec` where `bytesPerSec` is derived from a 5-second rolling window of `bytesProcessed`. But `bytesProcessed` is the *sum of file sizes from stat()*, not actual bytes read off disk. A single large file (e.g. 500 GB video) increments `bytesProcessed` by 500 GB in one stat call, causing a momentary spike in the apparent rate and a corresponding ETA collapse then jump. On HDDs the effect is especially noisy because head-seek variance also affects the per-sample rate.
 - **Better approach**: use `filesPerSec` (already tracked) against an inode-count total fetched once at scan start via `df -i <mountPath>`. Inode usage (`iused` = used inodes ≈ files + dirs + symlinks) is available from the OS without scanning. Scan time is dominated by stat() calls which cost roughly the same per file regardless of size, so files/sec is a far more stable predictor than bytes/sec for a scan job. Bytes/sec remains the right metric for *copy* jobs where actual data movement is the bottleneck.
 - **Implementation sketch**:
-  1. Add `getDiskInodeCount(mountPath)` to `disk-io.ts` — parse `df -Pi <mountPath>` (POSIX inode output), return `iused`.
+  1. Add `getDiskInodeCount(mountPath)` to `disk-reads.ts` — parse `df -Pi <mountPath>` (POSIX inode output), return `iused`.
   2. Store it as `total_inodes` on the job row (or in `payload_json`) at scan start.
   3. ETA formula becomes `(totalInodes - job.itemsProcessed) / filesPerSec`.
   4. Keep bytes/sec chart and stat — just don't use it for ETA.
@@ -211,7 +211,7 @@ Migration 0003 used the SQLite 12-step schema change (create `jobs_new` → copy
 **History:** Briefly tried a native macOS folder picker via `osascript -e 'choose folder'`, but it only works when the browser runs on the same machine as the server. Since the tool is accessed from other devices on the local network, reverted to the volume-list approach.
 
 **Files:**
-- `disk-io.ts`: `listVolumes()` reads `/Volumes`, enriches each with `getDiskStats()`
+- `disk-reads.ts`: `listVolumes()` reads `/Volumes`, enriches each with `getDiskStats()`
 - `routes/disks.ts`: `GET /disks/volumes` route
 - `DisksPage.tsx`: `RegisterModal` with volume dropdown
 - `api/client.ts`: `api.disks.volumes()`
@@ -282,6 +282,23 @@ Implemented behavior:
 - Uses the same audited temp→rename streaming helper path as `copyFileAtomic`, with per-chunk progress feeding the existing bytes/sec samples.
 - Pause/resume checkpoints run inside the chunk loop, so large tests pause promptly.
 - Frontend launch lives on the disk overview header; job details show target file, mode, written bytes, remaining bytes, ETA, and write speed chart.
+
+### Scan warnings/errors banner in Tree view — BACKLOG
+
+- **Problem**: When a scan encounters per-file errors (stat/hash failures, permission denied), the file is silently absent from the index. The errors are logged as job events, but a user who doesn't check the Events tab could miss files that are never backed up.
+- **Proposed fix**: Add a banner at the top of the Tree view that pulls job events for the current scan. If there are any warning/error events, show "X errors / Y warnings" with a link to the Events tab (filtered to that scan). This makes scan problems immediately visible without requiring the user to proactively check events.
+- **Scope**: Frontend-only change in `TreeExplorer.tsx` or the Tree tab wrapper. Backend already has `GET /api/disks/:id/events` with job filtering.
+
+### Waypoint temp file cleanup — BACKLOG
+
+- **Problem**: Two sources of Waypoint-created temp files can accumulate on backup disks:
+  1. **Copy job orphans** (`.backup-tmp-<uuid>`): left behind when a copy is interrupted mid-file. Currently detected and logged on resume, but never cleaned up.
+  2. **Write speed test files** (`.waypoint-test-copy-<uuid>`): intentionally left for manual deletion after benchmarking.
+- **Proposed fix**: A user-triggered "Clean up Waypoint files" action on the disk page that:
+  1. Scans the disk root for files matching `.backup-tmp-*` and `.waypoint-test-copy-*`.
+  2. Shows a confirmation dialog listing every file and its size.
+  3. On confirm, moves files to `.waypoint-quarantine/` on the same disk (consistent with the quarantine-not-delete safety model in `decisions.md`).
+- **Note**: This supersedes the narrower "orphaned temp file cleanup" item mentioned in `decisions.md` § Acknowledged review gaps. The `.write-speed-tmp-*` pattern (used during atomic writes for speed tests) should also be included.
 
 ### User collaboration preferences
 

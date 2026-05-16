@@ -1,6 +1,6 @@
 import { _BLAKE3, blake3 } from "@noble/hashes/blake3.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
-import { readFileSlice, readFileAll, readFileStream } from "../../fs/disk-io";
+import { readFileSlice, readFileAll, readFileStream } from "../../fs/disk-reads";
 
 export const HASH_ALGO_VERSION = 1;
 

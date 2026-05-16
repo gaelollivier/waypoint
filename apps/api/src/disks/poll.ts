@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { readDiskId } from "./identity";
 import { markDiskConnected, markDiskDisconnected, getAllDisks } from "./registry";
-import { getDiskStats } from "../fs/disk-io";
+import { getDiskStats } from "../fs/disk-reads";
 
 const POLL_INTERVAL_MS = 5_000;
 

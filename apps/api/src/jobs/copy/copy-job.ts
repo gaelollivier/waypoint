@@ -4,7 +4,7 @@ import { JobRunner } from "../job-runner";
 import type { JobManager } from "../job-manager";
 import { LockManager } from "../../locks/lock-manager";
 import { getLockManager } from "../../locks";
-import { statFile, fileExists, getDiskStats } from "../../fs/disk-io";
+import { statFile, fileExists, getDiskStats } from "../../fs/disk-reads";
 import { createDirectory, copyFileAtomic, FileAlreadyExistsError } from "../../fs/disk-writes";
 import { computeSampledHash, HASH_ALGO_VERSION } from "../scan/hasher";
 import { recomputeAggregates } from "../scan/walker";

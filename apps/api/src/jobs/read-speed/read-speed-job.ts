@@ -1,7 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { JobRunner } from "../job-runner";
 import type { JobManager } from "../job-manager";
-import { computeSampledHash, computeFullHashStreaming } from "../scan/hasher";
 import { trace } from "../../diag/trace";
 
 interface FileTarget {
@@ -34,6 +33,7 @@ export class ReadSpeedJobRunner extends JobRunner {
   private diskId: number;
   private db: Database;
   private sampleCount: number;
+  private worker: Worker | null = null;
   private progress: ReadSpeedProgress;
 
   constructor(opts: {
@@ -52,6 +52,21 @@ export class ReadSpeedJobRunner extends JobRunner {
       filesTotal: 0,
       results: [],
     };
+  }
+
+  override pause(): void {
+    this.worker?.postMessage({ type: "pause" });
+    super.pause();
+  }
+
+  override resume(): void {
+    super.resume();
+    this.worker?.postMessage({ type: "resume" });
+  }
+
+  override cancel(): void {
+    this.worker?.postMessage({ type: "cancel" });
+    super.cancel();
   }
 
   protected async execute(): Promise<void> {
@@ -76,80 +91,94 @@ export class ReadSpeedJobRunner extends JobRunner {
       `Read speed test: benchmarking ${files.length} files (${formatBytes(files.reduce((s, f) => s + f.sizeBytes, 0))} total)`
     );
 
-    let totalSampledMs = 0;
-    let totalFullMs = 0;
-    let totalBytes = 0;
+    await this.runWorker(files);
+  }
 
-    for (const file of files) {
-      await this.checkPause();
+  private runWorker(files: FileTarget[]): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      this.worker = new Worker(
+        new URL("./read-speed-worker.ts", import.meta.url).href
+      );
 
-      // Sampled hash timing
-      const sampledStart = performance.now();
-      await computeSampledHash(file.path, file.sizeBytes);
-      const sampledMs = performance.now() - sampledStart;
+      let totalSampledMs = 0;
+      let totalFullMs = 0;
+      let totalBytes = 0;
 
-      // Full hash timing
-      const fullStart = performance.now();
-      await computeFullHashStreaming(file.path);
-      const fullMs = performance.now() - fullStart;
+      this.worker.onmessage = (event: MessageEvent) => {
+        const msg = event.data;
+        switch (msg.type) {
+          case "file_done": {
+            const result: FileResult = msg.result;
 
-      const mbps = (bytes: number, ms: number) =>
-        ms > 0 ? (bytes / (1024 * 1024)) / (ms / 1000) : 0;
+            this.progress.results.push(result);
+            this.progress.filesCompleted += 1;
+            totalSampledMs += result.sampledHashMs;
+            totalFullMs += result.fullHashMs;
+            totalBytes += result.sizeBytes;
 
-      const result: FileResult = {
-        path: file.path,
-        sizeBytes: file.sizeBytes,
-        sampledHashMs: Math.round(sampledMs),
-        sampledHashMBps: Math.round(mbps(file.sizeBytes, sampledMs) * 10) / 10,
-        fullHashMs: Math.round(fullMs),
-        fullHashMBps: Math.round(mbps(file.sizeBytes, fullMs) * 10) / 10,
+            this.incrementProgress({
+              bytesProcessed: result.sizeBytes,
+              itemsProcessed: 1,
+              progressJson: this.progress,
+            });
+
+            this.logEvent(
+              "info",
+              "file_benchmarked",
+              `${result.path}: sampled ${result.sampledHashMBps} MB/s (${result.sampledHashMs}ms), full ${result.fullHashMBps} MB/s (${result.fullHashMs}ms)`,
+              result
+            );
+            break;
+          }
+
+          case "done": {
+            const mbps = (bytes: number, ms: number) =>
+              ms > 0 ? (bytes / (1024 * 1024)) / (ms / 1000) : 0;
+
+            this.progress.summary = {
+              avgSampledMBps: Math.round(mbps(totalBytes, totalSampledMs) * 10) / 10,
+              avgFullMBps: Math.round(mbps(totalBytes, totalFullMs) * 10) / 10,
+              totalBytes,
+              totalMs: Math.round(totalSampledMs + totalFullMs),
+            };
+
+            this.broadcastProgress();
+
+            this.logEvent(
+              "info",
+              "progress_milestone",
+              `Read speed test complete: sampled avg ${this.progress.summary.avgSampledMBps} MB/s, full avg ${this.progress.summary.avgFullMBps} MB/s over ${formatBytes(totalBytes)}`
+            );
+
+            trace("read_speed_end", {
+              job_id: this.jobId,
+              files_benchmarked: files.length,
+              total_bytes: totalBytes,
+              avg_sampled_mbps: this.progress.summary.avgSampledMBps,
+              avg_full_mbps: this.progress.summary.avgFullMBps,
+            });
+
+            this.worker?.terminate();
+            this.worker = null;
+            resolve();
+            break;
+          }
+
+          case "error":
+            this.worker?.terminate();
+            this.worker = null;
+            reject(new Error(msg.message));
+            break;
+        }
       };
 
-      this.progress.results.push(result);
-      this.progress.filesCompleted += 1;
-      totalSampledMs += sampledMs;
-      totalFullMs += fullMs;
-      totalBytes += file.sizeBytes;
+      this.worker.onerror = (event) => {
+        this.worker?.terminate();
+        this.worker = null;
+        reject(new Error(`Worker error: ${event.message}`));
+      };
 
-      this.incrementProgress({
-        bytesProcessed: file.sizeBytes,
-        itemsProcessed: 1,
-        progressJson: this.progress,
-      });
-
-      this.logEvent(
-        "info",
-        "file_benchmarked",
-        `${file.path}: sampled ${result.sampledHashMBps} MB/s (${result.sampledHashMs}ms), full ${result.fullHashMBps} MB/s (${result.fullHashMs}ms)`,
-        result
-      );
-    }
-
-    // Compute summary
-    const mbps = (bytes: number, ms: number) =>
-      ms > 0 ? (bytes / (1024 * 1024)) / (ms / 1000) : 0;
-
-    this.progress.summary = {
-      avgSampledMBps: Math.round(mbps(totalBytes, totalSampledMs) * 10) / 10,
-      avgFullMBps: Math.round(mbps(totalBytes, totalFullMs) * 10) / 10,
-      totalBytes,
-      totalMs: Math.round(totalSampledMs + totalFullMs),
-    };
-
-    this.broadcastProgress();
-
-    this.logEvent(
-      "info",
-      "progress_milestone",
-      `Read speed test complete: sampled avg ${this.progress.summary.avgSampledMBps} MB/s, full avg ${this.progress.summary.avgFullMBps} MB/s over ${formatBytes(totalBytes)}`
-    );
-
-    trace("read_speed_end", {
-      job_id: this.jobId,
-      files_benchmarked: files.length,
-      total_bytes: totalBytes,
-      avg_sampled_mbps: this.progress.summary.avgSampledMBps,
-      avg_full_mbps: this.progress.summary.avgFullMBps,
+      this.worker.postMessage({ type: "start", files });
     });
   }
 
@@ -157,7 +186,6 @@ export class ReadSpeedJobRunner extends JobRunner {
    * Finds the N largest files from the latest completed scan for this disk.
    */
   private findLargestFiles(): FileTarget[] {
-    // Find latest completed scan for this disk
     const latestScan = this.db
       .prepare(
         `SELECT id FROM jobs

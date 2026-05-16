@@ -16,7 +16,7 @@
 import { appendFileSync, mkdirSync } from "fs";
 import { mkdir, open, rename, unlink } from "fs/promises";
 import path from "path";
-import { fileExists, readFileStream } from "./disk-io";
+import { fileExists, readFileStream } from "./disk-reads";
 import { computeFullHashStreaming, createStreamingHasher, finaliseHash } from "../jobs/scan/hasher";
 
 /** Yield to the event loop every 64 MB during streaming copies. */
@@ -52,6 +52,41 @@ export function createWaypointDataDirectory(): string {
 
   mkdirSync(dirPath, { recursive: true });
   return dirPath;
+}
+
+// ---------------------------------------------------------------------------
+// Host file browser integration (side-effect: launches Finder)
+// ---------------------------------------------------------------------------
+
+/**
+ * Opens a path in Finder using macOS `open`.
+ *
+ * Guardrails:
+ *   - The resolved path must be within one of the provided allowedRoots.
+ *     This is defense-in-depth — callers also validate, but this function
+ *     refuses to open arbitrary paths even if a caller forgets.
+ */
+export function openPathInFinder(absolutePath: string, allowedRoots: string[]): void {
+  const resolved = path.resolve(absolutePath);
+  const withinRoot = allowedRoots.some((root) => {
+    const resolvedRoot = path.resolve(root);
+    return resolved === resolvedRoot || resolved.startsWith(resolvedRoot + "/");
+  });
+  if (!withinRoot) {
+    throw new Error(
+      `openPathInFinder: path "${absolutePath}" is not within any allowed root`
+    );
+  }
+
+  const proc = Bun.spawnSync(["open", resolved], {
+    stderr: "pipe",
+    stdout: "ignore",
+  });
+
+  if (proc.exitCode !== 0) {
+    const stderr = proc.stderr.toString().trim();
+    throw new Error(stderr || `open failed with exit code ${proc.exitCode}`);
+  }
 }
 
 // ---------------------------------------------------------------------------

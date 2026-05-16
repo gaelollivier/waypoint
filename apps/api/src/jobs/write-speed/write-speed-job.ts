@@ -2,8 +2,7 @@ import { JobRunner } from "../job-runner";
 import type { JobManager } from "../job-manager";
 import { LockManager } from "../../locks/lock-manager";
 import { getLockManager } from "../../locks";
-import { getDiskStats } from "../../fs/disk-io";
-import { writeGeneratedTestFileAtomic } from "../../fs/disk-writes";
+import { getDiskStats } from "../../fs/disk-reads";
 import { trace } from "../../diag/trace";
 
 const PREFLIGHT_MARGIN = 256 * 1024 * 1024;
@@ -24,6 +23,7 @@ export class WriteSpeedJobRunner extends JobRunner {
   private fileUuid: string;
   private lockManager: LockManager;
   private releaseLock: (() => void) | null = null;
+  private worker: Worker | null = null;
 
   private progress: WriteSpeedProgress;
 
@@ -56,17 +56,20 @@ export class WriteSpeedJobRunner extends JobRunner {
     if (this.releaseLock) {
       this.lockManager.pause(this.diskId, this.jobId);
     }
+    this.worker?.postMessage({ type: "pause" });
     super.pause();
   }
 
   override resume(): void {
     super.resume();
+    this.worker?.postMessage({ type: "resume" });
     if (this.releaseLock) {
       this.lockManager.resume(this.diskId, this.jobId);
     }
   }
 
   override cancel(): void {
+    this.worker?.postMessage({ type: "cancel" });
     if (this.releaseLock) {
       this.releaseLock();
       this.releaseLock = null;
@@ -87,41 +90,84 @@ export class WriteSpeedJobRunner extends JobRunner {
 
     this.releaseLock = await this.lockManager.acquire(this.diskId, this.jobId);
     try {
-      await writeGeneratedTestFileAtomic({
-        destMountPath: this.mountPath,
-        fileUuid: this.fileUuid,
-        totalBytes: this.totalBytes,
-        mode: this.mode,
-        tempSuffix: crypto.randomUUID(),
-        onChunkWritten: async (bytes) => {
-          this.progress.bytesWritten += bytes;
-          this.incrementProgress({
-            bytesProcessed: bytes,
-            progressJson: this.progress,
-          });
-          await this.checkPause();
-        },
-      });
+      await this.runWorker();
     } finally {
+      this.worker?.terminate();
+      this.worker = null;
       if (this.releaseLock) {
         this.releaseLock();
         this.releaseLock = null;
       }
     }
+  }
 
-    this.progress.bytesWritten = this.totalBytes;
-    this.broadcastProgress();
-    this.logEvent(
-      "info",
-      "progress_milestone",
-      `Write speed test complete: wrote ${formatBytes(this.totalBytes)} to ${this.progress.filePath}`,
-      { filePath: this.progress.filePath, mode: this.mode }
-    );
+  private runWorker(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      this.worker = new Worker(
+        new URL("./write-speed-worker.ts", import.meta.url).href
+      );
 
-    trace("write_speed_end", {
-      job_id: this.jobId,
-      bytes_written: this.totalBytes,
-      file_path: this.progress.filePath,
+      let lastReportedBytes = 0;
+
+      this.worker.onmessage = (event: MessageEvent) => {
+        const msg = event.data;
+        switch (msg.type) {
+          case "progress": {
+            const delta = msg.bytesWritten - lastReportedBytes;
+            lastReportedBytes = msg.bytesWritten;
+            this.progress.bytesWritten = msg.bytesWritten;
+            this.incrementProgress({
+              bytesProcessed: delta,
+              progressJson: this.progress,
+            });
+            break;
+          }
+
+          case "done": {
+            const mbPerSec = msg.elapsedMs > 0
+              ? ((this.totalBytes / (1024 * 1024)) / (msg.elapsedMs / 1000)).toFixed(1)
+              : "∞";
+
+            this.progress.bytesWritten = this.totalBytes;
+            this.broadcastProgress();
+            this.logEvent(
+              "info",
+              "progress_milestone",
+              `Write speed test complete: wrote ${formatBytes(this.totalBytes)} to ${this.progress.filePath} in ${(msg.elapsedMs / 1000).toFixed(1)}s (${mbPerSec} MB/s)`,
+              { filePath: this.progress.filePath, mode: this.mode, elapsedMs: msg.elapsedMs, mbPerSec }
+            );
+
+            trace("write_speed_end", {
+              job_id: this.jobId,
+              bytes_written: this.totalBytes,
+              file_path: this.progress.filePath,
+              elapsed_ms: msg.elapsedMs,
+              mb_per_sec: mbPerSec,
+            });
+
+            resolve();
+            break;
+          }
+
+          case "error":
+            reject(new Error(msg.message));
+            break;
+        }
+      };
+
+      this.worker.onerror = (event) => {
+        reject(new Error(`Worker error: ${event.message}`));
+      };
+
+      // Start the worker
+      this.worker.postMessage({
+        type: "start",
+        destMountPath: this.mountPath,
+        fileUuid: this.fileUuid,
+        totalBytes: this.totalBytes,
+        mode: this.mode,
+        tempSuffix: crypto.randomUUID(),
+      });
     });
   }
 

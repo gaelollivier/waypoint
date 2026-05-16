@@ -1,5 +1,5 @@
 /**
- * disk-io.ts — ALL READ-ONLY FILESYSTEM AND DISK OPERATIONS.
+ * disk-reads.ts — ALL READ-ONLY FILESYSTEM AND DISK OPERATIONS.
  *
  * Every read, stat, directory listing, and disk-info spawn in the API must go
  * through this module. No other source file (outside of __tests__) may import
@@ -74,41 +74,6 @@ export async function detectDiskKind(
     return "hdd";
   } catch {
     return "hdd";
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Host file browser integration
-// ---------------------------------------------------------------------------
-
-/**
- * Opens a path in Finder using macOS `open`.
- *
- * Guardrails:
- *   - The resolved path must be within one of the provided allowedRoots.
- *     This is defense-in-depth — callers also validate, but this function
- *     refuses to open arbitrary paths even if a caller forgets.
- */
-export function openPathInFinder(absolutePath: string, allowedRoots: string[]): void {
-  const resolved = path.resolve(absolutePath);
-  const withinRoot = allowedRoots.some((root) => {
-    const resolvedRoot = path.resolve(root);
-    return resolved === resolvedRoot || resolved.startsWith(resolvedRoot + "/");
-  });
-  if (!withinRoot) {
-    throw new Error(
-      `openPathInFinder: path "${absolutePath}" is not within any allowed root`
-    );
-  }
-
-  const proc = Bun.spawnSync(["open", resolved], {
-    stderr: "pipe",
-    stdout: "ignore",
-  });
-
-  if (proc.exitCode !== 0) {
-    const stderr = proc.stderr.toString().trim();
-    throw new Error(stderr || `open failed with exit code ${proc.exitCode}`);
   }
 }
 

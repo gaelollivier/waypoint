@@ -34,7 +34,7 @@ describe("writeGeneratedTestFileAtomic", () => {
       totalBytes: 3,
       mode: "null",
       tempSuffix: "tmp",
-      onChunkWritten: (bytes) => chunks.push(bytes),
+      onChunkWritten: (bytes) => { chunks.push(bytes); },
     });
 
     const expectedPath = path.join(root, `.waypoint-test-copy-${fileUuid}`);

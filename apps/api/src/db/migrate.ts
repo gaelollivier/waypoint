@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import path from "path";
-import { listDirSync, readTextFileSync } from "../fs/disk-io";
+import { listDirSync, readTextFileSync } from "../fs/disk-reads";
 
 const MIGRATIONS_DIR = path.join(import.meta.dir, "migrations");
 

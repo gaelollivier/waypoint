@@ -1,3 +1,3 @@
-import { detectDiskKind } from "../fs/disk-io";
+import { detectDiskKind } from "../fs/disk-reads";
 
 export { detectDiskKind };
