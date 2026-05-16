@@ -148,6 +148,30 @@ describe("deleteDuplicateFile", () => {
     ).rejects.toThrow("escapes disk mount");
   });
 
+  it("rejects when delete path resolves into a prefix-similar sibling mount", async () => {
+    // Regression: path containment used to be `startsWith(mount)` with no
+    // separator boundary, so /Volumes/BackupOld matched /Volumes/Backup.
+    const parent = mkdtempSync(path.join(tmpdir(), "waypoint-prefix-"));
+    roots.push(parent);
+    const mount = path.join(parent, "Backup");
+    const sibling = path.join(parent, "BackupOld");
+    mkdirSync(mount);
+    mkdirSync(sibling);
+    writeFileSync(path.join(mount, "keep.txt"), "content");
+    writeFileSync(path.join(sibling, "escape.txt"), "content");
+
+    await expect(
+      deleteDuplicateFile({
+        deletePath: path.join(sibling, "escape.txt"),
+        keepPath: path.join(mount, "keep.txt"),
+        diskMountPath: mount,
+        ...(await makeDeleteProof(path.join(sibling, "escape.txt"), path.join(mount, "keep.txt"))),
+      })
+    ).rejects.toThrow("escapes disk mount");
+
+    expect(existsSync(path.join(sibling, "escape.txt"))).toBe(true);
+  });
+
   it("rejects when delete and keep paths are the same file", async () => {
     const root = makeRoot();
     const filePath = path.join(root, "same.txt");

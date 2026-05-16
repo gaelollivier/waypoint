@@ -14,6 +14,7 @@
  */
 
 import { Blake3Hasher } from "@napi-rs/blake-hash";
+import { readFileStream } from "../../fs/disk-reads";
 
 // -- Types ------------------------------------------------------------------
 
@@ -59,7 +60,7 @@ function toMbps(bytes: number, ms: number): number {
 // -- Hashing ----------------------------------------------------------------
 
 async function computeFullHashStreaming(filePath: string): Promise<void> {
-  const stream = Bun.file(filePath).stream();
+  const stream = readFileStream(filePath);
   const hasher = new Blake3Hasher();
   const reader = stream.getReader();
   while (true) {

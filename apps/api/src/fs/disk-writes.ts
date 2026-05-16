@@ -24,6 +24,21 @@ const YIELD_EVERY_BYTES = 64 * 1024 * 1024;
 
 const DISK_ID_FILENAME = ".waypoint-disk-id";
 
+/**
+ * Returns true iff `absolutePath` resolves to `mountPath` itself or to a path
+ * strictly underneath it. Uses a separator-aware comparison so that a sibling
+ * mount whose name shares a prefix with `mountPath` (e.g. `/Volumes/Backup`
+ * vs `/Volumes/BackupOld`) cannot be matched by a bare string prefix.
+ *
+ * Both inputs are resolved first so `..` segments are collapsed before
+ * comparison.
+ */
+function isWithinMount(absolutePath: string, mountPath: string): boolean {
+  const target = path.resolve(absolutePath);
+  const root = path.resolve(mountPath);
+  return target === root || target.startsWith(root + path.sep);
+}
+
 // ---------------------------------------------------------------------------
 // Host application data
 // ---------------------------------------------------------------------------
@@ -67,11 +82,7 @@ export function createWaypointDataDirectory(): string {
  *     refuses to open arbitrary paths even if a caller forgets.
  */
 export function openPathInFinder(absolutePath: string, allowedRoots: string[]): void {
-  const resolved = path.resolve(absolutePath);
-  const withinRoot = allowedRoots.some((root) => {
-    const resolvedRoot = path.resolve(root);
-    return resolved === resolvedRoot || resolved.startsWith(resolvedRoot + "/");
-  });
+  const withinRoot = allowedRoots.some((root) => isWithinMount(absolutePath, root));
   if (!withinRoot) {
     throw new Error(
       `openPathInFinder: path "${absolutePath}" is not within any allowed root`
@@ -188,7 +199,7 @@ export async function createDirectory(
   relativePath: string
 ): Promise<void> {
   const absolutePath = path.join(destMountPath, relativePath);
-  if (!path.resolve(absolutePath).startsWith(path.resolve(destMountPath))) {
+  if (!isWithinMount(absolutePath, destMountPath)) {
     throw new Error(
       `createDirectory: path "${relativePath}" escapes disk mount "${destMountPath}"`
     );
@@ -328,15 +339,16 @@ async function writeAtomicFileFromChunks(opts: {
 
   const destAbsPath = path.join(destMountPath, destRelativePath);
   const tempPath = destAbsPath + `${tempMarker}${tempSuffix}`;
-  const resolvedMount = path.resolve(destMountPath);
 
-  // 1. Path containment: dest and temp must both be inside the disk mount
-  if (!path.resolve(destAbsPath).startsWith(resolvedMount)) {
+  // 1. Path containment: dest and temp must both be inside the disk mount.
+  // isWithinMount is separator-aware so a sibling mount that shares a name
+  // prefix (e.g. /Volumes/Backup vs /Volumes/BackupOld) cannot be matched.
+  if (!isWithinMount(destAbsPath, destMountPath)) {
     throw new Error(
       `copyFileAtomic: dest path "${destRelativePath}" escapes disk mount "${destMountPath}"`
     );
   }
-  if (!path.resolve(tempPath).startsWith(resolvedMount)) {
+  if (!isWithinMount(tempPath, destMountPath)) {
     throw new Error(
       `copyFileAtomic: temp path escapes disk mount "${destMountPath}"`
     );
@@ -392,7 +404,14 @@ async function writeAtomicFileFromChunks(opts: {
 
   const fullHash = hasher ? finaliseHash(hasher) : null;
 
-  // 5. Atomic rename: temp → final (same directory = same filesystem, atomic on POSIX)
+  // 5. Atomic rename: temp → final (same directory = same filesystem, atomic on POSIX).
+  //
+  // Known TOCTOU window: POSIX rename(2) silently replaces the destination if
+  // one appeared between the fileExists() check above and this call. Waypoint
+  // is the sole writer on its backup disks during a copy job (write-lock
+  // enforced by the lock manager) and external Finder/Spotlight writes don't
+  // land on canonical backup paths, so the window is closed in practice.
+  // Flagged previously by /review — accepted as-is for v1.
   await rename(tempPath, destAbsPath);
 
   return { fullHash, bytesWritten };
@@ -470,15 +489,15 @@ export async function deleteDuplicateFile(opts: {
     deleteActualSampledHash,
     keepActualSampledHash,
   } = opts;
-  const resolvedMount = path.resolve(diskMountPath);
-
-  // 1. Path containment: both files must be on the expected disk
-  if (!path.resolve(deletePath).startsWith(resolvedMount)) {
+  // 1. Path containment: both files must be on the expected disk.
+  // isWithinMount enforces a path-separator boundary so a sibling mount that
+  // shares a name prefix with diskMountPath cannot satisfy this check.
+  if (!isWithinMount(deletePath, diskMountPath)) {
     throw new Error(
       `deleteDuplicateFile: delete path "${deletePath}" escapes disk mount "${diskMountPath}"`
     );
   }
-  if (!path.resolve(keepPath).startsWith(resolvedMount)) {
+  if (!isWithinMount(keepPath, diskMountPath)) {
     throw new Error(
       `deleteDuplicateFile: keep path "${keepPath}" escapes disk mount "${diskMountPath}"`
     );
