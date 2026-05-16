@@ -8,6 +8,7 @@ export class ScanJobRunner extends JobRunner {
   private db: Database;
   private diskId: number;
   private mountPath: string;
+  private fullHash: boolean;
 
   constructor(opts: {
     jobId: number;
@@ -15,15 +16,22 @@ export class ScanJobRunner extends JobRunner {
     db: Database;
     diskId: number;
     mountPath: string;
+    fullHash?: boolean;
   }) {
     super(opts.jobId, opts.jobManager);
     this.db = opts.db;
     this.diskId = opts.diskId;
     this.mountPath = opts.mountPath;
+    this.fullHash = opts.fullHash ?? false;
   }
 
   protected async execute(): Promise<void> {
-    trace("scan_start", { job_id: this.jobId, disk_id: this.diskId, mount: this.mountPath });
+    trace("scan_start", {
+      job_id: this.jobId,
+      disk_id: this.diskId,
+      mount: this.mountPath,
+      full_hash: this.fullHash,
+    });
     this.initOrResumeQueue();
 
     // Resolve the previous completed scan for this disk so the walker can
@@ -43,7 +51,8 @@ export class ScanJobRunner extends JobRunner {
         this.jobId,
         this.diskId,
         previousScanId,
-        this.jobManager
+        this.jobManager,
+        this.fullHash
       );
 
       if (result === null) break; // queue exhausted

@@ -132,12 +132,14 @@ jobsRouter.post("/:id/resume", (c) => {
       return c.json({ error: "Target disk is not connected" }, 409);
     }
 
+    const payload = job.payload_json ? JSON.parse(job.payload_json) : {};
     const runner = new ScanJobRunner({
       jobId: job.id,
       jobManager: jm,
       db,
       diskId: disk.id,
       mountPath: disk.mount_path,
+      fullHash: payload.fullHash === true,
     });
 
     registerRunner(job.id, runner);

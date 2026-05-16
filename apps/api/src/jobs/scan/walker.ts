@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 import path from "path";
 import { readDirectory, statFile } from "../../fs/disk-reads";
-import { computeSampledHash, HASH_ALGO_VERSION } from "./hasher";
+import { computeFullHashStreaming, computeSampledHash, HASH_ALGO_VERSION } from "./hasher";
 import type { JobManager } from "../job-manager";
 import { trace } from "../../diag/trace";
 import { isExcludedName } from "../../lib/excluded-names";
@@ -42,7 +42,8 @@ export async function processNextQueueEntry(
   scanJobId: number,
   diskId: number,
   previousScanId: number | null,
-  jobManager: JobManager
+  jobManager: JobManager,
+  fullHash: boolean = false
 ): Promise<{ filesIndexed: number; bytesIndexed: number } | null> {
   // Pop next pending entry atomically
   const entry = db.transaction(() => {
@@ -117,7 +118,8 @@ export async function processNextQueueEntry(
         scanJobId,
         previousScanId,
         files,
-        jobManager
+        jobManager,
+        fullHash
       );
       timings.files_total_ms = Math.round(performance.now() - tD);
       timings.files_select_ms = selectMs;
@@ -205,12 +207,18 @@ async function insertFileBatch(
   scanJobId: number,
   previousScanId: number | null,
   entries: import("fs").Dirent[],
-  jobManager: JobManager
+  jobManager: JobManager,
+  fullHashMode: boolean
 ): Promise<{ count: number; bytes: number; selectMs: number; hashPoolMs: number; insertMs: number }> {
   // Look up previous scan's rows for this directory (by path) to reuse hashes
-  // when mtime+size are unchanged.
+  // when mtime+size are unchanged. We always carry full_hash forward when it
+  // exists in the prior row — that way a non-fullHash scan doesn't lose hash
+  // data accumulated by an earlier fullHash scan.
   const tSelect = performance.now();
-  let existingMap = new Map<string, { mtime: string; size_bytes: number; sampled_hash: string | null }>();
+  let existingMap = new Map<
+    string,
+    { mtime: string; size_bytes: number; sampled_hash: string | null; full_hash: string | null }
+  >();
 
   if (previousScanId !== null) {
     // Find the same directory in the previous scan by path
@@ -223,7 +231,7 @@ async function insertFileBatch(
       const names = entries.map((e) => e.name);
       const existingRows = db
         .prepare(
-          `SELECT name, mtime, size_bytes, sampled_hash
+          `SELECT name, mtime, size_bytes, sampled_hash, full_hash
            FROM files
            WHERE scan_id = ? AND directory_id = ? AND name IN (${placeholders})`
         )
@@ -232,6 +240,7 @@ async function insertFileBatch(
         mtime: string;
         size_bytes: number;
         sampled_hash: string | null;
+        full_hash: string | null;
       }>;
       existingMap = new Map(existingRows.map((r) => [r.name, r]));
     }
@@ -244,6 +253,7 @@ async function insertFileBatch(
     sizeBytes: number;
     mtime: string;
     sampledHash: string | null;
+    fullHash: string | null;
   };
   const fileData: FileRecord[] = [];
 
@@ -254,16 +264,30 @@ async function insertFileBatch(
       const mtime = stat.mtime.toISOString();
       const sizeBytes = stat.size;
       const existing = existingMap.get(entry.name);
+      const unchanged =
+        existing != null &&
+        existing.mtime === mtime &&
+        existing.size_bytes === sizeBytes;
 
       let sampledHash: string | null = null;
-      if (existing && existing.mtime === mtime && existing.size_bytes === sizeBytes && existing.sampled_hash) {
+      let fullHash: string | null = null;
+
+      if (unchanged && existing.sampled_hash) {
         // mtime+size unchanged — reuse stored hash, skip I/O
         sampledHash = existing.sampled_hash;
       } else {
         sampledHash = await computeSampledHash(filePath, sizeBytes);
       }
 
-      fileData.push({ name: entry.name, filePath, sizeBytes, mtime, sampledHash });
+      if (unchanged && existing.full_hash) {
+        // Carry full_hash forward whenever available, even in non-fullHash
+        // scans — losing it would force a re-read on the next fullHash scan.
+        fullHash = existing.full_hash;
+      } else if (fullHashMode) {
+        fullHash = await computeFullHashStreaming(filePath);
+      }
+
+      fileData.push({ name: entry.name, filePath, sizeBytes, mtime, sampledHash, fullHash });
     } catch (err: any) {
       jobManager.logEvent(
         scanJobId,
@@ -305,8 +329,8 @@ async function insertFileBatch(
     const insertStmt = db.prepare(
       `INSERT INTO files
          (disk_id, scan_id, directory_id, name, path, size_bytes, mtime,
-          sampled_hash, hash_algo_version)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          sampled_hash, full_hash, hash_algo_version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     for (const f of fileData) {
       insertStmt.run(
@@ -318,6 +342,7 @@ async function insertFileBatch(
         f.sizeBytes,
         f.mtime,
         f.sampledHash,
+        f.fullHash,
         HASH_ALGO_VERSION,
       );
       count++;

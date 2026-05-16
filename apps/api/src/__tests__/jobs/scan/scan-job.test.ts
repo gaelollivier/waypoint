@@ -177,6 +177,102 @@ describe("ScanJobRunner", () => {
     });
   });
 
+  describe("fullHash mode", () => {
+    function makeFullHashRunner(
+      db: Database,
+      jm: JobManager,
+      diskId: number,
+      mountPath: string
+    ): ScanJobRunner {
+      const job = jm.createJob({
+        type: "scan",
+        targetDiskId: diskId,
+        payload: { fullHash: true },
+      });
+      return new ScanJobRunner({
+        jobId: job.id,
+        jobManager: jm,
+        db,
+        diskId,
+        mountPath,
+        fullHash: true,
+      });
+    }
+
+    it("populates files.full_hash for every file when enabled", async () => {
+      const root = makeFixtureTree("full-hash-on");
+      db.prepare("UPDATE disks SET mount_path = ?, is_connected = 1 WHERE id = ?").run(root, diskId);
+      const runner = makeFullHashRunner(db, jm, diskId, root);
+      await runner.start();
+
+      const rows = db
+        .prepare("SELECT name, full_hash FROM files WHERE scan_id = ?")
+        .all(runner.jobId) as Array<{ name: string; full_hash: string | null }>;
+
+      expect(rows).toHaveLength(4);
+      for (const row of rows) {
+        expect(row.full_hash).not.toBeNull();
+        expect(row.full_hash).toMatch(/^[0-9a-f]{64}$/);
+      }
+    });
+
+    it("leaves full_hash null when the flag is not set", async () => {
+      const root = makeFixtureTree("full-hash-off");
+      db.prepare("UPDATE disks SET mount_path = ?, is_connected = 1 WHERE id = ?").run(root, diskId);
+      const runner = makeRunner(db, jm, diskId, root);
+      await runner.start();
+
+      const withFull = db
+        .prepare("SELECT COUNT(*) AS n FROM files WHERE scan_id = ? AND full_hash IS NOT NULL")
+        .get(runner.jobId) as { n: number };
+      expect(withFull.n).toBe(0);
+    });
+
+    it("reuses full_hash from a prior scan when mtime+size match", async () => {
+      const root = makeFixtureTree("full-hash-reuse");
+      db.prepare("UPDATE disks SET mount_path = ?, is_connected = 1 WHERE id = ?").run(root, diskId);
+
+      const runner1 = makeFullHashRunner(db, jm, diskId, root);
+      await runner1.start();
+
+      // Mark the stored full_hash with a sentinel so we can detect re-hashing.
+      db.prepare("UPDATE files SET full_hash = 'SENTINEL' WHERE scan_id = ? AND name = 'a.txt'").run(runner1.jobId);
+
+      const runner2 = makeFullHashRunner(db, jm, diskId, root);
+      await runner2.start();
+
+      const hashAfter = (
+        db
+          .prepare("SELECT full_hash FROM files WHERE scan_id = ? AND name = 'a.txt'")
+          .get(runner2.jobId) as any
+      ).full_hash;
+
+      expect(hashAfter).toBe("SENTINEL");
+    });
+
+    it("carries full_hash forward even when the next scan is non-fullHash", async () => {
+      const root = makeFixtureTree("full-hash-carry");
+      db.prepare("UPDATE disks SET mount_path = ?, is_connected = 1 WHERE id = ?").run(root, diskId);
+
+      const runner1 = makeFullHashRunner(db, jm, diskId, root);
+      await runner1.start();
+      db.prepare("UPDATE files SET full_hash = 'CARRY' WHERE scan_id = ? AND name = 'a.txt'").run(runner1.jobId);
+
+      // Second scan is a plain sampled scan — but it should still preserve
+      // the stored full_hash so we don't drop accumulated data.
+      const runner2 = makeRunner(db, jm, diskId, root);
+      await runner2.start();
+
+      const hashAfter = (
+        db
+          .prepare("SELECT full_hash FROM files WHERE scan_id = ? AND name = 'a.txt'")
+          .get(runner2.jobId) as any
+      ).full_hash;
+
+      expect(hashAfter).toBe("CARRY");
+    });
+  });
+
   describe("walk queue / resumability", () => {
     it("seeds the walk queue with root on first run", async () => {
       const root = makeFixtureTree("queue-seed");

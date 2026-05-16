@@ -106,9 +106,16 @@ disksRouter.patch("/:id", async (c) => {
   return c.json(formatDisk(updated!));
 });
 
-// Start a scan job for a disk
+// Start a scan job for a disk.
+// Body (optional): { fullHash?: boolean } — when true, the walker also
+// streams every file through BLAKE3 and stores the result in files.full_hash.
 disksRouter.post("/:id/scan", async (c) => {
   const id = Number(c.req.param("id"));
+  const body = await c.req
+    .json<{ fullHash?: boolean }>()
+    .catch(() => ({} as { fullHash?: boolean }));
+  const fullHash = body.fullHash === true;
+
   const db = getDb();
   const disk = getDiskById(db, id);
   if (!disk) return c.json({ error: "Disk not found" }, 404);
@@ -130,7 +137,11 @@ disksRouter.post("/:id/scan", async (c) => {
   }
 
   const jm = getJobManager();
-  const job = jm.createJob({ type: "scan", targetDiskId: id });
+  const job = jm.createJob({
+    type: "scan",
+    targetDiskId: id,
+    payload: { fullHash },
+  });
 
   const runner = new ScanJobRunner({
     jobId: job.id,
@@ -138,6 +149,7 @@ disksRouter.post("/:id/scan", async (c) => {
     db,
     diskId: id,
     mountPath: disk.mount_path,
+    fullHash,
   });
 
   registerRunner(job.id, runner);
