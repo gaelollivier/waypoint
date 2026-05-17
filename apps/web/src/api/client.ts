@@ -1,6 +1,17 @@
-import type { CleanupResponse, Disk, DiffJobSummary, DiffTreeResponse, DuplicateDirectoriesResponse, DuplicateJobSummary, DuplicateScanSummary, DuplicatesResponse, Job, JobEvent, TreeResponse } from "./types";
+import type { CleanupResponse, DirectoryGroupFilesResponse, DirectoryGroupInventoryResponse, Disk, DiffJobSummary, DiffTreeResponse, DuplicateDirectoriesResponse, DuplicateJobSummary, DuplicateScanSummary, DuplicatesResponse, Job, JobEvent, TreeResponse } from "./types";
 
 const BASE = "/api";
+
+export class ApiError extends Error {
+  status: number;
+  body: unknown;
+  constructor(message: string, status: number, body: unknown) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.body = body;
+  }
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
@@ -9,7 +20,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error((body as any).error ?? `HTTP ${res.status}`);
+    throw new ApiError(
+      (body as any).error ?? `HTTP ${res.status}`,
+      res.status,
+      body
+    );
   }
   return res.json() as Promise<T>;
 }
@@ -149,6 +164,34 @@ export const api = {
       const qs = params.toString();
       return request<DuplicateDirectoriesResponse>(`/disks/${diskId}/duplicates/directories${qs ? "?" + qs : ""}`);
     },
+
+    directoryGroupFiles: (diskId: number, groupId: number) =>
+      request<DirectoryGroupFilesResponse>(
+        `/disks/${diskId}/duplicates/directories/${groupId}/files`
+      ),
+
+    directoryGroupInventory: (diskId: number, groupId: number) =>
+      request<DirectoryGroupInventoryResponse>(
+        `/disks/${diskId}/duplicates/directories/${groupId}/inventory`
+      ),
+
+    directoryCleanup: (
+      diskId: number,
+      body: {
+        duplicateDirectoryGroupId: number;
+        keepDirectory: { directoryId: number; path: string };
+        deleteDirectories: Array<{
+          directoryId: number;
+          path: string;
+          files: Array<{ fileId: number; relativePath: string }>;
+          excludedFiles?: Array<{ relativePath: string }>;
+        }>;
+      }
+    ) =>
+      request<{ jobId: number }>(`/disks/${diskId}/duplicates/directories/cleanup`, {
+        method: "POST",
+        body: JSON.stringify({ ...body, initiatedFromWebUI: true }),
+      }),
 
     list: (
       diskId: number,

@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "../api/client";
-import type { CleanupResponse, DuplicateDirectoriesResponse, DuplicateGroup, DuplicateGroupFile, DuplicatesResponse } from "../api/types";
+import { ApiError, api } from "../api/client";
+import { navigate } from "./Router";
+import type { CleanupHaltedBody, CleanupResponse, DirectoryGroupInventoryResponse, DuplicateDirectoriesResponse, DuplicateDirectoryGroup, DuplicateDirectoryGroupMember, DuplicateGroup, DuplicateGroupFile, DuplicatesResponse } from "../api/types";
 import { formatBytes } from "../lib/format";
 
 const PAGE_SIZE = 50;
@@ -203,6 +204,7 @@ function CleanupConfirmDialog({
   keepFile,
   isPending,
   lastResult,
+  haltedResult,
   onConfirm,
   onClose,
 }: {
@@ -210,6 +212,7 @@ function CleanupConfirmDialog({
   keepFile: DuplicateGroupFile;
   isPending: boolean;
   lastResult: CleanupResponse | null;
+  haltedResult: CleanupHaltedBody | null;
   onConfirm: () => void;
   onClose: () => void;
 }) {
@@ -224,29 +227,39 @@ function CleanupConfirmDialog({
       >
         <h2 className="text-base font-semibold text-white">Confirm Deletion</h2>
 
-        {lastResult ? (
-          // Show results after cleanup
+        {haltedResult ? (
+          // Cleanup halted mid-way: surface the failure and what got deleted before
+          <div className="space-y-3">
+            <div className="rounded-lg border border-red-800/50 bg-red-950/30 px-4 py-3 space-y-2">
+              <div className="text-[10px] uppercase tracking-wider text-red-400 font-medium">
+                Cleanup halted
+              </div>
+              <div className="text-sm text-red-300 break-words">{haltedResult.error}</div>
+              <div className="text-xs text-red-400/80">
+                <span className="font-mono break-all">{haltedResult.failedAt.path}</span>
+              </div>
+            </div>
+
+            <div className="text-sm text-zinc-300">
+              {haltedResult.deletedCount} file{haltedResult.deletedCount !== 1 ? "s" : ""} deleted
+              {" "}before the halt; remaining files were not attempted.
+            </div>
+
+            <div className="flex justify-end">
+              <button
+                onClick={onClose}
+                className="rounded bg-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-600 transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        ) : lastResult ? (
+          // Show results after a clean cleanup
           <div className="space-y-3">
             <div className="text-sm text-zinc-300">
               {lastResult.deletedCount} file{lastResult.deletedCount !== 1 ? "s" : ""} deleted
-              {lastResult.errorCount > 0 && (
-                <span className="text-red-400">
-                  , {lastResult.errorCount} error{lastResult.errorCount !== 1 ? "s" : ""}
-                </span>
-              )}
             </div>
-
-            {lastResult.errorCount > 0 && (
-              <div className="space-y-1">
-                {lastResult.results
-                  .filter((r) => r.status === "error")
-                  .map((r) => (
-                    <div key={r.fileId} className="rounded border border-red-800/50 bg-red-950/30 px-3 py-2 text-xs text-red-400">
-                      <span className="font-mono">{r.path}</span>: {r.error}
-                    </div>
-                  ))}
-              </div>
-            )}
 
             <div className="flex justify-end">
               <button
@@ -355,10 +368,16 @@ function Pagination({
 function DirectoryGroupCard({
   group,
   diskId,
+  onCleanupRequest,
 }: {
-  group: DuplicateDirectoriesResponse["groups"][number];
+  group: DuplicateDirectoryGroup;
   diskId: number;
+  onCleanupRequest: (group: DuplicateDirectoryGroup, keepDir: DuplicateDirectoryGroupMember) => void;
 }) {
+  const [keepId, setKeepId] = useState<number | null>(null);
+  const keepDir = group.directories.find((d) => d.directoryId === keepId) ?? null;
+  const deleteCount = keepDir ? group.directories.length - 1 : 0;
+
   return (
     <div className="px-4 py-3 space-y-2">
       <div className="flex items-center gap-3 flex-wrap text-xs">
@@ -379,17 +398,319 @@ function DirectoryGroupCard({
 
       <div className="space-y-1">
         {group.directories.map((d) => (
-          <div key={d.directoryId} className="flex items-center gap-2">
-            <span className="shrink-0 text-xs text-zinc-600">📁</span>
+          <div key={d.directoryId} className="flex items-center gap-2 group">
+            {group.canDelete ? (
+              <button
+                onClick={() => setKeepId(keepId === d.directoryId ? null : d.directoryId)}
+                className={`shrink-0 w-5 h-5 rounded border text-xs flex items-center justify-center transition-colors ${
+                  keepId === d.directoryId
+                    ? "border-green-500 bg-green-500/20 text-green-400"
+                    : "border-zinc-700 bg-zinc-800 text-zinc-600 hover:border-zinc-500"
+                }`}
+                title={keepId === d.directoryId ? "Deselect" : "Keep this copy"}
+              >
+                {keepId === d.directoryId ? "✓" : ""}
+              </button>
+            ) : (
+              <span className="shrink-0 text-xs text-zinc-600">📁</span>
+            )}
             <a
               href={`/disks/${diskId}?tab=tree&treePath=${encodeURIComponent(d.path)}`}
-              className="font-mono text-xs text-zinc-500 truncate hover:text-zinc-300 hover:underline"
+              className={`font-mono text-xs truncate hover:underline ${
+                keepId !== null && keepId !== d.directoryId
+                  ? "text-red-400/70 line-through"
+                  : "text-zinc-500 hover:text-zinc-300"
+              }`}
               title={d.path}
             >
               {d.path}
             </a>
+            {keepId === d.directoryId && (
+              <span className="text-[10px] text-green-500 font-medium shrink-0">KEEP</span>
+            )}
           </div>
         ))}
+      </div>
+
+      {keepDir && deleteCount > 0 && (
+        <div className="pt-1 flex items-center gap-3">
+          <button
+            onClick={() => onCleanupRequest(group, keepDir)}
+            className="rounded bg-red-600/80 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-500 transition-colors"
+          >
+            Delete {deleteCount} duplicate director{deleteCount > 1 ? "ies" : "y"}
+          </button>
+        </div>
+      )}
+      {!group.canDelete && (
+        <div className="text-xs text-amber-400/80">
+          Cleanup requires full-hash evidence for every file. Run a fullHash scan first.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Directory cleanup confirmation dialog
+// ---------------------------------------------------------------------------
+
+function DirectoryCleanupConfirmDialog({
+  group,
+  keepDir,
+  diskId,
+  onClose,
+}: {
+  group: DuplicateDirectoryGroup;
+  keepDir: DuplicateDirectoryGroupMember;
+  diskId: number;
+  onClose: () => void;
+}) {
+  // Live inventory: walks each delete folder on disk right now so the user
+  // sees every file (including .DS_Store and other noise the scan ignored)
+  // before confirming.
+  const inventoryQuery = useQuery<DirectoryGroupInventoryResponse>({
+    queryKey: ["directoryGroupInventory", diskId, group.id],
+    queryFn: () => api.duplicates.directoryGroupInventory(diskId, group.id),
+    retry: false,
+  });
+
+  const deleteDirectories =
+    inventoryQuery.data?.members.filter((m) => m.directoryId !== keepDir.directoryId) ?? [];
+
+  // A delete folder with any unknown file, missing file, or directoryExists=false
+  // is unsafe to cleanup until the user re-scans — we don't want a one-click
+  // path to deleting anything that wasn't reviewed.
+  const blockers: string[] = [];
+  for (const m of deleteDirectories) {
+    if (!m.directoryExists) {
+      blockers.push(`${m.path}: directory no longer exists on disk`);
+      continue;
+    }
+    if (m.unknown.length > 0) {
+      blockers.push(
+        `${m.path}: ${m.unknown.length} unknown file${m.unknown.length === 1 ? "" : "s"} on disk that the scan never saw`
+      );
+    }
+    if (m.missing.length > 0) {
+      blockers.push(
+        `${m.path}: ${m.missing.length} scanned file${m.missing.length === 1 ? "" : "s"} no longer on disk`
+      );
+    }
+  }
+  const blocked = blockers.length > 0;
+
+  const totalBytesFreed = group.totalSizeBytes * deleteDirectories.length;
+  const totalScanned = deleteDirectories.reduce((acc, m) => acc + m.scanned.length, 0);
+  const totalExcluded = deleteDirectories.reduce((acc, m) => acc + m.excluded.length, 0);
+
+  const cleanup = useMutation({
+    mutationFn: () =>
+      api.duplicates.directoryCleanup(diskId, {
+        duplicateDirectoryGroupId: group.id,
+        keepDirectory: { directoryId: keepDir.directoryId, path: keepDir.path },
+        deleteDirectories: deleteDirectories.map((m) => ({
+          directoryId: m.directoryId,
+          path: m.path,
+          files: m.scanned.map((f) => ({ fileId: f.fileId, relativePath: f.relativePath })),
+          excludedFiles: m.excluded.map((f) => ({ relativePath: f.relativePath })),
+        })),
+      }),
+    onSuccess: ({ jobId }) => {
+      navigate(`/jobs/${jobId}`);
+    },
+  });
+
+  const errorMessage = cleanup.error instanceof Error ? cleanup.error.message : null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+      <div
+        className="w-full max-w-2xl rounded-xl border border-zinc-700 bg-zinc-900 p-6 space-y-5 max-h-[85vh] overflow-hidden flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 className="text-base font-semibold text-white shrink-0">Confirm Directory Deletion</h2>
+
+        {inventoryQuery.isLoading && (
+          <div className="text-sm text-zinc-500">Reading folder contents from disk…</div>
+        )}
+        {inventoryQuery.error && (
+          <div className="rounded-lg border border-red-800/50 bg-red-950/30 px-4 py-3 text-xs text-red-400">
+            {inventoryQuery.error instanceof Error ? inventoryQuery.error.message : String(inventoryQuery.error)}
+          </div>
+        )}
+
+        {inventoryQuery.data && (
+          <div className="space-y-4 overflow-y-auto pr-1 flex-1">
+            <div className="rounded-lg border border-green-800/50 bg-green-950/20 px-4 py-3">
+              <div className="text-[10px] uppercase tracking-wider text-green-500 font-medium mb-1">Keeping</div>
+              <div className="font-mono text-xs text-green-400 break-all">{keepDir.path}</div>
+            </div>
+
+            {deleteDirectories.map((m) => {
+              const memberBlocked =
+                !m.directoryExists || m.unknown.length > 0 || m.missing.length > 0;
+              return (
+                <details
+                  key={m.directoryId}
+                  className={
+                    memberBlocked
+                      ? "rounded-lg border border-amber-700/50 bg-amber-950/20"
+                      : "rounded-lg border border-red-800/50 bg-red-950/20"
+                  }
+                >
+                  <summary className="px-4 py-3 cursor-pointer text-xs flex items-center justify-between">
+                    <div>
+                      <div
+                        className={
+                          memberBlocked
+                            ? "text-[10px] uppercase tracking-wider text-amber-400 font-medium mb-1"
+                            : "text-[10px] uppercase tracking-wider text-red-400 font-medium mb-1"
+                        }
+                      >
+                        {memberBlocked ? "Cannot delete — needs re-scan" : "Deleting directory"}
+                      </div>
+                      <div
+                        className={memberBlocked ? "font-mono text-amber-300 break-all" : "font-mono text-red-300 break-all"}
+                      >
+                        {m.path}
+                      </div>
+                    </div>
+                    <span
+                      className={memberBlocked ? "text-amber-400/80 ml-3 shrink-0" : "text-red-400/80 ml-3 shrink-0"}
+                    >
+                      {m.scanned.length + m.excluded.length} file
+                      {m.scanned.length + m.excluded.length === 1 ? "" : "s"}
+                    </span>
+                  </summary>
+                  <div className="px-4 pb-3 space-y-2 border-t border-red-800/30 pt-2 max-h-72 overflow-y-auto">
+                    {!m.directoryExists && (
+                      <div className="text-[11px] text-amber-300/90 italic">
+                        This folder is no longer on disk. Re-run duplicate detection to refresh the result.
+                      </div>
+                    )}
+
+                    {m.scanned.length > 0 && (
+                      <div>
+                        <div className="text-[10px] uppercase tracking-wider text-zinc-400 mb-1">
+                          Scan-recorded files ({m.scanned.length})
+                        </div>
+                        {m.scanned.map((f) => (
+                          <div
+                            key={`s-${f.fileId}`}
+                            className="flex items-center justify-between gap-2 font-mono text-[11px] text-red-300/80"
+                          >
+                            <span className="break-all">{f.relativePath}</span>
+                            <span className="text-red-400/60 shrink-0">{formatBytes(f.sizeBytes)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {m.excluded.length > 0 && (
+                      <div>
+                        <div className="text-[10px] uppercase tracking-wider text-zinc-400 mb-1">
+                          OS noise ({m.excluded.length})
+                        </div>
+                        {m.excluded.map((f) => (
+                          <div
+                            key={`e-${f.relativePath}`}
+                            className="flex items-center justify-between gap-2 font-mono text-[11px] text-zinc-400"
+                          >
+                            <span className="break-all">{f.relativePath}</span>
+                            <span className="text-zinc-500 shrink-0">{formatBytes(f.sizeBytes)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {m.unknown.length > 0 && (
+                      <div>
+                        <div className="text-[10px] uppercase tracking-wider text-amber-400 mb-1">
+                          Unknown files — block deletion ({m.unknown.length})
+                        </div>
+                        {m.unknown.map((f) => (
+                          <div
+                            key={`u-${f.relativePath}`}
+                            className="flex items-center justify-between gap-2 font-mono text-[11px] text-amber-300"
+                          >
+                            <span className="break-all">{f.relativePath}</span>
+                            <span className="text-amber-400/60 shrink-0">{formatBytes(f.sizeBytes)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {m.missing.length > 0 && (
+                      <div>
+                        <div className="text-[10px] uppercase tracking-wider text-amber-400 mb-1">
+                          Missing on disk — block deletion ({m.missing.length})
+                        </div>
+                        {m.missing.map((f) => (
+                          <div
+                            key={`m-${f.fileId}`}
+                            className="font-mono text-[11px] text-amber-300 break-all"
+                          >
+                            {f.relativePath}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </details>
+              );
+            })}
+
+            <div className="text-xs text-zinc-500">
+              {totalScanned} scanned file{totalScanned === 1 ? "" : "s"}
+              {totalExcluded > 0 && ` + ${totalExcluded} OS noise file${totalExcluded === 1 ? "" : "s"}`}
+              {" "}across {deleteDirectories.length}{" "}
+              director{deleteDirectories.length === 1 ? "y" : "ies"}.
+              Space freed: <span className="text-zinc-300">{formatBytes(totalBytesFreed)}</span>
+            </div>
+
+            {blocked && (
+              <div className="rounded-lg border border-amber-800/50 bg-amber-950/20 px-4 py-3 text-xs text-amber-400 space-y-1">
+                <div className="font-medium">Cannot proceed — re-scan and retry:</div>
+                <ul className="list-disc list-inside space-y-0.5">
+                  {blockers.map((b, i) => (
+                    <li key={i} className="break-words">{b}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {!blocked && (
+              <div className="rounded-lg border border-amber-800/50 bg-amber-950/20 px-4 py-3 text-xs text-amber-400">
+                This action is permanent. The cleanup runs as a background job and
+                fails fast on any drift — if anything changes between this dialog
+                and the job, nothing in that folder is deleted.
+              </div>
+            )}
+
+            {errorMessage && (
+              <div className="rounded-lg border border-red-800/50 bg-red-950/30 px-4 py-3 text-xs text-red-400 break-words">
+                {errorMessage}
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="flex justify-end gap-3 shrink-0">
+          <button
+            onClick={onClose}
+            className="rounded px-4 py-2 text-sm text-zinc-400 hover:text-white transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            disabled={!inventoryQuery.data || cleanup.isPending || blocked}
+            onClick={() => cleanup.mutate()}
+            className="rounded bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {cleanup.isPending ? "Starting…" : `Delete ${deleteDirectories.length} director${deleteDirectories.length === 1 ? "y" : "ies"}`}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -418,6 +739,10 @@ function DirectoryDuplicatesView({
   const [sort, setSort] = useState<DirSortOption>("wasted");
   const [minSize, setMinSize] = useState(0);
   const [offset, setOffset] = useState(0);
+  const [cleanupTarget, setCleanupTarget] = useState<{
+    group: DuplicateDirectoryGroup;
+    keepDir: DuplicateDirectoryGroupMember;
+  } | null>(null);
 
   const { data, isLoading, error } = useQuery<DuplicateDirectoriesResponse>({
     queryKey: ["duplicateDirectories", diskId, duplicateJobId, sort, minSize, offset],
@@ -503,6 +828,7 @@ function DirectoryDuplicatesView({
                 key={group.id}
                 group={group}
                 diskId={diskId}
+                onCleanupRequest={(g, keepDir) => setCleanupTarget({ group: g, keepDir })}
               />
             ))}
           </div>
@@ -515,6 +841,15 @@ function DirectoryDuplicatesView({
           total={data.totalGroups}
           onPrev={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
           onNext={() => setOffset((o) => o + PAGE_SIZE)}
+        />
+      )}
+
+      {cleanupTarget && (
+        <DirectoryCleanupConfirmDialog
+          group={cleanupTarget.group}
+          keepDir={cleanupTarget.keepDir}
+          diskId={diskId}
+          onClose={() => setCleanupTarget(null)}
         />
       )}
     </div>
@@ -703,6 +1038,11 @@ export function DuplicateExplorer({
           keepFile={cleanupTarget.keepFile}
           isPending={cleanup.isPending}
           lastResult={cleanup.data ?? null}
+          haltedResult={
+            cleanup.error instanceof ApiError && cleanup.error.status === 500
+              ? (cleanup.error.body as CleanupHaltedBody)
+              : null
+          }
           onConfirm={handleConfirm}
           onClose={handleCloseDialog}
         />

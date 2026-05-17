@@ -55,6 +55,23 @@ export class LockManager {
   }
 
   /**
+   * Non-blocking variant of `acquire`. Returns a release function if the lock
+   * was free, or `null` if another job already holds it (active or paused).
+   *
+   * Used by destructive operations that should fail-fast when a copy job (or
+   * any other writer) is already running on the disk, rather than queueing
+   * behind it.
+   *
+   * Synchronous and atomic in JS's single-threaded model: the `has` check
+   * and the `_setLock` cannot be interleaved with another acquire.
+   */
+  tryAcquire(diskId: number, jobId: number): (() => void) | null {
+    if (this.locks.has(diskId)) return null;
+    this._setLock(diskId, jobId, "active");
+    return () => this.release(diskId);
+  }
+
+  /**
    * Transitions an active lock to paused. The holder keeps the slot but yields
    * no writes. Other writers remain queued.
    * Throws if the disk has no active lock or the lock is held by a different job.

@@ -171,6 +171,16 @@ not re-report these unless the underlying design changes.
 - **Copy hash verifies source bytes, not written bytes:** By design for this
   milestone. Later fullHash scans + diffs are the authoritative on-disk
   correctness check.
+- **Plain re-scans carry forward `full_hash` keyed on sampled-hash equality:**
+  A plain re-scan reuses the prior row's `full_hash` when the freshly-computed
+  `sampled_hash` matches the stored one. If a file was modified in regions
+  outside the sampled bytes (the documented sampling blind spot), the carried-
+  forward `full_hash` becomes stale, and a later duplicate cleanup may treat
+  byte-different files as identical. Same trade-off family as the sampled-hash
+  blind spot above; mitigated the same way (periodic fullHash scans re-read
+  every byte and overwrite carry-forward state). The cleanup freshness check
+  also verifies mtime equality against the stored row, which closes the
+  scan-to-cleanup window but not the prior-scan-to-this-scan window.
 
 ## Explicit non-goals (v1)
 

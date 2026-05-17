@@ -100,16 +100,24 @@ export interface DuplicatesResponse {
 export interface CleanupResult {
   fileId: number;
   path: string;
-  status: "deleted" | "error";
-  error?: string;
+  status: "deleted";
 }
 
 export interface CleanupResponse {
   duplicateGroupId: number;
   keepFileId: number;
   deletedCount: number;
-  errorCount: number;
   results: CleanupResult[];
+}
+
+/** Returned in the 500 response body when a cleanup halts mid-way. */
+export interface CleanupHaltedBody {
+  error: string;
+  duplicateGroupId: number;
+  keepFileId: number;
+  deletedCount: number;
+  results: CleanupResult[];
+  failedAt: { fileId: number; path: string; error: string };
 }
 
 export interface DuplicateDirectoryGroupMember {
@@ -124,7 +132,75 @@ export interface DuplicateDirectoryGroup {
   fileCount: number;
   totalSizeBytes: number;
   wastedBytes: number;
+  /** True iff every descendant file across every member directory has full_hash. */
+  canDelete: boolean;
   directories: DuplicateDirectoryGroupMember[];
+}
+
+/** File belonging to a member directory of a directory duplicate group. */
+export interface DirectoryGroupMemberFile {
+  fileId: number;
+  path: string;
+  relativePath: string;
+  sizeBytes: number;
+  hasFullHash: boolean;
+}
+
+/** Per-member-directory file list for the cleanup confirmation dialog. */
+export interface DirectoryGroupFilesResponse {
+  groupId: number;
+  canDelete: boolean;
+  members: Array<{
+    directoryId: number;
+    path: string;
+    files: DirectoryGroupMemberFile[];
+  }>;
+}
+
+/** A file currently on disk inside a member directory. */
+export interface InventoryFile {
+  relativePath: string;
+  sizeBytes: number;
+}
+
+/** A file the scan recorded but that is currently missing from disk. */
+export interface InventoryMissingFile {
+  fileId: number;
+  relativePath: string;
+}
+
+/** Scanned files include the DB id and full-hash availability flag. */
+export interface InventoryScannedFile extends InventoryFile {
+  fileId: number;
+  hasFullHash: boolean;
+}
+
+/**
+ * Per-member-directory live inventory. The dialog uses this to show the user
+ * every file they're about to delete (including OS noise files that the scan
+ * intentionally never indexed) and to block confirmation when an unknown
+ * file is on disk inside a delete folder.
+ */
+export interface DirectoryGroupInventoryMember {
+  directoryId: number;
+  path: string;
+  /** False when the directory has been removed from disk since the scan. */
+  directoryExists: boolean;
+  /** Files matching the scan record by relative path. */
+  scanned: InventoryScannedFile[];
+  /** Files matching the noise-file allowlist (.DS_Store, ._*, .waypoint-disk-id). */
+  excluded: InventoryFile[];
+  /** Files present on disk that are neither scanned nor on the noise allowlist. */
+  unknown: InventoryFile[];
+  /** Files the scan recorded but that are missing from disk right now. */
+  missing: InventoryMissingFile[];
+}
+
+export interface DirectoryGroupInventoryResponse {
+  groupId: number;
+  /** Same eligibility flag as the corresponding directory group. */
+  canDelete: boolean;
+  members: DirectoryGroupInventoryMember[];
 }
 
 export interface DuplicateDirectoriesResponse {

@@ -223,22 +223,27 @@ export class DuplicateDetectionJobRunner extends JobRunner {
 
     if (dirs.length === 0) return 0;
 
-    // Load all files with their directory_id and sampled_hash
+    // Load all files with their directory_id, sampled_hash, and full_hash.
+    // full_hash is needed to compute is_eligible_for_cleanup per directory:
+    // a directory is cleanup-eligible only when every descendant file has a
+    // non-null full_hash (the cleanup gateway requires it for the per-file
+    // proof bundle).
     const files = this.db
       .prepare(
-        `SELECT directory_id, name, sampled_hash
+        `SELECT directory_id, name, sampled_hash, full_hash
          FROM files WHERE scan_id = ?`
       )
       .all(scanId) as Array<{
         directory_id: number;
         name: string;
         sampled_hash: string | null;
+        full_hash: string | null;
       }>;
 
     // Build lookup maps
     const dirById = new Map<number, typeof dirs[number]>();
     const childrenByParent = new Map<number, number[]>();
-    const filesByDir = new Map<number, Array<{ name: string; sampledHash: string | null }>>();
+    const filesByDir = new Map<number, Array<{ name: string; sampledHash: string | null; fullHash: string | null }>>();
 
     for (const d of dirs) {
       dirById.set(d.id, d);
@@ -258,7 +263,7 @@ export class DuplicateDetectionJobRunner extends JobRunner {
         dirFiles = [];
         filesByDir.set(f.directory_id, dirFiles);
       }
-      dirFiles.push({ name: f.name, sampledHash: f.sampled_hash });
+      dirFiles.push({ name: f.name, sampledHash: f.sampled_hash, fullHash: f.full_hash });
     }
 
     // Compute depth for each directory via memoized parent walk
@@ -276,13 +281,18 @@ export class DuplicateDetectionJobRunner extends JobRunner {
     // Sort deepest-first for bottom-up processing
     const sortedDirs = [...dirs].sort((a, b) => getDepth(b.id) - getDepth(a.id));
 
-    // Compute content hashes bottom-up
+    // Compute content hashes bottom-up. In the same pass, track whether
+    // every descendant file under each directory carries a non-null
+    // full_hash — that flag drives is_eligible_for_cleanup on the group
+    // and gates the destructive UI affordance.
     const contentHashes = new Map<number, string | null>();
+    const fullyHashed = new Map<number, boolean>();
     const encoder = new TextEncoder();
 
     for (const dir of sortedDirs) {
       const entries: string[] = [];
       let hasNull = false;
+      let allFullHashed = true;
 
       // Direct child files
       const dirFiles = filesByDir.get(dir.id) ?? [];
@@ -291,6 +301,7 @@ export class DuplicateDetectionJobRunner extends JobRunner {
           hasNull = true;
           break;
         }
+        if (f.fullHash == null) allFullHashed = false;
         entries.push(`${f.name}\0${f.sampledHash}`);
       }
 
@@ -306,11 +317,15 @@ export class DuplicateDetectionJobRunner extends JobRunner {
           const childDir = dirById.get(childId);
           if (!childDir) throw new Error(`invariant: child dir ${childId} not found`);
           entries.push(`${childDir.name}/\0${childHash}`);
+          // Propagate the descendant flag upward only when the child's
+          // own subtree is fully hashed.
+          if (fullyHashed.get(childId) !== true) allFullHashed = false;
         }
       }
 
       if (hasNull) {
         contentHashes.set(dir.id, null);
+        fullyHashed.set(dir.id, false);
         continue;
       }
 
@@ -318,6 +333,7 @@ export class DuplicateDetectionJobRunner extends JobRunner {
       const hasher = new Blake3Hasher();
       hasher.update(encoder.encode(entries.join("\n")));
       contentHashes.set(dir.id, hasher.digest("hex"));
+      fullyHashed.set(dir.id, allFullHashed);
     }
 
     // Write content hashes to directories table
@@ -354,6 +370,7 @@ export class DuplicateDetectionJobRunner extends JobRunner {
       contentHash: string;
       dirIds: number[];
       totalSizeBytes: number;
+      isEligibleForCleanup: boolean;
     }> = [];
 
     // Collect all dir IDs that are part of any duplicate group
@@ -361,10 +378,15 @@ export class DuplicateDetectionJobRunner extends JobRunner {
 
     for (const [hash, dirIds] of hashGroups) {
       if (dirIds.length < 2) continue;
+      // Cleanup eligibility: every member directory's entire subtree must
+      // have non-null full_hash on every file. Even one missing full_hash
+      // anywhere in any member breaks the per-file proof bundle.
+      const isEligibleForCleanup = dirIds.every((id) => fullyHashed.get(id) === true);
       duplicateEntries.push({
         contentHash: hash,
         dirIds,
         totalSizeBytes: dirById.get(dirIds[0])!.total_size_bytes,
+        isEligibleForCleanup,
       });
       for (const id of dirIds) dirsInDuplicateGroups.add(id);
     }
@@ -400,8 +422,8 @@ export class DuplicateDetectionJobRunner extends JobRunner {
     if (filteredEntries.length > 0) {
       const insertDirGroup = this.db.prepare(
         `INSERT INTO duplicate_directory_groups
-           (duplicate_job_id, content_hash, directory_count, total_size_bytes, wasted_bytes)
-         VALUES (?, ?, ?, ?, ?)
+           (duplicate_job_id, content_hash, directory_count, total_size_bytes, wasted_bytes, is_eligible_for_cleanup)
+         VALUES (?, ?, ?, ?, ?, ?)
          RETURNING id`
       );
       const insertDirMember = this.db.prepare(
@@ -419,7 +441,8 @@ export class DuplicateDetectionJobRunner extends JobRunner {
               entry.contentHash,
               entry.dirIds.length,
               entry.totalSizeBytes,
-              wastedBytes
+              wastedBytes,
+              entry.isEligibleForCleanup ? 1 : 0
             ) as { id: number };
 
             for (const dirId of entry.dirIds) {

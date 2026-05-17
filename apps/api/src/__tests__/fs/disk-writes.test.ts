@@ -2,8 +2,9 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
-import { deleteDuplicateFile, writeGeneratedTestFileAtomic } from "../../fs/disk-writes";
-import { computeFullHashStreaming, computeSampledHash } from "../../jobs/scan/hasher";
+import { deleteDuplicateFile, deleteExcludedNoiseFile, removeEmptyDirectoryInsideMount, writeGeneratedTestFileAtomic } from "../../fs/disk-writes";
+import { computeFullHashStreaming } from "../../jobs/scan/hasher";
+import { computeFileFreshness } from "../../lib/freshness";
 import { JobManager } from "../../jobs/job-manager";
 import { ScanJobRunner } from "../../jobs/scan/scan-job";
 import { DuplicateDetectionJobRunner } from "../../jobs/duplicates/duplicate-job";
@@ -23,18 +24,18 @@ async function makeDeleteProof(deletePath: string, keepPath: string) {
     computeFullHashStreaming(deletePath),
     computeFullHashStreaming(keepPath),
   ]);
-  const [deleteActualSampledHash, keepActualSampledHash] = await Promise.all([
-    computeSampledHash(deletePath, readFileSync(deletePath).byteLength),
-    computeSampledHash(keepPath, readFileSync(keepPath).byteLength),
+  const [deleteActual, keepActual] = await Promise.all([
+    computeFileFreshness(deletePath),
+    computeFileFreshness(keepPath),
   ]);
   return {
     expectedFullHash: keepFullHash,
     deleteFullHash,
     keepFullHash,
-    deleteExpectedSampledHash: deleteActualSampledHash,
-    keepExpectedSampledHash: keepActualSampledHash,
-    deleteActualSampledHash,
-    keepActualSampledHash,
+    deleteExpected: deleteActual,
+    keepExpected: keepActual,
+    deleteActual,
+    keepActual,
   };
 }
 
@@ -253,10 +254,27 @@ describe("deleteDuplicateFile", () => {
     const deletePath = files[1].path;
 
     const scanFiles = db
-      .prepare("SELECT path, sampled_hash, full_hash FROM files WHERE scan_id = ? ORDER BY path")
-      .all(scanJob.id) as Array<{ path: string; sampled_hash: string; full_hash: string }>;
+      .prepare("SELECT path, sampled_hash, full_hash, size_bytes, mtime FROM files WHERE scan_id = ? ORDER BY path")
+      .all(scanJob.id) as Array<{
+        path: string;
+        sampled_hash: string;
+        full_hash: string;
+        size_bytes: number;
+        mtime: string;
+      }>;
     const keepScan = scanFiles.find((f) => f.path === keepPath)!;
     const deleteScan = scanFiles.find((f) => f.path === deletePath)!;
+
+    const keepExpected = {
+      size: keepScan.size_bytes,
+      mtime: keepScan.mtime,
+      sampledHash: keepScan.sampled_hash,
+    };
+    const deleteExpected = {
+      size: deleteScan.size_bytes,
+      mtime: deleteScan.mtime,
+      sampledHash: deleteScan.sampled_hash,
+    };
 
     const result = await deleteDuplicateFile({
       deletePath,
@@ -265,15 +283,126 @@ describe("deleteDuplicateFile", () => {
       expectedFullHash: keepScan.full_hash,
       deleteFullHash: deleteScan.full_hash,
       keepFullHash: keepScan.full_hash,
-      deleteExpectedSampledHash: deleteScan.sampled_hash,
-      keepExpectedSampledHash: keepScan.sampled_hash,
-      deleteActualSampledHash: deleteScan.sampled_hash,
-      keepActualSampledHash: keepScan.sampled_hash,
+      deleteExpected,
+      keepExpected,
+      deleteActual: deleteExpected,
+      keepActual: keepExpected,
     });
 
     expect(result.fullHash).toBeTruthy();
     // files[0] = backup/img.jpg (kept), files[1] = photos/img.jpg (deleted)
     expect(existsSync(path.join(root, "backup", "img.jpg"))).toBe(true);
     expect(existsSync(path.join(root, "photos", "img.jpg"))).toBe(false);
+  });
+});
+
+describe("deleteExcludedNoiseFile", () => {
+  it("deletes a .DS_Store file inside the mount", async () => {
+    const root = makeRoot();
+    const dsStore = path.join(root, ".DS_Store");
+    writeFileSync(dsStore, "finder metadata");
+
+    await deleteExcludedNoiseFile({ filePath: dsStore, diskMountPath: root });
+    expect(existsSync(dsStore)).toBe(false);
+  });
+
+  it("deletes a resource-fork sidecar (._foo)", async () => {
+    const root = makeRoot();
+    const sidecar = path.join(root, "._photo.jpg");
+    writeFileSync(sidecar, "resource fork");
+
+    await deleteExcludedNoiseFile({ filePath: sidecar, diskMountPath: root });
+    expect(existsSync(sidecar)).toBe(false);
+  });
+
+  it("refuses to delete a file whose name is not on the noise allowlist", async () => {
+    const root = makeRoot();
+    const userFile = path.join(root, "important.txt");
+    writeFileSync(userFile, "do not delete");
+
+    await expect(
+      deleteExcludedNoiseFile({ filePath: userFile, diskMountPath: root })
+    ).rejects.toThrow(/not on the noise-file allowlist/);
+    expect(existsSync(userFile)).toBe(true);
+  });
+
+  it("refuses paths that escape the disk mount", async () => {
+    const mount = makeRoot();
+    const outside = makeRoot();
+    const dsStore = path.join(outside, ".DS_Store");
+    writeFileSync(dsStore, "x");
+
+    await expect(
+      deleteExcludedNoiseFile({ filePath: dsStore, diskMountPath: mount })
+    ).rejects.toThrow(/escapes disk mount/);
+    expect(existsSync(dsStore)).toBe(true);
+  });
+
+  it("rejects sibling-mount prefix collisions (Backup vs BackupOld)", async () => {
+    const parent = mkdtempSync(path.join(tmpdir(), "waypoint-noise-prefix-"));
+    roots.push(parent);
+    const mount = path.join(parent, "Backup");
+    const sibling = path.join(parent, "BackupOld");
+    mkdirSync(mount);
+    mkdirSync(sibling);
+    const dsStore = path.join(sibling, ".DS_Store");
+    writeFileSync(dsStore, "x");
+
+    await expect(
+      deleteExcludedNoiseFile({ filePath: dsStore, diskMountPath: mount })
+    ).rejects.toThrow(/escapes disk mount/);
+    expect(existsSync(dsStore)).toBe(true);
+  });
+
+  it("throws if the noise file does not exist", async () => {
+    const root = makeRoot();
+    await expect(
+      deleteExcludedNoiseFile({
+        filePath: path.join(root, ".DS_Store"),
+        diskMountPath: root,
+      })
+    ).rejects.toThrow(/does not exist/);
+  });
+});
+
+describe("removeEmptyDirectoryInsideMount", () => {
+  it("removes an empty directory inside the mount", async () => {
+    const root = makeRoot();
+    const dir = path.join(root, "empty");
+    mkdirSync(dir);
+    expect(existsSync(dir)).toBe(true);
+
+    await removeEmptyDirectoryInsideMount({ directoryPath: dir, diskMountPath: root });
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  it("refuses to remove a path outside the mount", async () => {
+    const mount = makeRoot();
+    const outside = makeRoot();
+    const dir = path.join(outside, "x");
+    mkdirSync(dir);
+    await expect(
+      removeEmptyDirectoryInsideMount({ directoryPath: dir, diskMountPath: mount })
+    ).rejects.toThrow(/escapes disk mount/);
+    expect(existsSync(dir)).toBe(true);
+  });
+
+  it("refuses to remove the disk mount root itself", async () => {
+    const root = makeRoot();
+    await expect(
+      removeEmptyDirectoryInsideMount({ directoryPath: root, diskMountPath: root })
+    ).rejects.toThrow(/disk mount root/);
+    expect(existsSync(root)).toBe(true);
+  });
+
+  it("refuses non-empty directories (kernel ENOTEMPTY)", async () => {
+    const root = makeRoot();
+    const dir = path.join(root, "non-empty");
+    mkdirSync(dir);
+    writeFileSync(path.join(dir, "file.txt"), "x");
+    await expect(
+      removeEmptyDirectoryInsideMount({ directoryPath: dir, diskMountPath: root })
+    ).rejects.toThrow();
+    expect(existsSync(dir)).toBe(true);
   });
 });

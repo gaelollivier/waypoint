@@ -7,6 +7,7 @@ export type JobType =
   | "backup"
   | "diff"
   | "duplicate_detection"
+  | "directory_duplicate_cleanup"
   | "write_speed_test"
   | "read_speed_test";
 export type JobStatus = "queued" | "running" | "paused" | "completed" | "failed" | "cancelled";

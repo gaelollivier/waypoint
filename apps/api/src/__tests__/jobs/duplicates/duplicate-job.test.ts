@@ -6,7 +6,8 @@ import { JobManager } from "../../../jobs/job-manager";
 import { ScanJobRunner } from "../../../jobs/scan/scan-job";
 import { DuplicateDetectionJobRunner } from "../../../jobs/duplicates/duplicate-job";
 import { deleteDuplicateFile } from "../../../fs/disk-writes";
-import { computeFullHashStreaming, computeSampledHash } from "../../../jobs/scan/hasher";
+import { computeFullHashStreaming } from "../../../jobs/scan/hasher";
+import { computeFileFreshness } from "../../../lib/freshness";
 import { makeTestDb, insertDisk } from "../../helpers";
 import { EXCLUDED_NAMES_SQL } from "../../../lib/excluded-names";
 
@@ -81,18 +82,18 @@ async function makeDeleteProof(deletePath: string, keepPath: string) {
     computeFullHashStreaming(deletePath),
     computeFullHashStreaming(keepPath),
   ]);
-  const [deleteActualSampledHash, keepActualSampledHash] = await Promise.all([
-    computeSampledHash(deletePath, 17),
-    computeSampledHash(keepPath, 17),
+  const [deleteActual, keepActual] = await Promise.all([
+    computeFileFreshness(deletePath),
+    computeFileFreshness(keepPath),
   ]);
   return {
     expectedFullHash: keepFullHash,
     deleteFullHash,
     keepFullHash,
-    deleteExpectedSampledHash: deleteActualSampledHash,
-    keepExpectedSampledHash: keepActualSampledHash,
-    deleteActualSampledHash,
-    keepActualSampledHash,
+    deleteExpected: deleteActual,
+    keepExpected: keepActual,
+    deleteActual,
+    keepActual,
   };
 }
 
@@ -252,6 +253,48 @@ describe("DuplicateDetectionJobRunner", () => {
       "vacation-1.jpg",
       "vacation-1.jpg",
     ]);
+  });
+
+  it("marks directory groups eligible for cleanup only when all descendants have full_hash", async () => {
+    // Sampled scan: identical "album/" dirs exist but no full_hash on any file.
+    const root = path.join(TMP_BASE, "dir-eligibility-sampled");
+    writeTree(root, {
+      "album-a/img1.jpg": "img1-content",
+      "album-a/img2.jpg": "img2-content",
+      "album-b/img1.jpg": "img1-content",
+      "album-b/img2.jpg": "img2-content",
+    });
+    await scanDisk(db, jm, diskId, root);
+    let jobId = await runDuplicateDetection(db, jm, diskId);
+
+    const sampledGroup = db
+      .prepare(
+        "SELECT id, is_eligible_for_cleanup FROM duplicate_directory_groups WHERE duplicate_job_id = ?"
+      )
+      .get(jobId) as { id: number; is_eligible_for_cleanup: number };
+    expect(sampledGroup).toBeDefined();
+    expect(sampledGroup.is_eligible_for_cleanup).toBe(0);
+
+    // Re-scan with fullHash so every descendant file now carries a full_hash.
+    const fullScan = jm.createJob({ type: "scan", targetDiskId: diskId, payload: { fullHash: true } });
+    const fullRunner = new ScanJobRunner({
+      jobId: fullScan.id,
+      jobManager: jm,
+      db,
+      diskId,
+      mountPath: root,
+      fullHash: true,
+    });
+    await fullRunner.start();
+    jobId = await runDuplicateDetection(db, jm, diskId);
+
+    const fullGroup = db
+      .prepare(
+        "SELECT id, is_eligible_for_cleanup FROM duplicate_directory_groups WHERE duplicate_job_id = ?"
+      )
+      .get(jobId) as { id: number; is_eligible_for_cleanup: number };
+    expect(fullGroup).toBeDefined();
+    expect(fullGroup.is_eligible_for_cleanup).toBe(1);
   });
 
   it("deleted_at column tracks cleanup and prevents double-deletion", async () => {

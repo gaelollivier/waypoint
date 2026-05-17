@@ -14,10 +14,12 @@
  */
 
 import { appendFileSync, mkdirSync } from "fs";
-import { mkdir, open, rename, unlink } from "fs/promises";
+import { mkdir, open, rename, rmdir, unlink } from "fs/promises";
 import path from "path";
 import { fileExists, readFileStream } from "./disk-reads";
 import { createStreamingHasher, finaliseHash } from "../jobs/scan/hasher";
+import { freshnessMismatchReason, type FileFreshness } from "../lib/freshness";
+import { isExcludedName } from "../lib/excluded-names";
 
 /** Yield to the event loop every 64 MB during streaming copies. */
 const YIELD_EVERY_BYTES = 64 * 1024 * 1024;
@@ -82,7 +84,8 @@ export function createWaypointDataDirectory(): string {
  *     refuses to open arbitrary paths even if a caller forgets.
  */
 export function openPathInFinder(absolutePath: string, allowedRoots: string[]): void {
-  const withinRoot = allowedRoots.some((root) => isWithinMount(absolutePath, root));
+  const resolved = path.resolve(absolutePath);
+  const withinRoot = allowedRoots.some((root) => isWithinMount(resolved, root));
   if (!withinRoot) {
     throw new Error(
       `openPathInFinder: path "${absolutePath}" is not within any allowed root`
@@ -452,15 +455,17 @@ function fillRandom(chunk: Uint8Array): void {
  *
  * Guardrails:
  *   1. Path containment: deletePath and keepPath must resolve within diskMountPath
- *   2. Existence: both the file to delete and the file to keep must exist
- *   3. Persisted identity: both files must carry the same selected-scan full hash
- *   4. Freshness: both files' freshly recomputed sampled hashes must still match
- *      the sampled hashes recorded by that same selected scan
- *   5. Distinctness: the two paths must not resolve to the same file
+ *   2. Distinctness: the two paths must not resolve to the same file
+ *   3. Existence: both the file to delete and the file to keep must exist
+ *   4. Persisted identity: both files must carry the same selected-scan full hash
+ *   5. Freshness: each file's current (size, mtime, sampled_hash) must match
+ *      what the selected scan recorded. See `lib/freshness.ts` for the rule;
+ *      the three signals together cover truncation, mtime drift, and sampled
+ *      content change including the unsampled-bytes mtime cross-check.
  *
- * The route recomputes sampled hashes immediately before calling this gateway;
- * this function re-validates the resulting proof bundle before unlinking so the
- * only write-capable function still owns the final deletion decision.
+ * The caller computes the actual freshness off disk immediately before calling
+ * this gateway; this function re-validates the proof bundle before unlinking
+ * so the only write-capable function still owns the final deletion decision.
  *
  * This function is intentionally NOT batched. Each file is deleted one at a
  * time so that any mid-sequence failure leaves the remaining files intact.
@@ -472,10 +477,10 @@ export async function deleteDuplicateFile(opts: {
   expectedFullHash: string;
   deleteFullHash: string;
   keepFullHash: string;
-  deleteExpectedSampledHash: string;
-  keepExpectedSampledHash: string;
-  deleteActualSampledHash: string;
-  keepActualSampledHash: string;
+  deleteExpected: FileFreshness;
+  keepExpected: FileFreshness;
+  deleteActual: FileFreshness;
+  keepActual: FileFreshness;
 }): Promise<{ fullHash: string }> {
   const {
     deletePath,
@@ -484,10 +489,10 @@ export async function deleteDuplicateFile(opts: {
     expectedFullHash,
     deleteFullHash,
     keepFullHash,
-    deleteExpectedSampledHash,
-    keepExpectedSampledHash,
-    deleteActualSampledHash,
-    keepActualSampledHash,
+    deleteExpected,
+    keepExpected,
+    deleteActual,
+    keepActual,
   } = opts;
   // 1. Path containment: both files must be on the expected disk.
   // isWithinMount enforces a path-separator boundary so a sibling mount that
@@ -529,20 +534,116 @@ export async function deleteDuplicateFile(opts: {
     );
   }
 
-  // 5. Both files must still match that selected scan right now.
-  if (deleteActualSampledHash !== deleteExpectedSampledHash) {
-    throw new Error(
-      "deleteDuplicateFile: sampled hash mismatch for file to delete. Refusing to delete."
-    );
+  // 5. Both files must still match what the selected scan recorded right now
+  // — size, mtime, and sampled hash all agree. See `lib/freshness.ts` for the
+  // composition: each signal catches a different kind of drift.
+  const deleteReason = freshnessMismatchReason(deleteExpected, deleteActual);
+  if (deleteReason) {
+    throw new Error(`deleteDuplicateFile: freshness drift on file to delete (${deleteReason}). Refusing to delete.`);
   }
-  if (keepActualSampledHash !== keepExpectedSampledHash) {
-    throw new Error(
-      "deleteDuplicateFile: sampled hash mismatch for file to keep. Refusing to delete."
-    );
+  const keepReason = freshnessMismatchReason(keepExpected, keepActual);
+  if (keepReason) {
+    throw new Error(`deleteDuplicateFile: freshness drift on file to keep (${keepReason}). Refusing to delete.`);
   }
 
   // All guardrails passed — delete the file
   await unlink(deletePath);
 
   return { fullHash: expectedFullHash };
+}
+
+// ---------------------------------------------------------------------------
+// Excluded "noise" file deletion (for directory duplicate cleanup)
+// ---------------------------------------------------------------------------
+
+/**
+ * DELETE: Removes a single OS/Waypoint noise file (e.g. `.DS_Store`, `._*`,
+ * `.waypoint-disk-id`) that the scanner intentionally never indexed.
+ *
+ * Why this exists:
+ *   The directory-duplicate cleanup flow needs to leave delete folders fully
+ *   empty so they can be rmdir'd. macOS sprinkles `.DS_Store` into every
+ *   folder Finder ever touched, and resource-fork sidecars (`._*`) appear
+ *   alongside files copied from old HFS+ media. These are not in the scan
+ *   record (scanner filters them via `isExcludedName`), so the per-file
+ *   delete gateway with its hash proof bundle cannot speak to them.
+ *
+ * Safety story (no hash proof needed, name-based allowlist instead):
+ *   1. Path containment: filePath must resolve within diskMountPath. The
+ *      same separator-aware check the other gateways use.
+ *   2. Name allowlist: basename(filePath) must satisfy `isExcludedName`.
+ *      This is the entire identity proof — only files matching that hard
+ *      allowlist may be deleted by this gateway, ever.
+ *   3. Existence: file must exist on disk right now.
+ *   4. Kernel-enforced kind safety: `unlink` on a directory throws EISDIR,
+ *      and on a symlink it removes the symlink (not the target). So the
+ *      worst case for any unexpected kind is a clean error or a no-op.
+ *
+ * Like `deleteDuplicateFile`, this is intentionally not batched: each call
+ * deletes exactly one file so a mid-loop failure leaves the rest intact.
+ */
+export async function deleteExcludedNoiseFile(opts: {
+  filePath: string;
+  diskMountPath: string;
+}): Promise<void> {
+  const { filePath, diskMountPath } = opts;
+
+  if (!isWithinMount(filePath, diskMountPath)) {
+    throw new Error(
+      `deleteExcludedNoiseFile: path "${filePath}" escapes disk mount "${diskMountPath}"`
+    );
+  }
+
+  const basename = path.basename(filePath);
+  if (!isExcludedName(basename)) {
+    throw new Error(
+      `deleteExcludedNoiseFile: refusing to delete "${basename}" — name is not on the noise-file allowlist`
+    );
+  }
+
+  if (!(await fileExists(filePath))) {
+    throw new Error(`deleteExcludedNoiseFile: file does not exist: "${filePath}"`);
+  }
+
+  await unlink(filePath);
+}
+
+// ---------------------------------------------------------------------------
+// Empty directory removal (for directory duplicate cleanup)
+// ---------------------------------------------------------------------------
+
+/**
+ * DELETE: Removes a directory that must already be empty.
+ *
+ * Used by the directory-duplicate cleanup job after every descendant file
+ * has been unlinked. POSIX rmdir(2) returns ENOTEMPTY for non-empty
+ * directories, so the kernel itself enforces the "must be empty" invariant
+ * — we cannot accidentally rm -rf anything from this gateway.
+ *
+ * Guardrails:
+ *   1. Path containment: directoryPath must resolve inside diskMountPath.
+ *   2. Distinctness: the path must not equal the disk mount root itself —
+ *      removing the mount point would orphan all scan data and is never
+ *      a legitimate cleanup step.
+ *   3. Kernel-enforced: rmdir refuses non-empty directories with ENOTEMPTY.
+ */
+export async function removeEmptyDirectoryInsideMount(opts: {
+  directoryPath: string;
+  diskMountPath: string;
+}): Promise<void> {
+  const { directoryPath, diskMountPath } = opts;
+
+  if (!isWithinMount(directoryPath, diskMountPath)) {
+    throw new Error(
+      `removeEmptyDirectoryInsideMount: path "${directoryPath}" escapes disk mount "${diskMountPath}"`
+    );
+  }
+
+  if (path.resolve(directoryPath) === path.resolve(diskMountPath)) {
+    throw new Error(
+      `removeEmptyDirectoryInsideMount: refusing to remove disk mount root "${diskMountPath}"`
+    );
+  }
+
+  await rmdir(directoryPath);
 }
