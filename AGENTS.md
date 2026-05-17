@@ -7,6 +7,30 @@ Before making changes in this repository, read:
 - `.claude/commands/`
 - `docs/START-HERE.md`
 
+## Commands — always use these, never bare tools
+
+Run from the repo root. The root `package.json` fans out to both workspaces.
+
+| Task | Command |
+|---|---|
+| Install deps | `bun install` |
+| Dev server (API + web) | `bun run dev` |
+| Typecheck both workspaces | `bun run typecheck` |
+| Run API tests | `bun run test` |
+| Watch tests | `bun run test:watch` |
+| Production build | `bun run build` |
+
+**Do not call `tsc`, `vite`, `bunx tsc`, `bun build`, or `bun --watch ...`
+directly.** Use the scripts above so:
+
+- behavior matches CI and the user's local loop,
+- a missing tool surfaces as "add a script" rather than per-agent invention,
+- output stays consistent across sessions.
+
+If the workflow you want isn't covered by an existing script, add one to the
+appropriate `package.json` (root or workspace) and document it here. Don't
+work around the missing script with an ad-hoc invocation.
+
 ## Default workflow
 
 - After every change, open a pull request into `main`

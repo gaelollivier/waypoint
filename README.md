@@ -53,16 +53,22 @@ docs/      Design docs (brief, decisions, schema, research)
 
 Requires [Bun](https://bun.sh/docs/installation).
 
-```bash
-bun install        # install dependencies (from repo root)
-bun run dev        # start API (:3000) + Vite dev server (:5173)
-```
+Run everything from the repo root — the root `package.json` fans out to both
+workspaces, so you never need `cd apps/...` for the common loop:
 
 ```bash
-cd apps/api
-bun run test       # run test suite
-bun run test:watch # watch mode
+bun install         # install dependencies
+bun run dev         # API (:3000) + Vite dev server (:5173)
+bun run typecheck   # tsc --noEmit in apps/api and apps/web
+bun run test        # API test suite (no web tests yet)
+bun run test:watch  # watch mode
+bun run build       # production build of both workspaces
 ```
+
+The same scripts exist inside each workspace (`apps/api`, `apps/web`) if you
+want to scope to one — but prefer the root commands so the cadence stays
+consistent and CI matches local. Avoid invoking `tsc`, `vite`, or `bun --watch`
+directly; if something is missing, add a script rather than working around it.
 
 ---
 
