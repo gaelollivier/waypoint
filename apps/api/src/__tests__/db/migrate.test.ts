@@ -3,6 +3,8 @@ import { Database } from "bun:sqlite";
 import { runMigrations } from "../../db/migrate";
 
 const EXPECTED_TABLES = [
+  "agent_notes",
+  "cleanup_suggestions",
   "copy_items",
   "deleted_directories",
   "deleted_files",
@@ -24,6 +26,8 @@ const EXPECTED_TABLES = [
   "scan_walk_queue",
   "verify_items",
 ];
+
+const LATEST_MIGRATION_VERSION = 18;
 
 function getTables(db: Database): string[] {
   return (
@@ -48,7 +52,7 @@ describe("runMigrations", () => {
   it("sets user_version to the latest migration after migration", () => {
     const db = new Database(":memory:");
     runMigrations(db);
-    expect(getUserVersion(db)).toBe(17);
+    expect(getUserVersion(db)).toBe(LATEST_MIGRATION_VERSION);
   });
 
   it("is idempotent: running twice does not error or duplicate tables", () => {
@@ -57,7 +61,7 @@ describe("runMigrations", () => {
     runMigrations(db);
     runMigrations(db); // second run — should be no-op
     expect(getTables(db)).toEqual(EXPECTED_TABLES);
-    expect(getUserVersion(db)).toBe(17);
+    expect(getUserVersion(db)).toBe(LATEST_MIGRATION_VERSION);
   });
 
   it("enforces foreign keys (PRAGMA foreign_keys = ON)", () => {

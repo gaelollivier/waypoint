@@ -296,3 +296,66 @@ export interface JobEvent {
   message: string;
   payloadJson: string | null;
 }
+
+// ── Agent-driven cleanup ────────────────────────────────────────────────────
+
+export interface AgentNotes {
+  diskId: number;
+  body: string;
+  updatedAt: string | null;
+}
+
+export interface DeletionHistoryEvent {
+  deletedAt: string;
+  scanId: number;
+  deletedPath: string;
+  sizeBytes: number;
+  contentHash: string | null;
+  sampledHash: string | null;
+  siblingPaths: string[];
+}
+
+export interface DeletionHistoryResponse {
+  diskId: number;
+  total: number;
+  limit: number;
+  offset: number;
+  events: DeletionHistoryEvent[];
+}
+
+interface CleanupSuggestionBase {
+  id: number;
+  contentHash: string;
+  keepPath: string;
+  deletePaths: string[];
+  sizeBytes: number;
+  wastedBytes: number;
+  rationale: string;
+  status: "pending" | "applied" | "dismissed";
+  createdAt: string;
+  appliedAt: string | null;
+  dismissedAt: string | null;
+}
+
+export interface ResolvedCleanupSuggestion extends CleanupSuggestionBase {
+  resolved: true;
+  duplicateGroupId: number;
+  keepFile: { fileId: number; path: string };
+  deleteFiles: Array<{ fileId: number; path: string }>;
+}
+
+export interface StaleCleanupSuggestion extends CleanupSuggestionBase {
+  resolved: false;
+  staleReason: string | null;
+}
+
+export type CleanupSuggestion = ResolvedCleanupSuggestion | StaleCleanupSuggestion;
+
+export interface CleanupSuggestionsResponse {
+  diskId: number;
+  duplicateJobId: number | null;
+  total: number;
+  limit: number;
+  offset: number;
+  suggestions: CleanupSuggestion[];
+}

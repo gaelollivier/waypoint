@@ -7,13 +7,15 @@ import { JobDetails } from "../components/JobDetails";
 import { TreeExplorer } from "../components/TreeExplorer";
 import { DiffExplorer } from "../components/DiffExplorer";
 import { DuplicateExplorer, CleanupProgressDialogBody } from "../components/DuplicateExplorer";
+import { AgentNotesTab } from "../components/AgentNotesTab";
+import { CleanupSuggestionsTab } from "../components/CleanupSuggestionsTab";
 import { Link, navigate } from "../components/Router";
 import { useLiveJob } from "../lib/useLiveJob";
 import { formatBytes, formatDate } from "../lib/format";
 import { useSearchParam, setSearchParams } from "../lib/urlState";
 
-type Tab = "overview" | "tree" | "diff" | "duplicates" | "events";
-const VALID_TABS: Tab[] = ["overview", "tree", "diff", "duplicates", "events"];
+type Tab = "overview" | "tree" | "diff" | "duplicates" | "suggestions" | "notes" | "events";
+const VALID_TABS: Tab[] = ["overview", "tree", "diff", "duplicates", "suggestions", "notes", "events"];
 
 const ACTIVE = ["queued", "running", "paused"];
 
@@ -125,12 +127,12 @@ export function DiskDetailPage({ id }: { id: string }) {
         hasActiveJob={activeJob != null}
       />
 
-      <div className="flex gap-1 border-b border-zinc-800">
-        {(["overview", "tree", "diff", "duplicates", "events"] as Tab[]).map((t) => (
+      <div className="flex gap-1 border-b border-zinc-800 overflow-x-auto">
+        {(["overview", "tree", "diff", "duplicates", "suggestions", "notes", "events"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
-            className={`px-4 py-2 text-sm font-medium border-b-2 capitalize transition-colors ${
+            className={`px-4 py-2 text-sm font-medium border-b-2 capitalize transition-colors whitespace-nowrap ${
               tab === t
                 ? "border-blue-500 text-white"
                 : "border-transparent text-zinc-500 hover:text-zinc-300"
@@ -165,6 +167,10 @@ export function DiskDetailPage({ id }: { id: string }) {
       )}
 
       {tab === "duplicates" && <DuplicatesTab diskId={diskId} disk={disk} />}
+
+      {tab === "suggestions" && <CleanupSuggestionsTab diskId={diskId} />}
+
+      {tab === "notes" && <AgentNotesTab diskId={diskId} />}
 
       {tab === "events" && <EventsTab diskId={diskId} jobs={jobs} />}
 

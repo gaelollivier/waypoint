@@ -1,4 +1,4 @@
-import type { CleanupResponse, DirectoryGroupFilesResponse, DirectoryGroupInventoryResponse, Disk, DiffJobSummary, DiffTreeResponse, DuplicateDirectoriesResponse, DuplicateJobSummary, DuplicateScanSummary, DuplicatesResponse, Job, JobEvent, TreeResponse } from "./types";
+import type { AgentNotes, CleanupResponse, CleanupSuggestionsResponse, DeletionHistoryResponse, DirectoryGroupFilesResponse, DirectoryGroupInventoryResponse, Disk, DiffJobSummary, DiffTreeResponse, DuplicateDirectoriesResponse, DuplicateJobSummary, DuplicateScanSummary, DuplicatesResponse, Job, JobEvent, TreeResponse } from "./types";
 
 const BASE = "/api";
 
@@ -222,6 +222,65 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ sourceDiskId, destDiskId, diffJobId }),
       }),
+  },
+
+  cleanup: {
+    history: (diskId: number, opts?: { limit?: number; offset?: number }) => {
+      const params = new URLSearchParams();
+      if (opts?.limit != null) params.set("limit", String(opts.limit));
+      if (opts?.offset != null) params.set("offset", String(opts.offset));
+      const qs = params.toString();
+      return request<DeletionHistoryResponse>(
+        `/disks/${diskId}/cleanup/history${qs ? "?" + qs : ""}`
+      );
+    },
+
+    getNotes: (diskId: number) =>
+      request<AgentNotes>(`/disks/${diskId}/cleanup/notes`),
+
+    putNotes: (diskId: number, body: string) =>
+      request<AgentNotes>(`/disks/${diskId}/cleanup/notes`, {
+        method: "PUT",
+        body: JSON.stringify({ body }),
+      }),
+
+    suggestions: (diskId: number, opts?: { status?: "pending" | "applied" | "dismissed" | "all"; limit?: number; offset?: number }) => {
+      const params = new URLSearchParams();
+      if (opts?.status) params.set("status", opts.status);
+      if (opts?.limit != null) params.set("limit", String(opts.limit));
+      if (opts?.offset != null) params.set("offset", String(opts.offset));
+      const qs = params.toString();
+      return request<CleanupSuggestionsResponse>(
+        `/disks/${diskId}/cleanup/suggestions${qs ? "?" + qs : ""}`
+      );
+    },
+
+    createSuggestion: (
+      diskId: number,
+      body: {
+        contentHash: string;
+        keepPath: string;
+        deletePaths: string[];
+        sizeBytes: number;
+        rationale?: string;
+      }
+    ) =>
+      request<{ id: number; diskId: number }>(`/disks/${diskId}/cleanup/suggestions`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+
+    markApplied: (diskId: number, suggestionId: number) =>
+      request<{ id: number; status: "applied"; appliedAt: string }>(
+        `/disks/${diskId}/cleanup/suggestions/${suggestionId}/applied`,
+        { method: "POST" }
+      ),
+
+    markDismissed: (diskId: number, suggestionId: number) =>
+      request<{ id: number; status: "dismissed"; dismissedAt: string }>(
+        `/disks/${diskId}/cleanup/suggestions/${suggestionId}/dismissed`,
+        { method: "POST" }
+      ),
   },
 
   system: {

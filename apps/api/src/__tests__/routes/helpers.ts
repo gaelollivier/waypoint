@@ -10,6 +10,7 @@ import { jobsRouter } from "../../routes/jobs";
 import { treeRouter } from "../../routes/tree";
 import { diffRouter } from "../../routes/diff";
 import { duplicatesRouter } from "../../routes/duplicates";
+import { agentCleanupRouter } from "../../routes/agent-cleanup";
 import { copyRouter } from "../../routes/copy";
 import { systemRouter } from "../../routes/system";
 
@@ -36,6 +37,7 @@ export function createTestApp(): TestContext {
   app.route("/api/disks/:id/tree", treeRouter);
   app.route("/api/disks/:id/diff", diffRouter);
   app.route("/api/disks/:id/duplicates", duplicatesRouter);
+  app.route("/api/disks/:id/cleanup", agentCleanupRouter);
   app.route("/api/copy", copyRouter);
   app.route("/api/system", systemRouter);
 

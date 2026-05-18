@@ -807,7 +807,7 @@ duplicatesRouter.get("/scans", (c) => {
 //
 // SAFETY: This endpoint permanently deletes files. It enforces multiple
 // guardrails to ensure deletions are only triggered by a human via the web UI.
-// See CLAUDE.md "RULE: File deletions must NEVER be initiated by an LLM or agent".
+// See AGENTS.md "RULE: File deletions must NEVER be initiated by an LLM or agent".
 // ---------------------------------------------------------------------------
 
 /** Rejects user agents that don't look like a real browser. */
