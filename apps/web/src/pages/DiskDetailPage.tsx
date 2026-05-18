@@ -1,4 +1,4 @@
-import { useState, useCallback, useSyncExternalStore } from "react";
+import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { Disk, DiffJobSummary, DuplicateJobSummary, DuplicateScanSummary, Job, JobEvent } from "../api/types";
@@ -6,10 +6,11 @@ import { StatusBadge } from "../components/StatusBadge";
 import { JobDetails } from "../components/JobDetails";
 import { TreeExplorer } from "../components/TreeExplorer";
 import { DiffExplorer } from "../components/DiffExplorer";
-import { DuplicateExplorer } from "../components/DuplicateExplorer";
+import { DuplicateExplorer, CleanupProgressDialogBody } from "../components/DuplicateExplorer";
 import { Link, navigate } from "../components/Router";
 import { useLiveJob } from "../lib/useLiveJob";
 import { formatBytes, formatDate } from "../lib/format";
+import { useSearchParam, setSearchParams } from "../lib/urlState";
 
 type Tab = "overview" | "tree" | "diff" | "duplicates" | "events";
 const VALID_TABS: Tab[] = ["overview", "tree", "diff", "duplicates", "events"];
@@ -21,35 +22,6 @@ const LEVEL_COLORS: Record<JobEvent["level"], string> = {
   warning: "text-yellow-500",
   error:   "text-red-500",
 };
-
-/** Read a search param from the URL reactively (re-renders on popstate). */
-function useSearchParam(key: string): string | null {
-  const subscribe = useCallback(
-    (cb: () => void) => {
-      window.addEventListener("popstate", cb);
-      return () => window.removeEventListener("popstate", cb);
-    },
-    []
-  );
-  const getSnapshot = useCallback(
-    () => new URLSearchParams(window.location.search).get(key),
-    [key]
-  );
-  return useSyncExternalStore(subscribe, getSnapshot);
-}
-
-/** Update search params without a full navigation — preserves the path. */
-function setSearchParams(updates: Record<string, string | null>) {
-  const params = new URLSearchParams(window.location.search);
-  for (const [k, v] of Object.entries(updates)) {
-    if (v === null) params.delete(k);
-    else params.set(k, v);
-  }
-  const qs = params.toString();
-  const url = window.location.pathname + (qs ? "?" + qs : "");
-  history.pushState(null, "", url);
-  window.dispatchEvent(new PopStateEvent("popstate"));
-}
 
 export function DiskDetailPage({ id }: { id: string }) {
   const diskId = Number(id);
@@ -969,6 +941,24 @@ function DuplicatesTab({ diskId, disk }: { diskId: number; disk: Disk }) {
   const queryClient = useQueryClient();
   const [pendingJobId, setPendingJobId] = useState<number | null>(null);
   const [selectedScanId, setSelectedScanId] = useState<number | null>(null);
+  // jobId of the cleanup whose progress is being viewed in a modal. Null when
+  // the user hasn't requested a progress view.
+  const [viewingCleanupJobId, setViewingCleanupJobId] = useState<number | null>(null);
+
+  // Poll for an in-flight directory cleanup job on this disk so we can surface
+  // a "View progress" banner even after the user dismissed the confirm dialog.
+  const { data: cleanupJobs = [] } = useQuery<Job[]>({
+    queryKey: ["jobs", { diskId, type: "directory_duplicate_cleanup" }],
+    queryFn: () => api.jobs.list({ type: "directory_duplicate_cleanup", targetDiskId: diskId, limit: 5 }),
+    refetchInterval: (query) => {
+      const jobs = (query.state.data ?? []) as Job[];
+      const hasActive = jobs.some((j) => j.status === "running" || j.status === "queued" || j.status === "paused");
+      return hasActive ? 2_000 : 10_000;
+    },
+  });
+  const activeCleanup = cleanupJobs.find((j) =>
+    j.status === "running" || j.status === "queued" || j.status === "paused"
+  ) ?? null;
 
   const { data: scans = [] } = useQuery<DuplicateScanSummary[]>({
     queryKey: ["duplicateScans", diskId],
@@ -1053,6 +1043,20 @@ function DuplicatesTab({ diskId, disk }: { diskId: number; disk: Disk }) {
         </div>
       )}
 
+      {activeCleanup && (
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-blue-800/50 bg-blue-950/20 px-4 py-3 text-sm text-blue-300">
+          <span>
+            Directory cleanup #{activeCleanup.id} — {activeCleanup.status}…
+          </span>
+          <button
+            onClick={() => setViewingCleanupJobId(activeCleanup.id)}
+            className="rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-500 transition-colors"
+          >
+            View progress
+          </button>
+        </div>
+      )}
+
       {/* No scan yet */}
       {!disk.lastScanAt && (
         <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-6 text-sm text-yellow-400">
@@ -1090,6 +1094,13 @@ function DuplicatesTab({ diskId, disk }: { diskId: number; disk: Disk }) {
           </div>
           <DuplicateExplorer diskId={diskId} duplicateJobId={latestCompleted.id} />
         </div>
+      )}
+
+      {viewingCleanupJobId != null && (
+        <CleanupProgressDialogBody
+          jobId={viewingCleanupJobId}
+          onClose={() => setViewingCleanupJobId(null)}
+        />
       )}
     </div>
   );

@@ -173,7 +173,10 @@ duplicatesRouter.get("/", (c) => {
       wasted_bytes: number;
     }>;
 
-  // Fetch all file members for this page of groups in one query
+  // Fetch all file members for this page of groups in one query.
+  // LEFT JOIN deleted_files so the UI can grey out files that have already
+  // been cleaned up; the join survives a re-run of detection on the same
+  // scan because deleted_files is keyed by file_id (scan-snapshot ID).
   const groupIds = groups.map((g) => g.id);
   const filesMap = new Map<number, Array<{ fileId: number; path: string; deletedAt: string | null }>>();
 
@@ -181,10 +184,11 @@ duplicatesRouter.get("/", (c) => {
     const placeholders = groupIds.map(() => "?").join(", ");
     const fileRows = db
       .prepare(
-        `SELECT group_id, file_id, path, deleted_at
-         FROM duplicate_group_files
-         WHERE group_id IN (${placeholders})
-         ORDER BY group_id, path`
+        `SELECT dgf.group_id, dgf.file_id, dgf.path, df.deleted_at
+         FROM duplicate_group_files dgf
+         LEFT JOIN deleted_files df ON df.file_id = dgf.file_id
+         WHERE dgf.group_id IN (${placeholders})
+         ORDER BY dgf.group_id, dgf.path`
       )
       .all(...groupIds) as Array<{ group_id: number; file_id: number; path: string; deleted_at: string | null }>;
 
@@ -297,17 +301,19 @@ duplicatesRouter.get("/directories", (c) => {
       is_eligible_for_cleanup: number;
     }>;
 
-  // Fetch members for this page of groups
+  // Fetch members for this page of groups, joining deleted_directories so the
+  // UI can mark already-cleaned-up copies.
   const groupIds = groups.map((g) => g.id);
-  const membersMap = new Map<number, Array<{ directoryId: number; path: string; fileCount: number }>>();
+  const membersMap = new Map<number, Array<{ directoryId: number; path: string; fileCount: number; deletedAt: string | null }>>();
 
   if (groupIds.length > 0) {
     const placeholders = groupIds.map(() => "?").join(", ");
     const memberRows = db
       .prepare(
-        `SELECT ddgm.group_id, ddgm.directory_id, ddgm.path, d.file_count
+        `SELECT ddgm.group_id, ddgm.directory_id, ddgm.path, d.file_count, dd.deleted_at
          FROM duplicate_directory_group_members ddgm
          JOIN directories d ON d.id = ddgm.directory_id
+         LEFT JOIN deleted_directories dd ON dd.directory_id = ddgm.directory_id
          WHERE ddgm.group_id IN (${placeholders})
          ORDER BY ddgm.group_id, ddgm.path`
       )
@@ -316,6 +322,7 @@ duplicatesRouter.get("/directories", (c) => {
         directory_id: number;
         path: string;
         file_count: number;
+        deleted_at: string | null;
       }>;
 
     for (const r of memberRows) {
@@ -324,6 +331,7 @@ duplicatesRouter.get("/directories", (c) => {
         directoryId: r.directory_id,
         path: r.path,
         fileCount: r.file_count,
+        deletedAt: r.deleted_at,
       });
     }
   }
@@ -1106,15 +1114,18 @@ duplicatesRouter.post("/cleanup", async (c) => {
     release();
   }
 
-  // Persist deleted_at for files that made it through before any halt.
+  // Persist deletion records for files that made it through before any halt.
+  // INSERT OR REPLACE keeps this idempotent if the same scan's file is somehow
+  // deleted twice across runs — the deleted_at is updated to the most recent
+  // attempt, which matches what a user would expect to see in the UI.
   if (results.length > 0) {
     const now = new Date().toISOString();
-    const markDeleted = db.prepare(
-      "UPDATE duplicate_group_files SET deleted_at = ? WHERE group_id = ? AND file_id = ?"
+    const recordDeleted = db.prepare(
+      "INSERT OR REPLACE INTO deleted_files (file_id, scan_id, deleted_at) VALUES (?, ?, ?)"
     );
     db.transaction(() => {
       for (const r of results) {
-        markDeleted.run(now, duplicateGroupId, r.fileId);
+        recordDeleted.run(r.fileId, selectedScanId, now);
       }
     })();
   }

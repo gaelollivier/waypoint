@@ -123,6 +123,7 @@ export interface CleanupHaltedBody {
 export interface DuplicateDirectoryGroupMember {
   directoryId: number;
   path: string;
+  deletedAt: string | null;
 }
 
 export interface DuplicateDirectoryGroup {
@@ -243,6 +244,7 @@ export interface Job {
     | "backup"
     | "diff"
     | "duplicate_detection"
+    | "directory_duplicate_cleanup"
     | "write_speed_test"
     | "read_speed_test";
   status: "queued" | "running" | "paused" | "completed" | "failed" | "cancelled";

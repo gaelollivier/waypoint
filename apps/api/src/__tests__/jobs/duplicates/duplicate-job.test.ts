@@ -297,7 +297,7 @@ describe("DuplicateDetectionJobRunner", () => {
     expect(fullGroup.is_eligible_for_cleanup).toBe(1);
   });
 
-  it("deleted_at column tracks cleanup and prevents double-deletion", async () => {
+  it("deleted_files tracks cleanup and survives re-detection on the same scan", async () => {
     const root = path.join(TMP_BASE, "cleanup-tracking");
     writeTree(root, {
       "photos/img.jpg": "duplicate content",
@@ -312,13 +312,12 @@ describe("DuplicateDetectionJobRunner", () => {
     const files = getGroupFiles(db, groups[0].id);
     expect(files.length).toBe(2);
 
-    // All files start with deleted_at = null
-    const filesWithDeletedAt = db
-      .prepare("SELECT file_id, path, deleted_at FROM duplicate_group_files WHERE group_id = ? ORDER BY path")
-      .all(groups[0].id) as Array<{ file_id: number; path: string; deleted_at: string | null }>;
-    expect(filesWithDeletedAt.every((f) => f.deleted_at === null)).toBe(true);
+    // No rows yet — deleted_files is empty before any cleanup.
+    const initial = db
+      .prepare("SELECT COUNT(*) AS n FROM deleted_files")
+      .get() as { n: number };
+    expect(initial.n).toBe(0);
 
-    // Delete one file and mark it
     const keepPath = files[0].path;
     const deletePath = files[1].path;
     const deleteProof = await makeDeleteProof(deletePath, keepPath);
@@ -329,22 +328,32 @@ describe("DuplicateDetectionJobRunner", () => {
       ...deleteProof,
     });
 
-    const now = new Date().toISOString();
-    db.prepare("UPDATE duplicate_group_files SET deleted_at = ? WHERE group_id = ? AND file_id = ?")
-      .run(now, groups[0].id, files[1].file_id);
+    // Record the deletion via the new table (mirrors what the cleanup route
+    // does after deleteDuplicateFile succeeds).
+    const scanId = db
+      .prepare("SELECT scan_id FROM files WHERE id = ?")
+      .get(files[1].file_id) as { scan_id: number };
+    db.prepare(
+      "INSERT INTO deleted_files (file_id, scan_id, deleted_at) VALUES (?, ?, ?)"
+    ).run(files[1].file_id, scanId.scan_id, new Date().toISOString());
 
-    // Verify: one file marked as deleted, one still null
-    const afterCleanup = db
-      .prepare("SELECT file_id, deleted_at FROM duplicate_group_files WHERE group_id = ? ORDER BY path")
-      .all(groups[0].id) as Array<{ file_id: number; deleted_at: string | null }>;
-    expect(afterCleanup[0].deleted_at).toBeNull();
-    expect(afterCleanup[1].deleted_at).not.toBeNull();
-
-    // The deleted file no longer exists on disk
+    // The deleted file no longer exists on disk.
     expect(existsSync(deletePath)).toBe(false);
     expect(existsSync(keepPath)).toBe(true);
 
-    // Attempting to delete the same file again fails (file doesn't exist)
+    // Re-run detection on the same scan; the new group's members should still
+    // show the same deleted_files row because file_id is scan-snapshot stable.
+    const rerunJobId = await runDuplicateDetection(db, jm, diskId);
+    const rerunGroups = getGroups(db, rerunJobId);
+    expect(rerunGroups.length).toBe(1);
+    const rerunFiles = getGroupFiles(db, rerunGroups[0].id);
+    const stillDeleted = db
+      .prepare("SELECT file_id FROM deleted_files WHERE file_id IN (?, ?)")
+      .all(rerunFiles[0].file_id, rerunFiles[1].file_id) as Array<{ file_id: number }>;
+    expect(stillDeleted).toHaveLength(1);
+    expect(stillDeleted[0].file_id).toBe(files[1].file_id);
+
+    // Attempting to delete the same file again fails (file doesn't exist).
     await expect(
       deleteDuplicateFile({
         deletePath,

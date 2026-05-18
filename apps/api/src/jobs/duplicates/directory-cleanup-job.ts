@@ -293,6 +293,11 @@ export class DirectoryDuplicateCleanupJobRunner extends JobRunner {
         keepActual,
       });
 
+      // Persist the deletion state per-file as we go so a halt midway leaves
+      // the DB consistent with what's on disk: every file_id we successfully
+      // unlinked has a deleted_files row.
+      this.recordDeletedFile(deleteRecord.fileId);
+
       this.incrementProgress({
         itemsProcessed: 1,
         bytesProcessed: deleteRecord.sizeBytes,
@@ -323,6 +328,12 @@ export class DirectoryDuplicateCleanupJobRunner extends JobRunner {
         diskMountPath: this.diskMountPath,
       });
     }
+
+    // Record the directory itself as deleted now that every file is gone and
+    // every emptied subdir has been rmdir'd. Re-running detection on the same
+    // scan will surface this as "already deleted" without needing the per-
+    // file rows.
+    this.recordDeletedDirectory(del.directoryId);
 
     this.logEvent(
       "info",
@@ -433,6 +444,24 @@ export class DirectoryDuplicateCleanupJobRunner extends JobRunner {
       }
     }
     return ids;
+  }
+
+  private recordDeletedFile(fileId: number): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        "INSERT OR REPLACE INTO deleted_files (file_id, scan_id, deleted_at) VALUES (?, ?, ?)"
+      )
+      .run(fileId, this.scanId, now);
+  }
+
+  private recordDeletedDirectory(directoryId: number): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        "INSERT OR REPLACE INTO deleted_directories (directory_id, scan_id, deleted_at) VALUES (?, ?, ?)"
+      )
+      .run(directoryId, this.scanId, now);
   }
 
   private getDirectoryPath(dirId: number): string {

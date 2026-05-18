@@ -381,14 +381,16 @@ describe("duplicates routes", () => {
       expect(existsSync(deleteBPath)).toBe(true);
       expect(existsSync(keepPath)).toBe(true);
 
-      // DB reflects deletion of A and not B
-      const deletedRows = ctx.db
-        .prepare("SELECT file_id, deleted_at FROM duplicate_group_files WHERE group_id = 1")
-        .all() as Array<{ file_id: number; deleted_at: string | null }>;
-      const aRow = deletedRows.find((r) => r.file_id === deleteA.id)!;
-      const bRow = deletedRows.find((r) => r.file_id === deleteB.id)!;
-      expect(aRow.deleted_at).not.toBeNull();
-      expect(bRow.deleted_at).toBeNull();
+      // DB reflects deletion of A and not B: deleted_files has a row for A
+      // (scoped to the scan the cleanup ran against), and no row for B.
+      const aDel = ctx.db
+        .prepare("SELECT deleted_at FROM deleted_files WHERE file_id = ?")
+        .get(deleteA.id) as { deleted_at: string } | null;
+      const bDel = ctx.db
+        .prepare("SELECT deleted_at FROM deleted_files WHERE file_id = ?")
+        .get(deleteB.id) as { deleted_at: string } | null;
+      expect(aDel?.deleted_at).toBeTruthy();
+      expect(bDel).toBeNull();
 
       // Event log records the halt
       const events = ctx.db

@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ApiError, api } from "../api/client";
-import { navigate } from "./Router";
 import type { CleanupHaltedBody, CleanupResponse, DirectoryGroupInventoryResponse, DuplicateDirectoriesResponse, DuplicateDirectoryGroup, DuplicateDirectoryGroupMember, DuplicateGroup, DuplicateGroupFile, DuplicatesResponse } from "../api/types";
 import { formatBytes } from "../lib/format";
+import { JobDetails } from "./JobDetails";
+import { useLiveJob } from "../lib/useLiveJob";
+import { useSearchParam, setSearchParams } from "../lib/urlState";
 
 const PAGE_SIZE = 50;
 
@@ -30,6 +32,28 @@ const MIN_COPIES_OPTIONS: Array<{ label: string; value: number }> = [
   { label: "5+ copies",  value: 5 },
   { label: "10+ copies", value: 10 },
 ];
+
+// Longest common path prefix across the group, trimmed back to the last "/" so
+// every remainder starts at a directory boundary. Returns "" if there's nothing
+// useful to factor out (single item, no shared prefix, or prefix is just "/").
+function pathCommonPrefix(paths: string[]): string {
+  if (paths.length < 2) return "";
+  let prefix = paths[0];
+  for (let i = 1; i < paths.length; i++) {
+    let j = 0;
+    while (j < prefix.length && j < paths[i].length && prefix[j] === paths[i][j]) j++;
+    prefix = prefix.slice(0, j);
+    if (prefix.length === 0) return "";
+  }
+  const lastSlash = prefix.lastIndexOf("/");
+  if (lastSlash <= 0) return "";
+  return prefix.slice(0, lastSlash + 1);
+}
+
+function stripPrefix(path: string, prefix: string): string {
+  if (prefix && path.startsWith(prefix)) return path.slice(prefix.length);
+  return path;
+}
 
 // ---------------------------------------------------------------------------
 // Controls bar
@@ -104,6 +128,8 @@ function DuplicateGroupCard({
     ? liveFiles.filter((f) => f.fileId !== keepFileId)
     : [];
 
+  const commonPrefix = pathCommonPrefix(group.files.map((f) => f.path));
+
   return (
     <div className="px-4 py-3 space-y-2">
       <div className="flex items-center gap-3 flex-wrap text-xs">
@@ -125,56 +151,66 @@ function DuplicateGroupCard({
         </span>
       </div>
 
-      <div className="space-y-1">
-        {group.files.map((f) => {
-          const alreadyDeleted = f.deletedAt !== null;
-          return (
-            <div
-              key={f.fileId}
-              className={`flex items-center gap-2 group ${alreadyDeleted ? "opacity-50" : ""}`}
-            >
-              {alreadyDeleted ? (
-                <span
-                  className="shrink-0 w-5 h-5 rounded border border-zinc-700 bg-zinc-800 text-xs flex items-center justify-center text-zinc-600"
-                  title="Already deleted"
-                >
-                  ×
-                </span>
-              ) : (
-                <button
-                  onClick={() => setKeepFileId(keepFileId === f.fileId ? null : f.fileId)}
-                  className={`shrink-0 w-5 h-5 rounded border text-xs flex items-center justify-center transition-colors ${
-                    keepFileId === f.fileId
-                      ? "border-green-500 bg-green-500/20 text-green-400"
-                      : "border-zinc-700 bg-zinc-800 text-zinc-600 hover:border-zinc-500"
-                  }`}
-                  title={keepFileId === f.fileId ? "Deselect" : "Keep this copy"}
-                >
-                  {keepFileId === f.fileId ? "✓" : ""}
-                </button>
-              )}
-              <a
-                href={`/disks/${diskId}?tab=tree&treePath=${encodeURIComponent(f.path.substring(0, f.path.lastIndexOf("/")))}`}
-                className={`font-mono text-xs truncate hover:underline ${
-                  alreadyDeleted
-                    ? "text-zinc-600 line-through"
-                    : keepFileId !== null && keepFileId !== f.fileId
-                      ? "text-red-400/70 line-through"
-                      : "text-zinc-500 hover:text-zinc-300"
-                }`}
-                title={f.path}
+      {/* Single horizontal scroll container so prefix + all rows scroll as
+          one block on narrow viewports, instead of each line scrolling alone. */}
+      <div className="overflow-x-auto">
+        {commonPrefix && (
+          <div className="font-mono text-[11px] text-zinc-500 whitespace-nowrap pb-1">
+            <span className="text-zinc-600">in </span>{commonPrefix}
+          </div>
+        )}
+        <div className="space-y-1">
+          {group.files.map((f) => {
+            const alreadyDeleted = f.deletedAt !== null;
+            const remainder = stripPrefix(f.path, commonPrefix);
+            return (
+              <div
+                key={f.fileId}
+                className={`flex items-center gap-2 group ${alreadyDeleted ? "opacity-50" : ""}`}
               >
-                {f.path}
-              </a>
-              {alreadyDeleted && (
-                <span className="text-[10px] text-zinc-600 font-medium shrink-0">DELETED</span>
-              )}
-              {!alreadyDeleted && keepFileId === f.fileId && (
-                <span className="text-[10px] text-green-500 font-medium shrink-0">KEEP</span>
-              )}
-            </div>
-          );
-        })}
+                {alreadyDeleted ? (
+                  <span
+                    className="shrink-0 w-5 h-5 rounded border border-zinc-700 bg-zinc-800 text-xs flex items-center justify-center text-zinc-600"
+                    title="Already deleted"
+                  >
+                    ×
+                  </span>
+                ) : (
+                  <button
+                    onClick={() => setKeepFileId(keepFileId === f.fileId ? null : f.fileId)}
+                    className={`shrink-0 w-5 h-5 rounded border text-xs flex items-center justify-center transition-colors ${
+                      keepFileId === f.fileId
+                        ? "border-green-500 bg-green-500/20 text-green-400"
+                        : "border-zinc-700 bg-zinc-800 text-zinc-600 hover:border-zinc-500"
+                    }`}
+                    title={keepFileId === f.fileId ? "Deselect" : "Keep this copy"}
+                  >
+                    {keepFileId === f.fileId ? "✓" : ""}
+                  </button>
+                )}
+                <a
+                  href={`/disks/${diskId}?tab=tree&treePath=${encodeURIComponent(f.path.substring(0, f.path.lastIndexOf("/")))}`}
+                  className={`font-mono text-xs whitespace-nowrap hover:underline ${
+                    alreadyDeleted
+                      ? "text-zinc-600 line-through"
+                      : keepFileId !== null && keepFileId !== f.fileId
+                        ? "text-red-400/70 line-through"
+                        : "text-zinc-500 hover:text-zinc-300"
+                  }`}
+                  title={f.path}
+                >
+                  {remainder}
+                </a>
+                {alreadyDeleted && (
+                  <span className="text-[10px] text-zinc-600 font-medium shrink-0">DELETED</span>
+                )}
+                {!alreadyDeleted && keepFileId === f.fileId && (
+                  <span className="text-[10px] text-green-500 font-medium shrink-0">KEEP</span>
+                )}
+              </div>
+            );
+          })}
+        </div>
       </div>
 
       {selectedKeepFile && filesToDelete.length > 0 && (
@@ -218,6 +254,7 @@ function CleanupConfirmDialog({
 }) {
   const filesToDelete = group.files.filter((f) => f.fileId !== keepFile.fileId);
   const totalBytesFreed = group.sizeBytes * filesToDelete.length;
+  const commonPrefix = pathCommonPrefix([keepFile.path, ...filesToDelete.map((f) => f.path)]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
@@ -235,8 +272,8 @@ function CleanupConfirmDialog({
                 Cleanup halted
               </div>
               <div className="text-sm text-red-300 break-words">{haltedResult.error}</div>
-              <div className="text-xs text-red-400/80">
-                <span className="font-mono break-all">{haltedResult.failedAt.path}</span>
+              <div className="text-xs text-red-400/80 font-mono break-all">
+                {haltedResult.failedAt.path}
               </div>
             </div>
 
@@ -274,19 +311,28 @@ function CleanupConfirmDialog({
           // Show confirmation before cleanup
           <>
             <div className="space-y-3">
-              <div className="rounded-lg border border-green-800/50 bg-green-950/20 px-4 py-3">
-                <div className="text-[10px] uppercase tracking-wider text-green-500 font-medium mb-1">Keeping</div>
-                <div className="font-mono text-xs text-green-400 break-all">{keepFile.path}</div>
+              {commonPrefix && (
+                <div className="text-[11px] text-zinc-500 break-all">
+                  <span className="text-zinc-600">in </span>
+                  <span className="font-mono text-zinc-400">{commonPrefix}</span>
+                </div>
+              )}
+
+              <div className="rounded-lg border border-green-800/50 bg-green-950/20 px-4 py-3 space-y-1">
+                <div className="text-[10px] uppercase tracking-wider text-green-500 font-medium">Keeping</div>
+                <div className="font-mono text-xs text-green-400 break-all">
+                  {stripPrefix(keepFile.path, commonPrefix)}
+                </div>
               </div>
 
               <div className="rounded-lg border border-red-800/50 bg-red-950/20 px-4 py-3">
                 <div className="text-[10px] uppercase tracking-wider text-red-400 font-medium mb-1">
                   Deleting ({filesToDelete.length} file{filesToDelete.length !== 1 ? "s" : ""})
                 </div>
-                <div className="space-y-1 max-h-48 overflow-y-auto">
+                <div className="space-y-1">
                   {filesToDelete.map((f) => (
                     <div key={f.fileId} className="font-mono text-xs text-red-300/80 break-all">
-                      {f.path}
+                      {stripPrefix(f.path, commonPrefix)}
                     </div>
                   ))}
                 </div>
@@ -375,8 +421,11 @@ function DirectoryGroupCard({
   onCleanupRequest: (group: DuplicateDirectoryGroup, keepDir: DuplicateDirectoryGroupMember) => void;
 }) {
   const [keepId, setKeepId] = useState<number | null>(null);
-  const keepDir = group.directories.find((d) => d.directoryId === keepId) ?? null;
-  const deleteCount = keepDir ? group.directories.length - 1 : 0;
+  const liveDirs = group.directories.filter((d) => d.deletedAt === null);
+  const keepDir = liveDirs.find((d) => d.directoryId === keepId) ?? null;
+  const deleteCount = keepDir ? liveDirs.length - 1 : 0;
+
+  const commonPrefix = pathCommonPrefix(group.directories.map((d) => d.path));
 
   return (
     <div className="px-4 py-3 space-y-2">
@@ -396,40 +445,65 @@ function DirectoryGroupCard({
         </span>
       </div>
 
-      <div className="space-y-1">
-        {group.directories.map((d) => (
-          <div key={d.directoryId} className="flex items-center gap-2 group">
-            {group.canDelete ? (
-              <button
-                onClick={() => setKeepId(keepId === d.directoryId ? null : d.directoryId)}
-                className={`shrink-0 w-5 h-5 rounded border text-xs flex items-center justify-center transition-colors ${
-                  keepId === d.directoryId
-                    ? "border-green-500 bg-green-500/20 text-green-400"
-                    : "border-zinc-700 bg-zinc-800 text-zinc-600 hover:border-zinc-500"
-                }`}
-                title={keepId === d.directoryId ? "Deselect" : "Keep this copy"}
-              >
-                {keepId === d.directoryId ? "✓" : ""}
-              </button>
-            ) : (
-              <span className="shrink-0 text-xs text-zinc-600">📁</span>
-            )}
-            <a
-              href={`/disks/${diskId}?tab=tree&treePath=${encodeURIComponent(d.path)}`}
-              className={`font-mono text-xs truncate hover:underline ${
-                keepId !== null && keepId !== d.directoryId
-                  ? "text-red-400/70 line-through"
-                  : "text-zinc-500 hover:text-zinc-300"
-              }`}
-              title={d.path}
-            >
-              {d.path}
-            </a>
-            {keepId === d.directoryId && (
-              <span className="text-[10px] text-green-500 font-medium shrink-0">KEEP</span>
-            )}
+      {/* Single horizontal scroll container so prefix + all rows scroll as
+          one block on narrow viewports, instead of each line scrolling alone. */}
+      <div className="overflow-x-auto">
+        {commonPrefix && (
+          <div className="font-mono text-[11px] text-zinc-500 whitespace-nowrap pb-1">
+            <span className="text-zinc-600">in </span>{commonPrefix}
           </div>
-        ))}
+        )}
+        <div className="space-y-1">
+          {group.directories.map((d) => {
+            const alreadyDeleted = d.deletedAt !== null;
+            const remainder = stripPrefix(d.path, commonPrefix);
+            return (
+              <div key={d.directoryId} className="flex items-center gap-2 group">
+                {alreadyDeleted ? (
+                  <span
+                    className="shrink-0 w-5 h-5 rounded border border-zinc-700 bg-zinc-800 text-xs flex items-center justify-center text-zinc-600"
+                    title="Already deleted"
+                  >
+                    ×
+                  </span>
+                ) : group.canDelete ? (
+                  <button
+                    onClick={() => setKeepId(keepId === d.directoryId ? null : d.directoryId)}
+                    className={`shrink-0 w-5 h-5 rounded border text-xs flex items-center justify-center transition-colors ${
+                      keepId === d.directoryId
+                        ? "border-green-500 bg-green-500/20 text-green-400"
+                        : "border-zinc-700 bg-zinc-800 text-zinc-600 hover:border-zinc-500"
+                    }`}
+                    title={keepId === d.directoryId ? "Deselect" : "Keep this copy"}
+                  >
+                    {keepId === d.directoryId ? "✓" : ""}
+                  </button>
+                ) : (
+                  <span className="shrink-0 text-xs text-zinc-600">📁</span>
+                )}
+                <a
+                  href={`/disks/${diskId}?tab=tree&treePath=${encodeURIComponent(d.path)}`}
+                  className={`font-mono text-xs whitespace-nowrap hover:underline ${
+                    alreadyDeleted
+                      ? "text-zinc-600 line-through"
+                      : keepId !== null && keepId !== d.directoryId
+                        ? "text-red-400/70 line-through"
+                        : "text-zinc-500 hover:text-zinc-300"
+                  }`}
+                  title={d.path}
+                >
+                  {remainder}
+                </a>
+                {alreadyDeleted && (
+                  <span className="text-[10px] text-zinc-600 font-medium shrink-0">DELETED</span>
+                )}
+                {!alreadyDeleted && keepId === d.directoryId && (
+                  <span className="text-[10px] text-green-500 font-medium shrink-0">KEEP</span>
+                )}
+              </div>
+            );
+          })}
+        </div>
       </div>
 
       {keepDir && deleteCount > 0 && (
@@ -442,7 +516,7 @@ function DirectoryGroupCard({
           </button>
         </div>
       )}
-      {!group.canDelete && (
+      {!group.canDelete && liveDirs.length > 1 && (
         <div className="text-xs text-amber-400/80">
           Cleanup requires full-hash evidence for every file. Run a fullHash scan first.
         </div>
@@ -466,6 +540,10 @@ function DirectoryCleanupConfirmDialog({
   diskId: number;
   onClose: () => void;
 }) {
+  // If the cleanup mutation succeeds, we keep the dialog open and swap the
+  // body to a live-progress view (using JobDetails) instead of navigating to
+  // /jobs/:id. The disk page is the user's primary surface.
+  const [startedJobId, setStartedJobId] = useState<number | null>(null);
   // Live inventory: walks each delete folder on disk right now so the user
   // sees every file (including .DS_Store and other noise the scan ignored)
   // before confirming.
@@ -503,6 +581,7 @@ function DirectoryCleanupConfirmDialog({
   const totalBytesFreed = group.totalSizeBytes * deleteDirectories.length;
   const totalScanned = deleteDirectories.reduce((acc, m) => acc + m.scanned.length, 0);
   const totalExcluded = deleteDirectories.reduce((acc, m) => acc + m.excluded.length, 0);
+  const commonPrefix = pathCommonPrefix([keepDir.path, ...deleteDirectories.map((m) => m.path)]);
 
   const cleanup = useMutation({
     mutationFn: () =>
@@ -517,11 +596,20 @@ function DirectoryCleanupConfirmDialog({
         })),
       }),
     onSuccess: ({ jobId }) => {
-      navigate(`/jobs/${jobId}`);
+      setStartedJobId(jobId);
     },
   });
 
   const errorMessage = cleanup.error instanceof Error ? cleanup.error.message : null;
+
+  if (startedJobId != null) {
+    return (
+      <CleanupProgressDialogBody
+        jobId={startedJobId}
+        onClose={onClose}
+      />
+    );
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
@@ -542,16 +630,25 @@ function DirectoryCleanupConfirmDialog({
 
         {inventoryQuery.data && (
           <div className="space-y-4 overflow-y-auto pr-1 flex-1">
-            <div className="rounded-lg border border-green-800/50 bg-green-950/20 px-4 py-3">
-              <div className="text-[10px] uppercase tracking-wider text-green-500 font-medium mb-1">Keeping</div>
-              <div className="font-mono text-xs text-green-400 break-all">{keepDir.path}</div>
+            {commonPrefix && (
+              <div className="text-[11px] text-zinc-500 break-all">
+                <span className="text-zinc-600">in </span>
+                <span className="font-mono text-zinc-400">{commonPrefix}</span>
+              </div>
+            )}
+
+            <div className="rounded-lg border border-green-800/50 bg-green-950/20 px-4 py-3 space-y-1">
+              <div className="text-[10px] uppercase tracking-wider text-green-500 font-medium">Keeping</div>
+              <div className="font-mono text-xs text-green-400 break-all">
+                {stripPrefix(keepDir.path, commonPrefix)}
+              </div>
             </div>
 
             {deleteDirectories.map((m) => {
               const memberBlocked =
                 !m.directoryExists || m.unknown.length > 0 || m.missing.length > 0;
               return (
-                <details
+                <div
                   key={m.directoryId}
                   className={
                     memberBlocked
@@ -559,31 +656,37 @@ function DirectoryCleanupConfirmDialog({
                       : "rounded-lg border border-red-800/50 bg-red-950/20"
                   }
                 >
-                  <summary className="px-4 py-3 cursor-pointer text-xs flex items-center justify-between">
-                    <div>
+                  <div className="px-4 py-3 text-xs flex items-start justify-between gap-3">
+                    <div className="min-w-0 flex-1 space-y-1">
                       <div
                         className={
                           memberBlocked
-                            ? "text-[10px] uppercase tracking-wider text-amber-400 font-medium mb-1"
-                            : "text-[10px] uppercase tracking-wider text-red-400 font-medium mb-1"
+                            ? "text-[10px] uppercase tracking-wider text-amber-400 font-medium"
+                            : "text-[10px] uppercase tracking-wider text-red-400 font-medium"
                         }
                       >
                         {memberBlocked ? "Cannot delete — needs re-scan" : "Deleting directory"}
                       </div>
                       <div
-                        className={memberBlocked ? "font-mono text-amber-300 break-all" : "font-mono text-red-300 break-all"}
+                        className={
+                          memberBlocked
+                            ? "font-mono text-amber-300 break-all"
+                            : "font-mono text-red-300 break-all"
+                        }
                       >
-                        {m.path}
+                        {stripPrefix(m.path, commonPrefix)}
                       </div>
                     </div>
                     <span
-                      className={memberBlocked ? "text-amber-400/80 ml-3 shrink-0" : "text-red-400/80 ml-3 shrink-0"}
+                      className={
+                        memberBlocked ? "text-amber-400/80 shrink-0" : "text-red-400/80 shrink-0"
+                      }
                     >
                       {m.scanned.length + m.excluded.length} file
                       {m.scanned.length + m.excluded.length === 1 ? "" : "s"}
                     </span>
-                  </summary>
-                  <div className="px-4 pb-3 space-y-2 border-t border-red-800/30 pt-2 max-h-72 overflow-y-auto">
+                  </div>
+                  <div className="px-4 pb-3 space-y-3 border-t border-red-800/30 pt-2">
                     {!m.directoryExists && (
                       <div className="text-[11px] text-amber-300/90 italic">
                         This folder is no longer on disk. Re-run duplicate detection to refresh the result.
@@ -591,36 +694,40 @@ function DirectoryCleanupConfirmDialog({
                     )}
 
                     {m.scanned.length > 0 && (
-                      <div>
-                        <div className="text-[10px] uppercase tracking-wider text-zinc-400 mb-1">
-                          Scan-recorded files ({m.scanned.length})
+                      <details>
+                        <summary className="cursor-pointer text-[10px] uppercase tracking-wider text-zinc-400 hover:text-zinc-300 select-none">
+                          Show all {m.scanned.length} scan-recorded file{m.scanned.length === 1 ? "" : "s"}
+                        </summary>
+                        <div className="mt-1 space-y-0.5">
+                          {m.scanned.map((f) => (
+                            <div
+                              key={`s-${f.fileId}`}
+                              className="flex items-start gap-2 font-mono text-[11px] text-red-300/80"
+                            >
+                              <span className="flex-1 break-all">{f.relativePath}</span>
+                              <span className="text-red-400/60 shrink-0">{formatBytes(f.sizeBytes)}</span>
+                            </div>
+                          ))}
                         </div>
-                        {m.scanned.map((f) => (
-                          <div
-                            key={`s-${f.fileId}`}
-                            className="flex items-center justify-between gap-2 font-mono text-[11px] text-red-300/80"
-                          >
-                            <span className="break-all">{f.relativePath}</span>
-                            <span className="text-red-400/60 shrink-0">{formatBytes(f.sizeBytes)}</span>
-                          </div>
-                        ))}
-                      </div>
+                      </details>
                     )}
 
                     {m.excluded.length > 0 && (
                       <div>
                         <div className="text-[10px] uppercase tracking-wider text-zinc-400 mb-1">
-                          OS noise ({m.excluded.length})
+                          OS noise ({m.excluded.length}) — no keep-copy guardrail; review individually
                         </div>
-                        {m.excluded.map((f) => (
-                          <div
-                            key={`e-${f.relativePath}`}
-                            className="flex items-center justify-between gap-2 font-mono text-[11px] text-zinc-400"
-                          >
-                            <span className="break-all">{f.relativePath}</span>
-                            <span className="text-zinc-500 shrink-0">{formatBytes(f.sizeBytes)}</span>
-                          </div>
-                        ))}
+                        <div className="space-y-0.5">
+                          {m.excluded.map((f) => (
+                            <div
+                              key={`e-${f.relativePath}`}
+                              className="flex items-start gap-2 font-mono text-[11px] text-zinc-400"
+                            >
+                              <span className="flex-1 break-all">{f.relativePath}</span>
+                              <span className="text-zinc-500 shrink-0">{formatBytes(f.sizeBytes)}</span>
+                            </div>
+                          ))}
+                        </div>
                       </div>
                     )}
 
@@ -629,15 +736,17 @@ function DirectoryCleanupConfirmDialog({
                         <div className="text-[10px] uppercase tracking-wider text-amber-400 mb-1">
                           Unknown files — block deletion ({m.unknown.length})
                         </div>
-                        {m.unknown.map((f) => (
-                          <div
-                            key={`u-${f.relativePath}`}
-                            className="flex items-center justify-between gap-2 font-mono text-[11px] text-amber-300"
-                          >
-                            <span className="break-all">{f.relativePath}</span>
-                            <span className="text-amber-400/60 shrink-0">{formatBytes(f.sizeBytes)}</span>
-                          </div>
-                        ))}
+                        <div className="space-y-0.5">
+                          {m.unknown.map((f) => (
+                            <div
+                              key={`u-${f.relativePath}`}
+                              className="flex items-start gap-2 font-mono text-[11px] text-amber-300"
+                            >
+                              <span className="flex-1 break-all">{f.relativePath}</span>
+                              <span className="text-amber-400/60 shrink-0">{formatBytes(f.sizeBytes)}</span>
+                            </div>
+                          ))}
+                        </div>
                       </div>
                     )}
 
@@ -646,18 +755,20 @@ function DirectoryCleanupConfirmDialog({
                         <div className="text-[10px] uppercase tracking-wider text-amber-400 mb-1">
                           Missing on disk — block deletion ({m.missing.length})
                         </div>
-                        {m.missing.map((f) => (
-                          <div
-                            key={`m-${f.fileId}`}
-                            className="font-mono text-[11px] text-amber-300 break-all"
-                          >
-                            {f.relativePath}
-                          </div>
-                        ))}
+                        <div className="space-y-0.5">
+                          {m.missing.map((f) => (
+                            <div
+                              key={`m-${f.fileId}`}
+                              className="font-mono text-[11px] text-amber-300 break-all"
+                            >
+                              {f.relativePath}
+                            </div>
+                          ))}
+                        </div>
                       </div>
                     )}
                   </div>
-                </details>
+                </div>
               );
             })}
 
@@ -717,6 +828,74 @@ function DirectoryCleanupConfirmDialog({
 }
 
 // ---------------------------------------------------------------------------
+// Live progress for an in-flight directory cleanup job. Rendered both inline
+// after the confirm dialog starts a job, and standalone when the user re-opens
+// progress from the active-cleanup banner on the duplicates tab.
+// ---------------------------------------------------------------------------
+
+export function CleanupProgressDialogBody({
+  jobId,
+  onClose,
+}: {
+  jobId: number;
+  onClose: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const { job, now, loading } = useLiveJob(jobId);
+
+  const handlePause = async () => {
+    await api.jobs.pause(jobId);
+    queryClient.invalidateQueries({ queryKey: ["job", jobId] });
+  };
+  const handleResume = async () => {
+    await api.jobs.resume(jobId);
+    queryClient.invalidateQueries({ queryKey: ["job", jobId] });
+  };
+  const handleCancel = async () => {
+    if (!confirm("Cancel this cleanup? Already-deleted files are not recovered.")) return;
+    await api.jobs.cancel(jobId);
+    queryClient.invalidateQueries({ queryKey: ["job", jobId] });
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+      <div
+        className="w-full max-w-2xl rounded-xl border border-zinc-700 bg-zinc-900 p-6 space-y-5 max-h-[85vh] overflow-hidden flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between gap-3 shrink-0">
+          <h2 className="text-base font-semibold text-white">Directory Cleanup</h2>
+          <span className="text-xs text-zinc-600">#{jobId}</span>
+        </div>
+
+        <div className="overflow-y-auto pr-1 flex-1">
+          {loading || !job ? (
+            <div className="text-sm text-zinc-500">Loading job…</div>
+          ) : (
+            <JobDetails
+              job={job}
+              now={now}
+              onPause={handlePause}
+              onResume={handleResume}
+              onCancel={handleCancel}
+            />
+          )}
+        </div>
+
+        <div className="flex justify-end shrink-0">
+          <button
+            onClick={onClose}
+            className="rounded bg-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-600 transition-colors"
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Directory duplicates view
 // ---------------------------------------------------------------------------
 
@@ -736,9 +915,24 @@ function DirectoryDuplicatesView({
   diskId: number;
   duplicateJobId?: number;
 }) {
-  const [sort, setSort] = useState<DirSortOption>("wasted");
-  const [minSize, setMinSize] = useState(0);
-  const [offset, setOffset] = useState(0);
+  const rawSort = useSearchParam("dirsort");
+  const sort: DirSortOption =
+    rawSort === "total_size" || rawSort === "directory_count" || rawSort === "file_count"
+      ? rawSort
+      : "wasted";
+  const setSort = (s: DirSortOption) =>
+    setSearchParams({ dirsort: s === "wasted" ? null : s, diroffset: null });
+
+  const rawMinSize = useSearchParam("dirminsize");
+  const minSize = rawMinSize ? Number(rawMinSize) : 0;
+  const setMinSize = (n: number) =>
+    setSearchParams({ dirminsize: n === 0 ? null : String(n), diroffset: null });
+
+  const rawOffset = useSearchParam("diroffset");
+  const offset = rawOffset ? Number(rawOffset) : 0;
+  const setOffset = (n: number) =>
+    setSearchParams({ diroffset: n === 0 ? null : String(n) });
+
   const [cleanupTarget, setCleanupTarget] = useState<{
     group: DuplicateDirectoryGroup;
     keepDir: DuplicateDirectoryGroupMember;
@@ -785,7 +979,7 @@ function DirectoryDuplicatesView({
         <label className="text-xs text-zinc-500">Sort by</label>
         <select
           value={sort}
-          onChange={(e) => { setSort(e.target.value as DirSortOption); setOffset(0); }}
+          onChange={(e) => setSort(e.target.value as DirSortOption)}
           className={selectClass}
         >
           {(Object.keys(DIR_SORT_LABELS) as DirSortOption[]).map((k) => (
@@ -795,7 +989,7 @@ function DirectoryDuplicatesView({
 
         <select
           value={minSize}
-          onChange={(e) => { setMinSize(Number(e.target.value)); setOffset(0); }}
+          onChange={(e) => setMinSize(Number(e.target.value))}
           className={selectClass}
         >
           {MIN_SIZE_OPTIONS.map((o) => (
@@ -839,8 +1033,8 @@ function DirectoryDuplicatesView({
         <Pagination
           offset={offset}
           total={data.totalGroups}
-          onPrev={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
-          onNext={() => setOffset((o) => o + PAGE_SIZE)}
+          onPrev={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+          onNext={() => setOffset(offset + PAGE_SIZE)}
         />
       )}
 
@@ -899,11 +1093,36 @@ export function DuplicateExplorer({
   diskId: number;
   duplicateJobId?: number;
 }) {
-  const [viewMode, setViewMode] = useState<ViewMode>("files");
-  const [sort, setSort] = useState<SortOption>("wasted");
-  const [minSize, setMinSize] = useState(0);
-  const [minCopies, setMinCopies] = useState(2);
-  const [offset, setOffset] = useState(0);
+  // URL-backed state — readers and setters mirror to ?d... query params on
+  // the current page so filters/tab survive refresh, back/forward, and
+  // shareable links. Default values are omitted from the URL to keep it tidy.
+  const rawView = useSearchParam("dview");
+  const viewMode: ViewMode = rawView === "directories" ? "directories" : "files";
+  const setViewMode = (m: ViewMode) =>
+    setSearchParams({ dview: m === "files" ? null : m });
+
+  const rawSort = useSearchParam("dsort");
+  const sort: SortOption =
+    rawSort === "total_size" || rawSort === "file_count" || rawSort === "size"
+      ? rawSort
+      : "wasted";
+  const setSort = (s: SortOption) =>
+    setSearchParams({ dsort: s === "wasted" ? null : s, doffset: null });
+
+  const rawMinSize = useSearchParam("dminsize");
+  const minSize = rawMinSize ? Number(rawMinSize) : 0;
+  const setMinSize = (n: number) =>
+    setSearchParams({ dminsize: n === 0 ? null : String(n), doffset: null });
+
+  const rawMinCopies = useSearchParam("dmincopies");
+  const minCopies = rawMinCopies ? Number(rawMinCopies) : 2;
+  const setMinCopies = (n: number) =>
+    setSearchParams({ dmincopies: n === 2 ? null : String(n), doffset: null });
+
+  const rawOffset = useSearchParam("doffset");
+  const offset = rawOffset ? Number(rawOffset) : 0;
+  const setOffset = (n: number) =>
+    setSearchParams({ doffset: n === 0 ? null : String(n) });
 
   const [cleanupTarget, setCleanupTarget] = useState<{
     group: DuplicateGroup;
@@ -911,8 +1130,6 @@ export function DuplicateExplorer({
   } | null>(null);
 
   const queryClient = useQueryClient();
-
-  const resetOffset = () => setOffset(0);
 
   const { data, isLoading, error } = useQuery<DuplicatesResponse>({
     queryKey: ["duplicates", diskId, duplicateJobId, sort, minSize, minCopies, offset],
@@ -968,11 +1185,11 @@ export function DuplicateExplorer({
         <>
           <ControlsBar
             sort={sort}
-            onSort={(s) => { setSort(s); resetOffset(); }}
+            onSort={setSort}
             minSize={minSize}
-            onMinSize={(n) => { setMinSize(n); resetOffset(); }}
+            onMinSize={setMinSize}
             minCopies={minCopies}
-            onMinCopies={(n) => { setMinCopies(n); resetOffset(); }}
+            onMinCopies={setMinCopies}
           />
 
           {isLoading && (
@@ -1022,8 +1239,8 @@ export function DuplicateExplorer({
                 <Pagination
                   offset={offset}
                   total={data.totalGroups}
-                  onPrev={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
-                  onNext={() => setOffset((o) => o + PAGE_SIZE)}
+                  onPrev={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+                  onNext={() => setOffset(offset + PAGE_SIZE)}
                 />
               )}
             </>
