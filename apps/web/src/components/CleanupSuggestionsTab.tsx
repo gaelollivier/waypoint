@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { CleanupSuggestion, CleanupSuggestionsResponse, ResolvedCleanupSuggestion } from "../api/types";
 import { formatBytes } from "../lib/format";
+import { pathCommonPrefix, stripPrefix } from "./DuplicateExplorer";
 
 /**
  * Lists agent-generated cleanup suggestions for one disk. Each suggestion
@@ -121,12 +122,23 @@ function SuggestionCard({
         </div>
       </div>
 
-      <div className="space-y-1.5 text-xs font-mono break-all">
-        <PathRow kind="keep" path={suggestion.keepPath} />
-        {suggestion.deletePaths.map((p) => (
-          <PathRow key={p} kind="delete" path={p} />
-        ))}
-      </div>
+      {(() => {
+        const allPaths = [suggestion.keepPath, ...suggestion.deletePaths];
+        const prefix = pathCommonPrefix(allPaths);
+        return (
+          <div className="space-y-1.5 text-xs font-mono overflow-x-auto">
+            {prefix && (
+              <div className="text-[11px] text-zinc-500 whitespace-nowrap pb-0.5">
+                <span className="text-zinc-600">in </span>{prefix}
+              </div>
+            )}
+            <PathRow kind="keep" path={stripPrefix(suggestion.keepPath, prefix)} />
+            {suggestion.deletePaths.map((p) => (
+              <PathRow key={p} kind="delete" path={stripPrefix(p, prefix)} />
+            ))}
+          </div>
+        );
+      })()}
 
       {suggestion.rationale && (
         <div className="text-xs italic text-zinc-400 border-l-2 border-zinc-700 pl-2">
@@ -176,7 +188,7 @@ function PathRow({ kind, path }: { kind: "keep" | "delete"; path: string }) {
       >
         {kind}
       </span>
-      <span className={kind === "keep" ? "text-zinc-200" : "text-zinc-400 line-through"}>
+      <span className={kind === "keep" ? "text-zinc-200" : "text-zinc-400"}>
         {path}
       </span>
     </div>

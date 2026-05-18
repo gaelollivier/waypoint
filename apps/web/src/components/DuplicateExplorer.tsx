@@ -36,7 +36,7 @@ const MIN_COPIES_OPTIONS: Array<{ label: string; value: number }> = [
 // Longest common path prefix across the group, trimmed back to the last "/" so
 // every remainder starts at a directory boundary. Returns "" if there's nothing
 // useful to factor out (single item, no shared prefix, or prefix is just "/").
-function pathCommonPrefix(paths: string[]): string {
+export function pathCommonPrefix(paths: string[]): string {
   if (paths.length < 2) return "";
   let prefix = paths[0];
   for (let i = 1; i < paths.length; i++) {
@@ -50,7 +50,7 @@ function pathCommonPrefix(paths: string[]): string {
   return prefix.slice(0, lastSlash + 1);
 }
 
-function stripPrefix(path: string, prefix: string): string {
+export function stripPrefix(path: string, prefix: string): string {
   if (prefix && path.startsWith(prefix)) return path.slice(prefix.length);
   return path;
 }
