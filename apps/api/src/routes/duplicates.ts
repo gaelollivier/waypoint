@@ -3,13 +3,7 @@ import path from "path";
 import { getDb } from "../db/client";
 import { getDiskById } from "../disks/registry";
 import { readDirectory, statFile } from "../fs/disk-reads";
-import { deleteDuplicateFile } from "../fs/disk-writes";
 import { isExcludedName } from "../lib/excluded-names";
-import {
-  computeFileFreshness,
-  freshnessMismatchReason,
-  type FileFreshness,
-} from "../lib/freshness";
 import { getJobManager, registerRunner, unregisterRunner } from "../jobs";
 import { getLockManager } from "../locks";
 import { DuplicateDetectionJobRunner } from "../jobs/duplicates/duplicate-job";
@@ -17,6 +11,10 @@ import {
   DirectoryDuplicateCleanupJobRunner,
   type DirectoryDuplicateCleanupPayload,
 } from "../jobs/duplicates/directory-cleanup-job";
+import {
+  applyDuplicateCleanup,
+  CleanupValidationError,
+} from "../lib/duplicate-cleanup";
 
 export const duplicatesRouter = new Hono();
 
@@ -828,16 +826,11 @@ interface CleanupRequestBody {
 duplicatesRouter.post("/cleanup", async (c) => {
   // ---- Anti-automation guardrails ----
 
-  // 1. User-Agent must look like a real browser
   const userAgent = c.req.header("User-Agent");
   if (!isBrowserUserAgent(userAgent)) {
-    return c.json(
-      { error: "Deletion requests must originate from a web browser" },
-      403
-    );
+    return c.json({ error: "Deletion requests must originate from a web browser" }, 403);
   }
 
-  // 2. Body must include the explicit web-UI flag
   const body = await c.req.json<CleanupRequestBody>();
   if (body.initiatedFromWebUI !== true) {
     return c.json(
@@ -846,31 +839,8 @@ duplicatesRouter.post("/cleanup", async (c) => {
     );
   }
 
-  // ---- Input validation ----
-
   const diskId = Number(c.req.param("id"));
   const { duplicateGroupId, keepFile, deleteFiles } = body;
-
-  if (!Number.isInteger(duplicateGroupId) || duplicateGroupId <= 0) {
-    return c.json({ error: "Invalid duplicateGroupId" }, 400);
-  }
-  if (!keepFile || !Number.isInteger(keepFile.fileId) || keepFile.fileId <= 0 || typeof keepFile.path !== "string") {
-    return c.json({ error: "Invalid keepFile — must include fileId and path" }, 400);
-  }
-  if (!Array.isArray(deleteFiles) || deleteFiles.length === 0) {
-    return c.json({ error: "deleteFiles must be a non-empty array" }, 400);
-  }
-  if (deleteFiles.some((f) => !Number.isInteger(f.fileId) || f.fileId <= 0 || typeof f.path !== "string")) {
-    return c.json({ error: "All deleteFiles entries must include fileId and path" }, 400);
-  }
-
-  const keepFileId = keepFile.fileId;
-  const deleteFileIds = deleteFiles.map((f) => f.fileId);
-
-  // The file to keep must not appear in the delete list
-  if (deleteFileIds.includes(keepFileId)) {
-    return c.json({ error: "keepFile must not appear in deleteFiles" }, 400);
-  }
 
   const db = getDb();
 
@@ -882,175 +852,33 @@ duplicatesRouter.post("/cleanup", async (c) => {
     return c.json({ error: "Disk is not currently connected" }, 409);
   }
 
-  // ---- Duplicate group validation ----
-
-  // Verify the group exists and belongs to a completed job for this disk
-  const group = db
+  // Look up the group's owning detection job up front so we can use its id
+  // as the disk-lock holder. The lock FKs to jobs(id); the detection job
+  // (completed status is fine for FK targeting) is a stable identity for
+  // the duration of this cleanup. The helper re-validates the group fully
+  // before any disk write.
+  const ownerRow = db
     .prepare(
-      `SELECT dg.id, dg.hash_kind, dg.content_hash, dg.sampled_hash, dg.file_count,
-              dg.duplicate_job_id, j.payload_json
+      `SELECT dg.duplicate_job_id
        FROM duplicate_groups dg
        JOIN jobs j ON j.id = dg.duplicate_job_id
        WHERE dg.id = ?
          AND j.target_disk_id = ?
          AND j.status = 'completed'`
     )
-    .get(duplicateGroupId, diskId) as {
-      id: number;
-      hash_kind: "full" | "sampled";
-      content_hash: string;
-      sampled_hash: string;
-      file_count: number;
-      duplicate_job_id: number;
-      payload_json: string | null;
-    } | null;
-
-  if (!group) {
+    .get(duplicateGroupId, diskId) as { duplicate_job_id: number } | null;
+  if (!ownerRow) {
     return c.json(
       { error: "Duplicate group not found or does not belong to a completed job for this disk" },
       404
     );
   }
+  const lockHolderJobId = ownerRow.duplicate_job_id;
 
-  if (group.hash_kind !== "full") {
-    return c.json(
-      { error: "Duplicate cleanup requires full-hash-backed duplicate groups" },
-      409
-    );
-  }
+  // ---- Acquire lock, then run shared cleanup ----
 
-  if (!group.payload_json) {
-    throw new Error(`invariant: duplicate group ${duplicateGroupId} job missing payload_json`);
-  }
-  const duplicateJobPayload = JSON.parse(group.payload_json) as { scanId?: number };
-  if (!Number.isInteger(duplicateJobPayload.scanId)) {
-    throw new Error(`invariant: duplicate group ${duplicateGroupId} job payload missing scanId`);
-  }
-  const selectedScanId = duplicateJobPayload.scanId as number;
-
-  // Verify ALL referenced file IDs (keep + delete) belong to this group
-  const allFileIds = [keepFileId, ...deleteFileIds];
-  const placeholders = allFileIds.map(() => "?").join(", ");
-  const groupFiles = db
-    .prepare(
-      `SELECT dgf.file_id, dgf.path, f.scan_id, f.sampled_hash, f.full_hash, f.size_bytes, f.mtime
-       FROM duplicate_group_files dgf
-       JOIN files f ON f.id = dgf.file_id
-       WHERE dgf.group_id = ? AND dgf.file_id IN (${placeholders})`
-    )
-    .all(duplicateGroupId, ...allFileIds) as Array<{
-      file_id: number;
-      path: string;
-      scan_id: number;
-      sampled_hash: string | null;
-      full_hash: string | null;
-      size_bytes: number;
-      mtime: string;
-    }>;
-
-  const fileMap = new Map(groupFiles.map((f) => [f.file_id, f]));
-
-  // Every referenced file must belong to this group
-  for (const fileId of allFileIds) {
-    if (!fileMap.has(fileId)) {
-      return c.json(
-        { error: `File ${fileId} is not a member of duplicate group ${duplicateGroupId}` },
-        400
-      );
-    }
-  }
-
-  // Verify that the paths sent by the frontend match the paths in the DB.
-  // The human reviewed these exact paths in the confirmation dialog — if they
-  // don't match what the DB has, something is wrong and we must not proceed.
-  const sentFiles = [keepFile, ...deleteFiles];
-  for (const sent of sentFiles) {
-    const dbFile = fileMap.get(sent.fileId);
-    if (!dbFile) throw new Error(`invariant: file ${sent.fileId} disappeared from fileMap after validation`);
-    if (dbFile.path !== sent.path) {
-      return c.json(
-        { error: `Path mismatch for file ${sent.fileId}: UI sent "${sent.path}" but DB has "${dbFile.path}"` },
-        409
-      );
-    }
-  }
-
-  for (const file of groupFiles) {
-    if (file.scan_id !== selectedScanId) {
-      throw new Error(
-        `invariant: duplicate group ${duplicateGroupId} contains file ${file.file_id} from scan ${file.scan_id}, expected ${selectedScanId}`
-      );
-    }
-    if (file.full_hash !== group.content_hash) {
-      return c.json(
-        { error: `Stored full hash mismatch for file ${file.file_id}; refusing to delete` },
-        409
-      );
-    }
-    if (file.sampled_hash == null) {
-      throw new Error(`invariant: full-hash duplicate file ${file.file_id} is missing sampled_hash`);
-    }
-  }
-
-  // After deletion, at least one copy must remain (the keep file)
-  // This is already guaranteed by the keepFileId not being in deleteFileIds,
-  // but verify the group has enough members
-  if (deleteFileIds.length >= group.file_count) {
-    return c.json(
-      { error: "Cannot delete all copies — at least one must remain" },
-      400
-    );
-  }
-
-  // ---- Re-check selected-scan freshness on disk ----
-
-  // Paths in duplicate_group_files are absolute (written by the scan job),
-  // so we use them directly — no mount_path prefix needed.
-  const currentFreshness = new Map<number, FileFreshness>();
-  const expectedFreshness = new Map<number, FileFreshness>();
-  for (const fileId of allFileIds) {
-    const file = fileMap.get(fileId);
-    if (!file) throw new Error(`invariant: file ${fileId} disappeared from fileMap before recheck`);
-    if (file.sampled_hash == null) {
-      throw new Error(`invariant: full-hash duplicate file ${file.file_id} is missing sampled_hash`);
-    }
-
-    const expected: FileFreshness = {
-      size: file.size_bytes,
-      mtime: file.mtime,
-      sampledHash: file.sampled_hash,
-    };
-    expectedFreshness.set(fileId, expected);
-
-    let actual: FileFreshness;
-    try {
-      actual = await computeFileFreshness(file.path);
-    } catch (err: any) {
-      return c.json(
-        { error: `Could not re-check file ${fileId} before deletion: ${err.message}` },
-        409
-      );
-    }
-    currentFreshness.set(fileId, actual);
-
-    const reason = freshnessMismatchReason(expected, actual);
-    if (reason) {
-      return c.json(
-        { error: `File ${fileId} no longer matches the selected scan (${reason}); rerun duplicate detection before deleting` },
-        409
-      );
-    }
-  }
-
-  // ---- Acquire the disk write lock (fail-fast) ----
-  //
-  // Holding the lock for the duration of the cleanup keeps a backup-copy or
-  // any other writer from racing us. We use the parent duplicate-detection
-  // job's id as the holder identity so disk_locks.held_by_job_id has a real
-  // FK target; the detection job's status (already completed) is irrelevant
-  // to the lock manager.
   const lockManager = getLockManager();
-  const release = lockManager.tryAcquire(diskId, group.duplicate_job_id);
+  const release = lockManager.tryAcquire(diskId, lockHolderJobId);
   if (!release) {
     return c.json(
       { error: "Another job is currently writing to this disk; try again when it finishes" },
@@ -1058,114 +886,58 @@ duplicatesRouter.post("/cleanup", async (c) => {
     );
   }
 
-  // ---- Execute deletions one by one (fail-fast) ----
-  //
-  // On the first failure we stop the loop and surface the error. Files deleted
-  // before the halt are permanent — we still persist their deleted_at in the
-  // DB so the UI matches disk reality. The halted state is logged to the
-  // parent duplicate-detection job's event log for the audit trail.
-
-  const keepRecord = fileMap.get(keepFileId);
-  if (!keepRecord) throw new Error(`invariant: keep file ${keepFileId} missing before deletion`);
-  const keepActual = currentFreshness.get(keepFileId);
-  const keepExpected = expectedFreshness.get(keepFileId);
-  if (!keepActual || !keepExpected) {
-    throw new Error(`invariant: keep file ${keepFileId} missing freshness record`);
-  }
-
-  const results: Array<{
-    fileId: number;
-    path: string;
-    status: "deleted";
-  }> = [];
-
-  let failedAt: { fileId: number; path: string; error: string } | null = null;
-
+  let result;
   try {
-    for (const fileId of deleteFileIds) {
-      const deleteRecord = fileMap.get(fileId);
-      if (!deleteRecord) throw new Error(`invariant: delete file ${fileId} missing before deletion`);
-      const deleteActual = currentFreshness.get(fileId);
-      const deleteExpected = expectedFreshness.get(fileId);
-      if (!deleteActual || !deleteExpected) {
-        throw new Error(`invariant: delete file ${fileId} missing freshness record`);
-      }
-
-      try {
-        await deleteDuplicateFile({
-          deletePath: deleteRecord.path,
-          keepPath: keepRecord.path,
-          diskMountPath: disk.mount_path,
-          expectedFullHash: group.content_hash,
-          deleteFullHash: deleteRecord.full_hash!,
-          keepFullHash: keepRecord.full_hash!,
-          deleteExpected,
-          keepExpected,
-          deleteActual,
-          keepActual,
-        });
-        results.push({ fileId, path: deleteRecord.path, status: "deleted" });
-      } catch (err: any) {
-        failedAt = { fileId, path: deleteRecord.path, error: err.message };
-        break;
-      }
-    }
-  } finally {
-    release();
-  }
-
-  // Persist deletion records for files that made it through before any halt.
-  // INSERT OR REPLACE keeps this idempotent if the same scan's file is somehow
-  // deleted twice across runs — the deleted_at is updated to the most recent
-  // attempt, which matches what a user would expect to see in the UI.
-  if (results.length > 0) {
-    const now = new Date().toISOString();
-    const recordDeleted = db.prepare(
-      "INSERT OR REPLACE INTO deleted_files (file_id, scan_id, deleted_at) VALUES (?, ?, ?)"
+    result = await applyDuplicateCleanup(
+      db,
+      { diskId, diskMountPath: disk.mount_path },
+      { duplicateGroupId, keepFile, deleteFiles }
     );
-    db.transaction(() => {
-      for (const r of results) {
-        recordDeleted.run(r.fileId, selectedScanId, now);
-      }
-    })();
+  } catch (err) {
+    if (err instanceof CleanupValidationError) {
+      release();
+      return c.json({ error: err.message }, err.status as 400 | 404 | 409);
+    }
+    release();
+    throw err;
   }
+  release();
 
   const jm = getJobManager();
-
-  if (failedAt) {
+  if (result.failedAt) {
     jm.logEvent(
-      group.duplicate_job_id,
+      lockHolderJobId,
       "error",
       "duplicate_cleanup_halted",
-      `File cleanup halted after ${results.length}/${deleteFileIds.length} deletion${deleteFileIds.length === 1 ? "" : "s"}: ${failedAt.error}`,
-      { duplicateGroupId, keepFileId, deletedCount: results.length, failedAt }
+      `File cleanup halted after ${result.deletedCount}/${deleteFiles.length} deletion${deleteFiles.length === 1 ? "" : "s"}: ${result.failedAt.error}`,
+      { duplicateGroupId, keepFileId: keepFile.fileId, deletedCount: result.deletedCount, failedAt: result.failedAt }
     );
     return c.json(
       {
-        error: `Cleanup halted: ${failedAt.error}`,
+        error: `Cleanup halted: ${result.failedAt.error}`,
         duplicateGroupId,
-        keepFileId,
-        deletedCount: results.length,
-        results,
-        failedAt,
+        keepFileId: keepFile.fileId,
+        deletedCount: result.deletedCount,
+        results: result.results,
+        failedAt: result.failedAt,
       },
       500
     );
   }
 
   jm.logEvent(
-    group.duplicate_job_id,
+    lockHolderJobId,
     "info",
     "duplicate_cleanup_succeeded",
-    `Deleted ${results.length} duplicate file${results.length === 1 ? "" : "s"} (keeping ${keepRecord.path})`,
-    { duplicateGroupId, keepFileId, deletedCount: results.length }
+    `Deleted ${result.deletedCount} duplicate file${result.deletedCount === 1 ? "" : "s"} (keeping ${keepFile.path})`,
+    { duplicateGroupId, keepFileId: keepFile.fileId, deletedCount: result.deletedCount }
   );
 
   return c.json({
     duplicateGroupId,
-    keepFileId,
-    deletedCount: results.length,
-    results,
+    keepFileId: keepFile.fileId,
+    deletedCount: result.deletedCount,
+    results: result.results,
   });
 });
 

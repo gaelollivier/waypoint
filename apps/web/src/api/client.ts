@@ -1,4 +1,4 @@
-import type { AgentNotes, CleanupResponse, CleanupSuggestionsResponse, DeletionHistoryResponse, DirectoryGroupFilesResponse, DirectoryGroupInventoryResponse, Disk, DiffJobSummary, DiffTreeResponse, DuplicateDirectoriesResponse, DuplicateJobSummary, DuplicateScanSummary, DuplicatesResponse, Job, JobEvent, TreeResponse } from "./types";
+import type { AgentNotes, CleanupApplyResponse, CleanupResponse, CleanupSuggestionsResponse, DeletionHistoryResponse, DirectoryGroupFilesResponse, DirectoryGroupInventoryResponse, Disk, DiffJobSummary, DiffTreeResponse, DuplicateDirectoriesResponse, DuplicateJobSummary, DuplicateScanSummary, DuplicatesResponse, Job, JobEvent, TreeResponse } from "./types";
 
 const BASE = "/api";
 
@@ -258,11 +258,14 @@ export const api = {
     createSuggestion: (
       diskId: number,
       body: {
-        contentHash: string;
-        keepPath: string;
-        deletePaths: string[];
-        sizeBytes: number;
+        members: Array<{
+          contentHash: string;
+          keepPath: string;
+          deletePaths: string[];
+          sizeBytes: number;
+        }>;
         rationale?: string;
+        batchKey?: string | null;
       }
     ) =>
       request<{ id: number; diskId: number }>(`/disks/${diskId}/cleanup/suggestions`, {
@@ -270,10 +273,13 @@ export const api = {
         body: JSON.stringify(body),
       }),
 
-    markApplied: (diskId: number, suggestionId: number) =>
-      request<{ id: number; status: "applied"; appliedAt: string }>(
-        `/disks/${diskId}/cleanup/suggestions/${suggestionId}/applied`,
-        { method: "POST" }
+    apply: (diskId: number, suggestionId: number) =>
+      request<CleanupApplyResponse>(
+        `/disks/${diskId}/cleanup/suggestions/${suggestionId}/apply`,
+        {
+          method: "POST",
+          body: JSON.stringify({ initiatedFromWebUI: true }),
+        }
       ),
 
     markDismissed: (diskId: number, suggestionId: number) =>

@@ -323,33 +323,49 @@ export interface DeletionHistoryResponse {
   events: DeletionHistoryEvent[];
 }
 
-interface CleanupSuggestionBase {
+interface CleanupSuggestionMemberBase {
   id: number;
   contentHash: string;
   keepPath: string;
   deletePaths: string[];
   sizeBytes: number;
   wastedBytes: number;
-  rationale: string;
-  status: "pending" | "applied" | "dismissed";
-  createdAt: string;
-  appliedAt: string | null;
-  dismissedAt: string | null;
 }
 
-export interface ResolvedCleanupSuggestion extends CleanupSuggestionBase {
+export interface ResolvedSuggestionMember extends CleanupSuggestionMemberBase {
   resolved: true;
   duplicateGroupId: number;
   keepFile: { fileId: number; path: string };
   deleteFiles: Array<{ fileId: number; path: string }>;
 }
 
-export interface StaleCleanupSuggestion extends CleanupSuggestionBase {
+export interface StaleSuggestionMember extends CleanupSuggestionMemberBase {
   resolved: false;
   staleReason: string | null;
 }
 
-export type CleanupSuggestion = ResolvedCleanupSuggestion | StaleCleanupSuggestion;
+export type CleanupSuggestionMember = ResolvedSuggestionMember | StaleSuggestionMember;
+
+/**
+ * A "suggestion" is a batch of one or more members. Singleton batches still
+ * render as one card; multi-member batches render members under a shared
+ * prefix and apply atomically through one server-side call.
+ */
+export interface CleanupSuggestion {
+  id: number;
+  status: "pending" | "applied" | "dismissed";
+  rationale: string;
+  batchKey: string | null;
+  createdAt: string;
+  appliedAt: string | null;
+  dismissedAt: string | null;
+  memberCount: number;
+  totalSizeBytes: number;
+  totalWastedBytes: number;
+  /** True when every member resolves and the batch is `pending`. */
+  allResolved: boolean;
+  members: CleanupSuggestionMember[];
+}
 
 export interface CleanupSuggestionsResponse {
   diskId: number;
@@ -358,4 +374,21 @@ export interface CleanupSuggestionsResponse {
   limit: number;
   offset: number;
   suggestions: CleanupSuggestion[];
+}
+
+export interface CleanupApplyMemberResult {
+  memberId: number;
+  duplicateGroupId: number;
+  keepFileId: number;
+  deletedCount: number;
+  results: Array<{ fileId: number; path: string; status: "deleted" }>;
+  failedAt: { fileId: number; path: string; error: string } | null;
+}
+
+export interface CleanupApplyResponse {
+  suggestionId: number;
+  status: "applied";
+  appliedAt: string;
+  totalDeleted: number;
+  members: CleanupApplyMemberResult[];
 }

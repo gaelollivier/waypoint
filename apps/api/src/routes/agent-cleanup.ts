@@ -1,25 +1,29 @@
 import { Hono } from "hono";
 import { getDb } from "../db/client";
 import { getDiskById } from "../disks/registry";
+import { getJobManager } from "../jobs";
+import { getLockManager } from "../locks";
+import {
+  applyDuplicateCleanup,
+  CleanupValidationError,
+} from "../lib/duplicate-cleanup";
 
 // ---------------------------------------------------------------------------
 // Agent-driven cleanup support: deletion history, freeform notes, and
-// path-keyed cleanup suggestions. Suggestions are advisory rows in SQLite —
-// they are NEVER applied by this router. The web UI's Apply button calls the
-// existing /api/disks/:id/duplicates/cleanup endpoint, which enforces the
-// browser-UA + initiatedFromWebUI guardrails. Suggestions here only describe
-// what an agent thinks should happen; humans still pull the trigger.
+// path-keyed cleanup suggestions. A "suggestion" is a BATCH — a set of one
+// or more (content_hash, keep_path, delete_paths) members the user can
+// accept or reject as one unit. The batch apply endpoint enforces the same
+// browser-UA + initiatedFromWebUI guardrails as manual cleanup, holds the
+// disk write lock once across all members, and runs the shared
+// applyDuplicateCleanup helper per member.
 // ---------------------------------------------------------------------------
 
 export const agentCleanupRouter = new Hono();
 
 // ---------------------------------------------------------------------------
 // GET /api/disks/:id/cleanup/history
-// Paged past deletion events on this disk, with the surviving sibling paths
-// for each deleted file (so an agent can mine keep-vs-delete patterns).
-// Each row corresponds to one deletion event; siblings come from the same
-// scan snapshot the deletion was made against.
-// Query params: limit (default 100, max 500), offset (default 0)
+// Paged past deletion events on this disk with surviving sibling paths.
+// (Unchanged from v1 — still a per-file history view.)
 // ---------------------------------------------------------------------------
 agentCleanupRouter.get("/history", (c) => {
   const diskId = Number(c.req.param("id"));
@@ -30,9 +34,6 @@ agentCleanupRouter.get("/history", (c) => {
   const disk = getDiskById(db, diskId);
   if (!disk) return c.json({ error: "Disk not found" }, 404);
 
-  // Pull deletions on this disk, newest first. The join through files gives
-  // us hash + path + scan_id; disk_id is filtered at the files level (PK
-  // join on file_id is index-backed).
   const rows = db
     .prepare(
       `SELECT
@@ -59,10 +60,6 @@ agentCleanupRouter.get("/history", (c) => {
       path: string;
     }>;
 
-  // For each deletion, find sibling paths in the same scan with the same
-  // full_hash. A sibling is a file with matching hash that was NOT itself
-  // deleted (i.e. it's a candidate "keep" copy). We only consider full-hash
-  // siblings since the cleanup endpoint only supports full-hash groups.
   const siblingStmt = db.prepare(
     `SELECT f.path
      FROM files f
@@ -99,19 +96,12 @@ agentCleanupRouter.get("/history", (c) => {
     )
     .get(diskId) as { n: number };
 
-  return c.json({
-    diskId,
-    total: total.n,
-    limit,
-    offset,
-    events,
-  });
+  return c.json({ diskId, total: total.n, limit, offset, events });
 });
 
 // ---------------------------------------------------------------------------
-// GET /api/disks/:id/cleanup/notes
-// Returns the agent's freeform markdown notes for this disk. Returns
-// { body: "", updatedAt: null } if no row exists yet.
+// GET / PUT /api/disks/:id/cleanup/notes
+// One freeform markdown blob per disk. Unchanged from v1.
 // ---------------------------------------------------------------------------
 agentCleanupRouter.get("/notes", (c) => {
   const diskId = Number(c.req.param("id"));
@@ -130,11 +120,6 @@ agentCleanupRouter.get("/notes", (c) => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// PUT /api/disks/:id/cleanup/notes
-// Upserts the agent notes blob for this disk.
-// Body: { body: string }
-// ---------------------------------------------------------------------------
 agentCleanupRouter.put("/notes", async (c) => {
   const diskId = Number(c.req.param("id"));
   const db = getDb();
@@ -156,50 +141,33 @@ agentCleanupRouter.put("/notes", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// Suggestion resolution
-//
-// Suggestions are stored by path + content_hash and must resolve against
-// the LATEST completed duplicate_detection job for the disk. Resolution can
-// fail in several ways — paths gone, hash drifted, no detection run yet —
-// and those failures are surfaced as a `stale` variant so the UI can keep
-// rendering the row without offering an Apply.
+// Per-member resolution against the latest completed duplicate detection.
+// Same shape as v1 — each member resolves independently — except the result
+// no longer carries the suggestion id (the parent batch carries that).
 // ---------------------------------------------------------------------------
 
-interface ResolvedFile {
-  fileId: number;
-  path: string;
-  fullHash: string | null;
-}
-
-interface ResolvedSuggestion {
+interface ResolvedMember {
   resolved: true;
   duplicateGroupId: number;
   keepFile: { fileId: number; path: string };
   deleteFiles: Array<{ fileId: number; path: string }>;
 }
 
-interface StaleSuggestion {
+interface StaleMember {
   resolved: false;
   staleReason: string;
 }
 
-function resolveSuggestion(
+function resolveMember(
   db: ReturnType<typeof getDb>,
-  ctx: {
-    duplicateJobId: number | null;
-    scanId: number | null;
-  },
-  suggestion: {
-    contentHash: string;
-    keepPath: string;
-    deletePaths: string[];
-  }
-): ResolvedSuggestion | StaleSuggestion {
+  ctx: { duplicateJobId: number | null; scanId: number | null },
+  member: { contentHash: string; keepPath: string; deletePaths: string[] }
+): ResolvedMember | StaleMember {
   if (ctx.duplicateJobId === null || ctx.scanId === null) {
     return { resolved: false, staleReason: "no completed duplicate detection for this disk" };
   }
 
-  const allPaths = [suggestion.keepPath, ...suggestion.deletePaths];
+  const allPaths = [member.keepPath, ...member.deletePaths];
   const placeholders = allPaths.map(() => "?").join(", ");
   const fileRows = db
     .prepare(
@@ -209,34 +177,28 @@ function resolveSuggestion(
     )
     .all(ctx.scanId, ...allPaths) as Array<{ id: number; path: string; full_hash: string | null }>;
 
-  const byPath = new Map<string, ResolvedFile>();
-  for (const r of fileRows) {
-    byPath.set(r.path, { fileId: r.id, path: r.path, fullHash: r.full_hash });
-  }
+  const byPath = new Map(fileRows.map((r) => [r.path, r]));
 
-  const keep = byPath.get(suggestion.keepPath);
+  const keep = byPath.get(member.keepPath);
   if (!keep) {
-    return { resolved: false, staleReason: `keep path no longer present in latest scan: ${suggestion.keepPath}` };
+    return { resolved: false, staleReason: `keep path no longer present in latest scan: ${member.keepPath}` };
   }
-  if (keep.fullHash !== suggestion.contentHash) {
+  if (keep.full_hash !== member.contentHash) {
     return { resolved: false, staleReason: "keep file hash drifted from suggestion content_hash" };
   }
 
   const deleteFiles: Array<{ fileId: number; path: string }> = [];
-  for (const dp of suggestion.deletePaths) {
+  for (const dp of member.deletePaths) {
     const f = byPath.get(dp);
     if (!f) {
       return { resolved: false, staleReason: `delete path no longer present in latest scan: ${dp}` };
     }
-    if (f.fullHash !== suggestion.contentHash) {
+    if (f.full_hash !== member.contentHash) {
       return { resolved: false, staleReason: `delete file hash drifted: ${dp}` };
     }
-    deleteFiles.push({ fileId: f.fileId, path: f.path });
+    deleteFiles.push({ fileId: f.id, path: f.path });
   }
 
-  // Find the duplicate group in the latest detection that contains the keep
-  // file. Uses the new duplicate_group_files(file_id) index plus the existing
-  // duplicate_groups_job index to constrain to this disk's latest job.
   const groupRow = db
     .prepare(
       `SELECT dgf.group_id
@@ -247,7 +209,7 @@ function resolveSuggestion(
          AND dg.content_hash = ?
        LIMIT 1`
     )
-    .get(keep.fileId, ctx.duplicateJobId, suggestion.contentHash) as { group_id: number } | null;
+    .get(keep.id, ctx.duplicateJobId, member.contentHash) as { group_id: number } | null;
 
   if (!groupRow) {
     return { resolved: false, staleReason: "no matching duplicate group in the latest detection" };
@@ -256,39 +218,21 @@ function resolveSuggestion(
   return {
     resolved: true,
     duplicateGroupId: groupRow.group_id,
-    keepFile: { fileId: keep.fileId, path: keep.path },
+    keepFile: { fileId: keep.id, path: keep.path },
     deleteFiles,
   };
 }
 
-// ---------------------------------------------------------------------------
-// GET /api/disks/:id/cleanup/suggestions
-// List suggestions. Defaults to status=pending. Resolves each pending row
-// against the latest completed duplicate detection so the UI's Apply button
-// has ready-to-send fileIds.
-// Query params:
-//   status — 'pending' (default) | 'applied' | 'dismissed' | 'all'
-//   limit  — default 50, max 200
-//   offset — default 0
-// ---------------------------------------------------------------------------
-agentCleanupRouter.get("/suggestions", (c) => {
-  const diskId  = Number(c.req.param("id"));
-  const status  = c.req.query("status") ?? "pending";
-  const limit   = Math.min(Number(c.req.query("limit") ?? 50), 200);
-  const offset  = Number(c.req.query("offset") ?? 0);
-
-  if (!["pending", "applied", "dismissed", "all"].includes(status)) {
-    return c.json({ error: "Invalid status filter" }, 400);
-  }
-
-  const db = getDb();
-  const disk = getDiskById(db, diskId);
-  if (!disk) return c.json({ error: "Disk not found" }, 404);
-
-  // Resolve latest duplicate-detection job + scan_id for this disk. Tiebreak
-  // by `id DESC` so the most recently inserted job wins when completed_at is
-  // identical (test fixtures hit this; real timestamps can too).
-  const latestJob = db
+/**
+ * Resolves the latest completed duplicate detection job for a disk and
+ * returns its id + scan id. Returns `{ duplicateJobId: null, scanId: null }`
+ * when no detection has completed yet (suggestions then all resolve stale).
+ */
+function latestDetectionContext(
+  db: ReturnType<typeof getDb>,
+  diskId: number
+): { duplicateJobId: number | null; scanId: number | null } {
+  const row = db
     .prepare(
       `SELECT id, payload_json FROM jobs
        WHERE type = 'duplicate_detection'
@@ -299,116 +243,203 @@ agentCleanupRouter.get("/suggestions", (c) => {
     )
     .get(diskId) as { id: number; payload_json: string | null } | null;
 
-  let duplicateJobId: number | null = null;
-  let scanId: number | null = null;
-  if (latestJob && latestJob.payload_json) {
-    const payload = JSON.parse(latestJob.payload_json) as { scanId?: number };
-    if (Number.isInteger(payload.scanId)) {
-      duplicateJobId = latestJob.id;
-      scanId = payload.scanId as number;
-    }
+  if (!row || !row.payload_json) return { duplicateJobId: null, scanId: null };
+  const payload = JSON.parse(row.payload_json) as { scanId?: number };
+  if (!Number.isInteger(payload.scanId)) return { duplicateJobId: null, scanId: null };
+  return { duplicateJobId: row.id, scanId: payload.scanId as number };
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/disks/:id/cleanup/suggestions
+// List batches. Defaults to status=pending. Each batch resolves its members
+// independently against the latest detection. A batch is "actionable" (Apply
+// can be enabled) iff status === 'pending' AND every member resolved.
+// ---------------------------------------------------------------------------
+agentCleanupRouter.get("/suggestions", (c) => {
+  const diskId = Number(c.req.param("id"));
+  const status = c.req.query("status") ?? "pending";
+  const limit  = Math.min(Number(c.req.query("limit") ?? 50), 200);
+  const offset = Number(c.req.query("offset") ?? 0);
+
+  if (!["pending", "applied", "dismissed", "all"].includes(status)) {
+    return c.json({ error: "Invalid status filter" }, 400);
   }
+
+  const db = getDb();
+  const disk = getDiskById(db, diskId);
+  if (!disk) return c.json({ error: "Disk not found" }, 404);
+
+  const ctx = latestDetectionContext(db, diskId);
 
   const whereStatus = status === "all" ? "" : "AND status = ?";
   const params: Array<number | string> = [diskId];
   if (status !== "all") params.push(status);
-  params.push(limit, offset);
 
-  const rows = db
+  // We sort by total wasted bytes (computed from members) so a large
+  // multi-file batch surfaces over a single-file one. SQLite can't order by
+  // the JSON length cheaply, so we fetch then sort in JS — counts here are
+  // small (page size ≤ 200) so the cost is fine.
+  const parents = db
     .prepare(
-      `SELECT id, content_hash, keep_path, delete_paths, size_bytes, rationale,
-              status, created_at, applied_at, dismissed_at
+      `SELECT id, status, rationale, batch_key, created_at, applied_at, dismissed_at
        FROM cleanup_suggestions
        WHERE disk_id = ? ${whereStatus}
-       ORDER BY size_bytes DESC, id DESC
-       LIMIT ? OFFSET ?`
+       ORDER BY id DESC`
     )
     .all(...params) as Array<{
       id: number;
-      content_hash: string;
-      keep_path: string;
-      delete_paths: string;
-      size_bytes: number;
-      rationale: string;
       status: "pending" | "applied" | "dismissed";
+      rationale: string;
+      batch_key: string | null;
       created_at: string;
       applied_at: string | null;
       dismissed_at: string | null;
     }>;
 
-  const totalRow = db
-    .prepare(
-      `SELECT COUNT(*) AS n FROM cleanup_suggestions WHERE disk_id = ? ${whereStatus}`
-    )
-    .get(...(status === "all" ? [diskId] : [diskId, status])) as { n: number };
-
-  const suggestions = rows.map((r) => {
-    const deletePaths = JSON.parse(r.delete_paths) as string[];
-    const wastedBytes = r.size_bytes * deletePaths.length;
-    const base = {
-      id: r.id,
-      contentHash: r.content_hash,
-      keepPath: r.keep_path,
-      deletePaths,
-      sizeBytes: r.size_bytes,
-      wastedBytes,
-      rationale: r.rationale,
-      status: r.status,
-      createdAt: r.created_at,
-      appliedAt: r.applied_at,
-      dismissedAt: r.dismissed_at,
-    };
-
-    // Only pending suggestions need resolution — applied/dismissed are historical.
-    if (r.status !== "pending") {
-      return { ...base, resolved: false as const, staleReason: null };
-    }
-
-    const resolution = resolveSuggestion(db, { duplicateJobId, scanId }, {
-      contentHash: r.content_hash,
-      keepPath: r.keep_path,
-      deletePaths,
+  if (parents.length === 0) {
+    const total = db
+      .prepare(`SELECT COUNT(*) AS n FROM cleanup_suggestions WHERE disk_id = ? ${whereStatus}`)
+      .get(...(status === "all" ? [diskId] : [diskId, status])) as { n: number };
+    return c.json({
+      diskId,
+      duplicateJobId: ctx.duplicateJobId,
+      total: total.n,
+      limit,
+      offset,
+      suggestions: [],
     });
-    if (resolution.resolved) {
-      return {
-        ...base,
-        resolved: true as const,
-        duplicateGroupId: resolution.duplicateGroupId,
-        keepFile: resolution.keepFile,
-        deleteFiles: resolution.deleteFiles,
-      };
-    } else {
-      return {
-        ...base,
-        resolved: false as const,
-        staleReason: resolution.staleReason,
-      };
+  }
+
+  // Fetch all members for this page of parents in one query.
+  const parentIds = parents.map((p) => p.id);
+  const placeholders = parentIds.map(() => "?").join(", ");
+  const memberRows = db
+    .prepare(
+      `SELECT id, suggestion_id, content_hash, keep_path, delete_paths, size_bytes
+       FROM cleanup_suggestion_members
+       WHERE suggestion_id IN (${placeholders})
+       ORDER BY suggestion_id, id`
+    )
+    .all(...parentIds) as Array<{
+      id: number;
+      suggestion_id: number;
+      content_hash: string;
+      keep_path: string;
+      delete_paths: string;
+      size_bytes: number;
+    }>;
+
+  const membersByParent = new Map<number, typeof memberRows>();
+  for (const m of memberRows) {
+    if (!membersByParent.has(m.suggestion_id)) membersByParent.set(m.suggestion_id, []);
+    membersByParent.get(m.suggestion_id)!.push(m);
+  }
+
+  const suggestions = parents.map((p) => {
+    const rawMembers = membersByParent.get(p.id) ?? [];
+    if (rawMembers.length === 0) {
+      throw new Error(`invariant: suggestion ${p.id} has no members`);
     }
+
+    const members = rawMembers.map((m) => {
+      const deletePaths = JSON.parse(m.delete_paths) as string[];
+      const wastedBytes = m.size_bytes * deletePaths.length;
+      const base = {
+        id: m.id,
+        contentHash: m.content_hash,
+        keepPath: m.keep_path,
+        deletePaths,
+        sizeBytes: m.size_bytes,
+        wastedBytes,
+      };
+      if (p.status !== "pending") {
+        return { ...base, resolved: false as const, staleReason: null };
+      }
+      const resolution = resolveMember(db, ctx, {
+        contentHash: m.content_hash,
+        keepPath: m.keep_path,
+        deletePaths,
+      });
+      if (resolution.resolved) {
+        return {
+          ...base,
+          resolved: true as const,
+          duplicateGroupId: resolution.duplicateGroupId,
+          keepFile: resolution.keepFile,
+          deleteFiles: resolution.deleteFiles,
+        };
+      }
+      return { ...base, resolved: false as const, staleReason: resolution.staleReason };
+    });
+
+    const totalSizeBytes = members.reduce((s, m) => s + m.sizeBytes, 0);
+    const totalWastedBytes = members.reduce((s, m) => s + m.wastedBytes, 0);
+    const allResolved = members.every((m) => m.resolved);
+
+    return {
+      id: p.id,
+      status: p.status,
+      rationale: p.rationale,
+      batchKey: p.batch_key,
+      createdAt: p.created_at,
+      appliedAt: p.applied_at,
+      dismissedAt: p.dismissed_at,
+      memberCount: members.length,
+      totalSizeBytes,
+      totalWastedBytes,
+      allResolved: p.status === "pending" ? allResolved : false,
+      members,
+    };
   });
+
+  // Sort by total wasted bytes desc (with id tiebreaker for stability), then
+  // page in JS.
+  suggestions.sort((a, b) => {
+    if (b.totalWastedBytes !== a.totalWastedBytes) return b.totalWastedBytes - a.totalWastedBytes;
+    return b.id - a.id;
+  });
+  const paged = suggestions.slice(offset, offset + limit);
+
+  const total = db
+    .prepare(`SELECT COUNT(*) AS n FROM cleanup_suggestions WHERE disk_id = ? ${whereStatus}`)
+    .get(...(status === "all" ? [diskId] : [diskId, status])) as { n: number };
 
   return c.json({
     diskId,
-    duplicateJobId,
-    total: totalRow.n,
+    duplicateJobId: ctx.duplicateJobId,
+    total: total.n,
     limit,
     offset,
-    suggestions,
+    suggestions: paged,
   });
 });
 
 // ---------------------------------------------------------------------------
 // POST /api/disks/:id/cleanup/suggestions
-// Create a new suggestion. If a pending suggestion exists for the same
-// (disk_id, content_hash), it is replaced by the new one (the unique partial
-// index enforces one pending row per content hash).
-// Body: { contentHash, keepPath, deletePaths[], sizeBytes, rationale? }
+// Create a batch. If `batchKey` is provided AND a pending batch already
+// exists for (disk, batchKey), the old batch is replaced.
+//
+// Body:
+//   {
+//     rationale?: string,
+//     batchKey?: string | null,
+//     members: [
+//       { contentHash: string, keepPath: string, deletePaths: string[], sizeBytes: number }
+//     ]
+//   }
+//
+// A singleton batch is just `members: [oneEntry]`.
 // ---------------------------------------------------------------------------
-interface CreateSuggestionBody {
+interface CreateBatchMember {
   contentHash: string;
   keepPath: string;
   deletePaths: string[];
   sizeBytes: number;
+}
+interface CreateBatchBody {
   rationale?: string;
+  batchKey?: string | null;
+  members: CreateBatchMember[];
 }
 
 agentCleanupRouter.post("/suggestions", async (c) => {
@@ -417,69 +448,118 @@ agentCleanupRouter.post("/suggestions", async (c) => {
   const disk = getDiskById(db, diskId);
   if (!disk) return c.json({ error: "Disk not found" }, 404);
 
-  const body = await c.req.json<CreateSuggestionBody>().catch(() => null);
+  const body = await c.req.json<CreateBatchBody>().catch(() => null);
   if (!body) return c.json({ error: "Invalid JSON body" }, 400);
 
-  if (typeof body.contentHash !== "string" || body.contentHash.length === 0) {
-    return c.json({ error: "contentHash must be a non-empty string" }, 400);
-  }
-  if (typeof body.keepPath !== "string" || !body.keepPath.startsWith("/")) {
-    return c.json({ error: "keepPath must be an absolute path" }, 400);
-  }
-  if (!Array.isArray(body.deletePaths) || body.deletePaths.length === 0) {
-    return c.json({ error: "deletePaths must be a non-empty array" }, 400);
-  }
-  for (const dp of body.deletePaths) {
-    if (typeof dp !== "string" || !dp.startsWith("/")) {
-      return c.json({ error: "Every deletePaths entry must be an absolute path" }, 400);
-    }
-    if (dp === body.keepPath) {
-      return c.json({ error: "keepPath must not appear in deletePaths" }, 400);
-    }
-  }
-  // Dedupe deletePaths so callers can't smuggle duplicate entries.
-  const dedupedDeletes = Array.from(new Set(body.deletePaths));
-  if (dedupedDeletes.length !== body.deletePaths.length) {
-    return c.json({ error: "deletePaths contains duplicates" }, 400);
-  }
-  if (!Number.isFinite(body.sizeBytes) || body.sizeBytes < 0) {
-    return c.json({ error: "sizeBytes must be a non-negative number" }, 400);
+  if (!Array.isArray(body.members) || body.members.length === 0) {
+    return c.json({ error: "members must be a non-empty array" }, 400);
   }
   const rationale = typeof body.rationale === "string" ? body.rationale : "";
+  const batchKey =
+    typeof body.batchKey === "string" && body.batchKey.length > 0 ? body.batchKey : null;
 
-  // Replace any existing pending suggestion for this content_hash, then insert.
+  // Per-member validation. We also enforce content_hash uniqueness within
+  // the batch — the DB has a partial unique index, but rejecting here
+  // produces a clean 400 instead of a 500 from a constraint failure.
+  const seenHashes = new Set<string>();
+  for (const m of body.members) {
+    if (typeof m.contentHash !== "string" || m.contentHash.length === 0) {
+      return c.json({ error: "Every member must include a non-empty contentHash" }, 400);
+    }
+    if (seenHashes.has(m.contentHash)) {
+      return c.json({ error: `Duplicate contentHash within batch: ${m.contentHash}` }, 400);
+    }
+    seenHashes.add(m.contentHash);
+    if (typeof m.keepPath !== "string" || !m.keepPath.startsWith("/")) {
+      return c.json({ error: "Every member's keepPath must be an absolute path" }, 400);
+    }
+    if (!Array.isArray(m.deletePaths) || m.deletePaths.length === 0) {
+      return c.json({ error: "Every member's deletePaths must be a non-empty array" }, 400);
+    }
+    for (const dp of m.deletePaths) {
+      if (typeof dp !== "string" || !dp.startsWith("/")) {
+        return c.json({ error: "Every deletePaths entry must be an absolute path" }, 400);
+      }
+      if (dp === m.keepPath) {
+        return c.json({ error: "keepPath must not appear in deletePaths" }, 400);
+      }
+    }
+    const dedupedDeletes = Array.from(new Set(m.deletePaths));
+    if (dedupedDeletes.length !== m.deletePaths.length) {
+      return c.json({ error: "deletePaths contains duplicates within a member" }, 400);
+    }
+    if (!Number.isFinite(m.sizeBytes) || m.sizeBytes < 0) {
+      return c.json({ error: "Every member's sizeBytes must be a non-negative number" }, 400);
+    }
+  }
+
   const insertedId = db.transaction(() => {
-    db.prepare(
-      `DELETE FROM cleanup_suggestions
-       WHERE disk_id = ? AND content_hash = ? AND status = 'pending'`
-    ).run(diskId, body.contentHash);
-
-    const result = db
+    if (batchKey !== null) {
+      db.prepare(
+        `DELETE FROM cleanup_suggestions
+         WHERE disk_id = ? AND batch_key = ? AND status = 'pending'`
+      ).run(diskId, batchKey);
+    }
+    const parent = db
       .prepare(
-        `INSERT INTO cleanup_suggestions
-           (disk_id, content_hash, keep_path, delete_paths, size_bytes, rationale)
-         VALUES (?, ?, ?, ?, ?, ?)`
+        `INSERT INTO cleanup_suggestions (disk_id, rationale, batch_key)
+         VALUES (?, ?, ?) RETURNING id`
       )
-      .run(
-        diskId,
-        body.contentHash,
-        body.keepPath,
-        JSON.stringify(dedupedDeletes),
-        Math.floor(body.sizeBytes),
-        rationale
+      .get(diskId, rationale, batchKey) as { id: number };
+
+    const insertMember = db.prepare(
+      `INSERT INTO cleanup_suggestion_members
+         (suggestion_id, content_hash, keep_path, delete_paths, size_bytes)
+       VALUES (?, ?, ?, ?, ?)`
+    );
+    for (const m of body.members) {
+      insertMember.run(
+        parent.id,
+        m.contentHash,
+        m.keepPath,
+        JSON.stringify(Array.from(new Set(m.deletePaths))),
+        Math.floor(m.sizeBytes)
       );
-    return Number(result.lastInsertRowid);
+    }
+    return parent.id;
   })();
 
   return c.json({ id: insertedId, diskId }, 201);
 });
 
 // ---------------------------------------------------------------------------
-// POST /api/disks/:id/cleanup/suggestions/:suggestionId/applied
-// Mark a suggestion as applied. Called by the UI *after* the existing
-// /duplicates/cleanup endpoint completes successfully.
+// POST /api/disks/:id/cleanup/suggestions/:id/apply
+// Apply a whole pending batch in one shot. Enforces the same browser-UA and
+// initiatedFromWebUI guardrails as the manual /duplicates/cleanup endpoint.
+// Holds the disk write lock for the duration of the batch and runs each
+// member through the shared applyDuplicateCleanup helper.
+//
+// On any per-member failure (validation or delete error) the batch is halted
+// and a 500 is returned with the partial result. Successful members have
+// already been persisted to deleted_files. Status of the batch row stays
+// `pending` so the user can retry after fixing the underlying issue.
+//
+// Body: { initiatedFromWebUI: true }
 // ---------------------------------------------------------------------------
-agentCleanupRouter.post("/suggestions/:suggestionId/applied", (c) => {
+
+function isBrowserUserAgent(ua: string | undefined): boolean {
+  if (!ua) return false;
+  return ua.includes("Mozilla/");
+}
+
+agentCleanupRouter.post("/suggestions/:suggestionId/apply", async (c) => {
+  const userAgent = c.req.header("User-Agent");
+  if (!isBrowserUserAgent(userAgent)) {
+    return c.json({ error: "Deletion requests must originate from a web browser" }, 403);
+  }
+  const body = await c.req.json<{ initiatedFromWebUI?: boolean }>().catch(() => ({} as { initiatedFromWebUI?: boolean }));
+  if (body.initiatedFromWebUI !== true) {
+    return c.json(
+      { error: "Deletion requests must be initiated from the web UI (initiatedFromWebUI must be true)" },
+      403
+    );
+  }
+
   const diskId = Number(c.req.param("id"));
   const suggestionId = Number(c.req.param("suggestionId"));
   if (!Number.isInteger(suggestionId) || suggestionId <= 0) {
@@ -489,25 +569,183 @@ agentCleanupRouter.post("/suggestions/:suggestionId/applied", (c) => {
   const db = getDb();
   const disk = getDiskById(db, diskId);
   if (!disk) return c.json({ error: "Disk not found" }, 404);
+  if (!disk.mount_path) {
+    return c.json({ error: "Disk is not currently connected" }, 409);
+  }
+
+  const parent = db
+    .prepare(
+      `SELECT id, status FROM cleanup_suggestions WHERE id = ? AND disk_id = ?`
+    )
+    .get(suggestionId, diskId) as { id: number; status: string } | null;
+  if (!parent) {
+    return c.json({ error: "Suggestion not found for this disk" }, 404);
+  }
+  if (parent.status !== "pending") {
+    return c.json({ error: `Suggestion is ${parent.status}, not pending` }, 409);
+  }
+
+  const rawMembers = db
+    .prepare(
+      `SELECT id, content_hash, keep_path, delete_paths, size_bytes
+       FROM cleanup_suggestion_members
+       WHERE suggestion_id = ?
+       ORDER BY id`
+    )
+    .all(suggestionId) as Array<{
+      id: number;
+      content_hash: string;
+      keep_path: string;
+      delete_paths: string;
+      size_bytes: number;
+    }>;
+  if (rawMembers.length === 0) {
+    throw new Error(`invariant: suggestion ${suggestionId} has no members`);
+  }
+
+  // Resolve every member upfront. If even one is stale, refuse the apply
+  // before we acquire the lock or touch disk.
+  const ctx = latestDetectionContext(db, diskId);
+  if (ctx.duplicateJobId === null) {
+    return c.json({ error: "No completed duplicate detection for this disk" }, 409);
+  }
+
+  const resolvedMembers: Array<{
+    memberId: number;
+    duplicateGroupId: number;
+    keepFile: { fileId: number; path: string };
+    deleteFiles: Array<{ fileId: number; path: string }>;
+  }> = [];
+
+  for (const m of rawMembers) {
+    const deletePaths = JSON.parse(m.delete_paths) as string[];
+    const r = resolveMember(db, ctx, {
+      contentHash: m.content_hash,
+      keepPath: m.keep_path,
+      deletePaths,
+    });
+    if (!r.resolved) {
+      return c.json(
+        {
+          error: `Cannot apply — member ${m.id} is stale: ${r.staleReason}`,
+          staleMemberId: m.id,
+        },
+        409
+      );
+    }
+    resolvedMembers.push({
+      memberId: m.id,
+      duplicateGroupId: r.duplicateGroupId,
+      keepFile: r.keepFile,
+      deleteFiles: r.deleteFiles,
+    });
+  }
+
+  // Lock holder: the latest detection job. One id covers all members.
+  const lockManager = getLockManager();
+  const release = lockManager.tryAcquire(diskId, ctx.duplicateJobId);
+  if (!release) {
+    return c.json(
+      { error: "Another job is currently writing to this disk; try again when it finishes" },
+      409
+    );
+  }
+
+  const perMemberResults: Array<{
+    memberId: number;
+    duplicateGroupId: number;
+    keepFileId: number;
+    deletedCount: number;
+    results: Array<{ fileId: number; path: string; status: "deleted" }>;
+    failedAt: { fileId: number; path: string; error: string } | null;
+  }> = [];
+  let haltedAt: { memberId: number; error: string } | null = null;
+
+  try {
+    for (const rm of resolvedMembers) {
+      let r;
+      try {
+        r = await applyDuplicateCleanup(
+          db,
+          { diskId, diskMountPath: disk.mount_path },
+          {
+            duplicateGroupId: rm.duplicateGroupId,
+            keepFile: rm.keepFile,
+            deleteFiles: rm.deleteFiles,
+          }
+        );
+      } catch (err) {
+        const message = err instanceof CleanupValidationError ? err.message : (err as Error).message;
+        haltedAt = { memberId: rm.memberId, error: message };
+        break;
+      }
+      perMemberResults.push({
+        memberId: rm.memberId,
+        duplicateGroupId: r.duplicateGroupId,
+        keepFileId: r.keepFileId,
+        deletedCount: r.deletedCount,
+        results: r.results,
+        failedAt: r.failedAt,
+      });
+      if (r.failedAt) {
+        haltedAt = { memberId: rm.memberId, error: r.failedAt.error };
+        break;
+      }
+    }
+  } finally {
+    release();
+  }
+
+  const totalDeleted = perMemberResults.reduce((s, m) => s + m.deletedCount, 0);
+  const jm = getJobManager();
+
+  if (haltedAt) {
+    jm.logEvent(
+      ctx.duplicateJobId,
+      "error",
+      "suggestion_apply_halted",
+      `Suggestion ${suggestionId} apply halted on member ${haltedAt.memberId}: ${haltedAt.error}`,
+      { suggestionId, totalDeleted, haltedAt }
+    );
+    return c.json(
+      {
+        error: `Apply halted on member ${haltedAt.memberId}: ${haltedAt.error}`,
+        suggestionId,
+        totalDeleted,
+        members: perMemberResults,
+        haltedAt,
+      },
+      500
+    );
+  }
 
   const now = new Date().toISOString();
-  const result = db
-    .prepare(
-      `UPDATE cleanup_suggestions
-       SET status = 'applied', applied_at = ?
-       WHERE id = ? AND disk_id = ? AND status = 'pending'`
-    )
-    .run(now, suggestionId, diskId);
+  db.prepare(
+    `UPDATE cleanup_suggestions
+     SET status = 'applied', applied_at = ?
+     WHERE id = ? AND disk_id = ? AND status = 'pending'`
+  ).run(now, suggestionId, diskId);
 
-  if (result.changes === 0) {
-    return c.json({ error: "Suggestion not found or not in pending state" }, 404);
-  }
-  return c.json({ id: suggestionId, status: "applied", appliedAt: now });
+  jm.logEvent(
+    ctx.duplicateJobId,
+    "info",
+    "suggestion_apply_succeeded",
+    `Suggestion ${suggestionId} applied: ${totalDeleted} file${totalDeleted === 1 ? "" : "s"} deleted across ${perMemberResults.length} member${perMemberResults.length === 1 ? "" : "s"}`,
+    { suggestionId, totalDeleted, memberCount: perMemberResults.length }
+  );
+
+  return c.json({
+    suggestionId,
+    status: "applied" as const,
+    appliedAt: now,
+    totalDeleted,
+    members: perMemberResults,
+  });
 });
 
 // ---------------------------------------------------------------------------
-// POST /api/disks/:id/cleanup/suggestions/:suggestionId/dismissed
-// Mark a pending suggestion as dismissed. Kept in the DB for audit.
+// POST /api/disks/:id/cleanup/suggestions/:id/dismissed
+// Mark a pending batch as dismissed. Kept in the DB for audit.
 // ---------------------------------------------------------------------------
 agentCleanupRouter.post("/suggestions/:suggestionId/dismissed", (c) => {
   const diskId = Number(c.req.param("id"));

@@ -52,8 +52,6 @@ function seedDuplicateGroup(
     files.push({ fileId: row.id, path: p });
   }
 
-  // Use prepared insert for duplicate_detection job because insertJob's CHECK
-  // allowlist tracks one column subset; here we need payload_json.
   const dupJobRow = ctx.db
     .prepare(
       `INSERT INTO jobs (type, status, target_disk_id, payload_json, completed_at)
@@ -120,29 +118,35 @@ describe("agent cleanup routes", () => {
     });
   });
 
-  // ── suggestions creation + validation ───────────────────────────────────
+  // ── batch creation + validation ─────────────────────────────────────────
 
-  describe("POST /suggestions", () => {
-    it("creates a pending suggestion", async () => {
+  describe("POST /suggestions (singleton batch)", () => {
+    it("creates a pending singleton batch", async () => {
       const diskId = insertDisk(ctx.db);
       const res = await req(ctx.app, "POST", `/api/disks/${diskId}/cleanup/suggestions`, {
-        contentHash: "h1",
-        keepPath: "/a/keep.bin",
-        deletePaths: ["/a/delete.bin"],
-        sizeBytes: 100,
         rationale: "keep shorter path",
+        members: [
+          { contentHash: "h1", keepPath: "/a/keep.bin", deletePaths: ["/a/delete.bin"], sizeBytes: 100 },
+        ],
       });
       expect(res.status).toBe(201);
       expect(res.body.id).toBeGreaterThan(0);
     });
 
-    it("rejects relative paths", async () => {
+    it("rejects empty members array", async () => {
       const diskId = insertDisk(ctx.db);
       const res = await req(ctx.app, "POST", `/api/disks/${diskId}/cleanup/suggestions`, {
-        contentHash: "h1",
-        keepPath: "a/keep.bin",
-        deletePaths: ["/a/delete.bin"],
-        sizeBytes: 100,
+        members: [],
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("rejects relative paths inside a member", async () => {
+      const diskId = insertDisk(ctx.db);
+      const res = await req(ctx.app, "POST", `/api/disks/${diskId}/cleanup/suggestions`, {
+        members: [
+          { contentHash: "h1", keepPath: "a/keep.bin", deletePaths: ["/a/delete.bin"], sizeBytes: 100 },
+        ],
       });
       expect(res.status).toBe(400);
     });
@@ -150,179 +154,255 @@ describe("agent cleanup routes", () => {
     it("rejects when keepPath appears in deletePaths", async () => {
       const diskId = insertDisk(ctx.db);
       const res = await req(ctx.app, "POST", `/api/disks/${diskId}/cleanup/suggestions`, {
-        contentHash: "h1",
-        keepPath: "/a/x",
-        deletePaths: ["/a/x"],
-        sizeBytes: 100,
+        members: [
+          { contentHash: "h1", keepPath: "/a/x", deletePaths: ["/a/x"], sizeBytes: 100 },
+        ],
       });
       expect(res.status).toBe(400);
     });
 
-    it("rejects duplicate deletePaths", async () => {
+    it("rejects duplicate deletePaths within a member", async () => {
       const diskId = insertDisk(ctx.db);
       const res = await req(ctx.app, "POST", `/api/disks/${diskId}/cleanup/suggestions`, {
-        contentHash: "h1",
-        keepPath: "/a/keep.bin",
-        deletePaths: ["/a/delete.bin", "/a/delete.bin"],
-        sizeBytes: 100,
+        members: [
+          {
+            contentHash: "h1",
+            keepPath: "/a/keep.bin",
+            deletePaths: ["/a/delete.bin", "/a/delete.bin"],
+            sizeBytes: 100,
+          },
+        ],
       });
       expect(res.status).toBe(400);
     });
 
-    it("replaces the previous pending suggestion for the same content_hash", async () => {
+    it("rejects duplicate contentHash within a batch", async () => {
       const diskId = insertDisk(ctx.db);
-      const first = await req(ctx.app, "POST", `/api/disks/${diskId}/cleanup/suggestions`, {
-        contentHash: "h1",
-        keepPath: "/a/keep.bin",
-        deletePaths: ["/a/old-target.bin"],
-        sizeBytes: 100,
+      const res = await req(ctx.app, "POST", `/api/disks/${diskId}/cleanup/suggestions`, {
+        members: [
+          { contentHash: "h1", keepPath: "/a/k.bin", deletePaths: ["/a/d.bin"], sizeBytes: 100 },
+          { contentHash: "h1", keepPath: "/b/k.bin", deletePaths: ["/b/d.bin"], sizeBytes: 100 },
+        ],
       });
-      const second = await req(ctx.app, "POST", `/api/disks/${diskId}/cleanup/suggestions`, {
-        contentHash: "h1",
-        keepPath: "/a/keep.bin",
-        deletePaths: ["/a/new-target.bin"],
-        sizeBytes: 100,
+      expect(res.status).toBe(400);
+    });
+
+    it("replaces a previous pending batch with the same batchKey", async () => {
+      const diskId = insertDisk(ctx.db);
+      await req(ctx.app, "POST", `/api/disks/${diskId}/cleanup/suggestions`, {
+        batchKey: "folder-pair-A",
+        members: [
+          { contentHash: "h1", keepPath: "/a/k.bin", deletePaths: ["/a/old-target.bin"], sizeBytes: 100 },
+        ],
       });
-      expect(first.status).toBe(201);
-      expect(second.status).toBe(201);
+      await req(ctx.app, "POST", `/api/disks/${diskId}/cleanup/suggestions`, {
+        batchKey: "folder-pair-A",
+        members: [
+          { contentHash: "h2", keepPath: "/a/k.bin", deletePaths: ["/a/new-target.bin"], sizeBytes: 100 },
+        ],
+      });
 
       const list = await req(ctx.app, "GET", `/api/disks/${diskId}/cleanup/suggestions`);
       expect(list.body.suggestions).toHaveLength(1);
-      expect(list.body.suggestions[0].deletePaths).toEqual(["/a/new-target.bin"]);
+      expect(list.body.suggestions[0].members).toHaveLength(1);
+      expect(list.body.suggestions[0].members[0].deletePaths).toEqual(["/a/new-target.bin"]);
+    });
+
+    it("creates a multi-member batch", async () => {
+      const diskId = insertDisk(ctx.db);
+      const res = await req(ctx.app, "POST", `/api/disks/${diskId}/cleanup/suggestions`, {
+        rationale: "delete every file in /backup-folder/ that also lives in /source-folder/",
+        batchKey: "folder-pair:source|backup",
+        members: [
+          { contentHash: "h1", keepPath: "/source-folder/a.bin", deletePaths: ["/backup-folder/a.bin"], sizeBytes: 1000 },
+          { contentHash: "h2", keepPath: "/source-folder/b.bin", deletePaths: ["/backup-folder/b.bin"], sizeBytes: 2000 },
+          { contentHash: "h3", keepPath: "/source-folder/c.bin", deletePaths: ["/backup-folder/c.bin"], sizeBytes: 3000 },
+        ],
+      });
+      expect(res.status).toBe(201);
+
+      const list = await req(ctx.app, "GET", `/api/disks/${diskId}/cleanup/suggestions`);
+      expect(list.body.suggestions).toHaveLength(1);
+      const s = list.body.suggestions[0];
+      expect(s.memberCount).toBe(3);
+      expect(s.totalSizeBytes).toBe(6000);
+      expect(s.totalWastedBytes).toBe(6000); // 1 delete each × per-file size
     });
   });
 
-  // ── suggestions resolution + lifecycle ──────────────────────────────────
+  // ── resolution ──────────────────────────────────────────────────────────
 
-  describe("GET /suggestions", () => {
-    it("resolves a pending suggestion against the latest duplicate detection", async () => {
+  describe("GET /suggestions (resolution per member)", () => {
+    it("resolves each member of a singleton batch", async () => {
       const diskId = insertDisk(ctx.db);
       const seed = seedDuplicateGroup(ctx, diskId, {
         paths: ["/photos/a.jpg", "/downloads/a.jpg"],
         contentHash: "hash_a",
       });
       await req(ctx.app, "POST", `/api/disks/${diskId}/cleanup/suggestions`, {
-        contentHash: "hash_a",
-        keepPath: "/photos/a.jpg",
-        deletePaths: ["/downloads/a.jpg"],
-        sizeBytes: 1024,
+        members: [
+          { contentHash: "hash_a", keepPath: "/photos/a.jpg", deletePaths: ["/downloads/a.jpg"], sizeBytes: 1024 },
+        ],
       });
 
       const list = await req(ctx.app, "GET", `/api/disks/${diskId}/cleanup/suggestions`);
       expect(list.status).toBe(200);
       expect(list.body.suggestions).toHaveLength(1);
       const s = list.body.suggestions[0];
-      expect(s.resolved).toBe(true);
-      expect(s.duplicateGroupId).toBe(seed.duplicateGroupId);
-      expect(s.keepFile.path).toBe("/photos/a.jpg");
-      expect(s.deleteFiles).toHaveLength(1);
-      expect(s.deleteFiles[0].path).toBe("/downloads/a.jpg");
-      expect(s.wastedBytes).toBe(1024);
+      expect(s.allResolved).toBe(true);
+      expect(s.members).toHaveLength(1);
+      const m = s.members[0];
+      expect(m.resolved).toBe(true);
+      expect(m.duplicateGroupId).toBe(seed.duplicateGroupId);
+      expect(m.keepFile.path).toBe("/photos/a.jpg");
+      expect(m.deleteFiles).toHaveLength(1);
     });
 
-    it("marks a suggestion stale when the keep path is missing in the latest scan", async () => {
+    it("marks one member stale while leaving the other resolved (allResolved=false)", async () => {
       const diskId = insertDisk(ctx.db);
-      seedDuplicateGroup(ctx, diskId, { paths: ["/photos/a.jpg", "/downloads/a.jpg"] });
-      await req(ctx.app, "POST", `/api/disks/${diskId}/cleanup/suggestions`, {
-        contentHash: "fullhash_a",
-        keepPath: "/photos/MISSING.jpg",
-        deletePaths: ["/downloads/a.jpg"],
-        sizeBytes: 1024,
-      });
-
-      const list = await req(ctx.app, "GET", `/api/disks/${diskId}/cleanup/suggestions`);
-      expect(list.body.suggestions[0].resolved).toBe(false);
-      expect(list.body.suggestions[0].staleReason).toContain("keep path");
-    });
-
-    it("marks a suggestion stale when the content hash drifted on disk", async () => {
-      const diskId = insertDisk(ctx.db);
+      // Seed two distinct groups so one member resolves and one doesn't.
       seedDuplicateGroup(ctx, diskId, {
-        paths: ["/photos/a.jpg", "/downloads/a.jpg"],
-        contentHash: "different_hash",
+        paths: ["/x/a.jpg", "/y/a.jpg"],
+        contentHash: "hash_a",
       });
+      // No seeding for hash_b — the suggestion's second member won't resolve.
       await req(ctx.app, "POST", `/api/disks/${diskId}/cleanup/suggestions`, {
-        contentHash: "old_hash",
-        keepPath: "/photos/a.jpg",
-        deletePaths: ["/downloads/a.jpg"],
-        sizeBytes: 1024,
+        members: [
+          { contentHash: "hash_a", keepPath: "/x/a.jpg", deletePaths: ["/y/a.jpg"], sizeBytes: 1024 },
+          { contentHash: "hash_b", keepPath: "/x/b.jpg", deletePaths: ["/y/b.jpg"], sizeBytes: 2048 },
+        ],
       });
 
       const list = await req(ctx.app, "GET", `/api/disks/${diskId}/cleanup/suggestions`);
-      expect(list.body.suggestions[0].resolved).toBe(false);
-      expect(list.body.suggestions[0].staleReason).toContain("hash drifted");
+      const s = list.body.suggestions[0];
+      expect(s.allResolved).toBe(false);
+      expect(s.members[0].resolved).toBe(true);
+      expect(s.members[1].resolved).toBe(false);
     });
 
-    it("marks all suggestions stale when no duplicate detection has run", async () => {
+    it("survives a re-scan + re-detection: each member re-resolves against the new snapshot", async () => {
       const diskId = insertDisk(ctx.db);
-      await req(ctx.app, "POST", `/api/disks/${diskId}/cleanup/suggestions`, {
-        contentHash: "h1",
-        keepPath: "/a/k.bin",
-        deletePaths: ["/a/d.bin"],
-        sizeBytes: 100,
-      });
-
-      const list = await req(ctx.app, "GET", `/api/disks/${diskId}/cleanup/suggestions`);
-      expect(list.body.duplicateJobId).toBeNull();
-      expect(list.body.suggestions[0].resolved).toBe(false);
-      expect(list.body.suggestions[0].staleReason).toContain("no completed duplicate detection");
-    });
-
-    it("survives a re-scan + re-detection — pending suggestion resolves against the NEW snapshot", async () => {
-      const diskId = insertDisk(ctx.db);
-      // Initial scan + detection.
       seedDuplicateGroup(ctx, diskId, { paths: ["/photos/a.jpg", "/downloads/a.jpg"] });
       await req(ctx.app, "POST", `/api/disks/${diskId}/cleanup/suggestions`, {
-        contentHash: "fullhash_a",
-        keepPath: "/photos/a.jpg",
-        deletePaths: ["/downloads/a.jpg"],
-        sizeBytes: 1024,
+        members: [
+          { contentHash: "fullhash_a", keepPath: "/photos/a.jpg", deletePaths: ["/downloads/a.jpg"], sizeBytes: 1024 },
+        ],
       });
 
-      // Re-scan + re-detect: brand new scan_id, brand new file_ids, brand new duplicate group.
+      // Brand-new scan + detection — new file_ids, new group_id.
       const second = seedDuplicateGroup(ctx, diskId, { paths: ["/photos/a.jpg", "/downloads/a.jpg"] });
 
       const list = await req(ctx.app, "GET", `/api/disks/${diskId}/cleanup/suggestions`);
       expect(list.body.duplicateJobId).toBe(second.duplicateJobId);
-      const s = list.body.suggestions[0];
-      expect(s.resolved).toBe(true);
-      expect(s.duplicateGroupId).toBe(second.duplicateGroupId);
-      // The fileIds in the response should be from the NEW scan, not the old one.
-      expect(s.keepFile.fileId).toBe(second.files.find((f) => f.path === "/photos/a.jpg")!.fileId);
+      const m = list.body.suggestions[0].members[0];
+      expect(m.resolved).toBe(true);
+      expect(m.duplicateGroupId).toBe(second.duplicateGroupId);
+      expect(m.keepFile.fileId).toBe(second.files.find((f) => f.path === "/photos/a.jpg")!.fileId);
+    });
+
+    it("marks every member stale when no duplicate detection has run", async () => {
+      const diskId = insertDisk(ctx.db);
+      await req(ctx.app, "POST", `/api/disks/${diskId}/cleanup/suggestions`, {
+        members: [
+          { contentHash: "h1", keepPath: "/a/k.bin", deletePaths: ["/a/d.bin"], sizeBytes: 100 },
+        ],
+      });
+
+      const list = await req(ctx.app, "GET", `/api/disks/${diskId}/cleanup/suggestions`);
+      expect(list.body.duplicateJobId).toBeNull();
+      expect(list.body.suggestions[0].allResolved).toBe(false);
+      expect(list.body.suggestions[0].members[0].resolved).toBe(false);
     });
   });
 
-  describe("suggestion lifecycle", () => {
-    it("marks a suggestion applied and removes it from the pending list", async () => {
+  // ── batch apply (request-shape failures only — the disk-write path
+  //    is covered by integration tests on the cleanup helper itself) ───────
+
+  describe("POST /suggestions/:id/apply", () => {
+    it("rejects non-browser user agents (403)", async () => {
       const diskId = insertDisk(ctx.db);
       seedDuplicateGroup(ctx, diskId, { paths: ["/photos/a.jpg", "/downloads/a.jpg"] });
       const create = await req(ctx.app, "POST", `/api/disks/${diskId}/cleanup/suggestions`, {
-        contentHash: "fullhash_a",
-        keepPath: "/photos/a.jpg",
-        deletePaths: ["/downloads/a.jpg"],
-        sizeBytes: 1024,
+        members: [
+          { contentHash: "fullhash_a", keepPath: "/photos/a.jpg", deletePaths: ["/downloads/a.jpg"], sizeBytes: 1024 },
+        ],
       });
-      const id = create.body.id;
-
-      const apply = await req(ctx.app, "POST", `/api/disks/${diskId}/cleanup/suggestions/${id}/applied`);
-      expect(apply.status).toBe(200);
-      expect(apply.body.status).toBe("applied");
-
-      const pending = await req(ctx.app, "GET", `/api/disks/${diskId}/cleanup/suggestions`);
-      expect(pending.body.suggestions).toHaveLength(0);
-
-      const applied = await req(ctx.app, "GET", `/api/disks/${diskId}/cleanup/suggestions?status=applied`);
-      expect(applied.body.suggestions).toHaveLength(1);
-      expect(applied.body.suggestions[0].status).toBe("applied");
+      const apply = await req(
+        ctx.app,
+        "POST",
+        `/api/disks/${diskId}/cleanup/suggestions/${create.body.id}/apply`,
+        { initiatedFromWebUI: true }
+        // No browser UA header in the helper's default request — should be rejected.
+      );
+      expect(apply.status).toBe(403);
     });
 
+    it("rejects requests without initiatedFromWebUI (403)", async () => {
+      const diskId = insertDisk(ctx.db);
+      const create = await req(ctx.app, "POST", `/api/disks/${diskId}/cleanup/suggestions`, {
+        members: [
+          { contentHash: "h1", keepPath: "/a/k.bin", deletePaths: ["/a/d.bin"], sizeBytes: 100 },
+        ],
+      });
+      const apply = await req(
+        ctx.app,
+        "POST",
+        `/api/disks/${diskId}/cleanup/suggestions/${create.body.id}/apply`,
+        {},
+        { "User-Agent": "Mozilla/5.0 testing" }
+      );
+      expect(apply.status).toBe(403);
+    });
+
+    it("refuses to apply when no duplicate detection exists (409)", async () => {
+      const diskId = insertDisk(ctx.db, { mount_path: "/tmp/test-mount", is_connected: 1 });
+      const create = await req(ctx.app, "POST", `/api/disks/${diskId}/cleanup/suggestions`, {
+        members: [
+          { contentHash: "h1", keepPath: "/a/k.bin", deletePaths: ["/a/d.bin"], sizeBytes: 100 },
+        ],
+      });
+      const apply = await req(
+        ctx.app,
+        "POST",
+        `/api/disks/${diskId}/cleanup/suggestions/${create.body.id}/apply`,
+        { initiatedFromWebUI: true },
+        { "User-Agent": "Mozilla/5.0 testing" }
+      );
+      expect(apply.status).toBe(409);
+      expect(apply.body.error).toContain("No completed duplicate detection");
+    });
+
+    it("refuses to apply a batch when one member is stale (409)", async () => {
+      const diskId = insertDisk(ctx.db, { mount_path: "/tmp/test-mount", is_connected: 1 });
+      seedDuplicateGroup(ctx, diskId, {
+        paths: ["/x/a.jpg", "/y/a.jpg"],
+        contentHash: "hash_a",
+      });
+      const create = await req(ctx.app, "POST", `/api/disks/${diskId}/cleanup/suggestions`, {
+        members: [
+          { contentHash: "hash_a", keepPath: "/x/a.jpg", deletePaths: ["/y/a.jpg"], sizeBytes: 1024 },
+          { contentHash: "missing", keepPath: "/x/b.jpg", deletePaths: ["/y/b.jpg"], sizeBytes: 1024 },
+        ],
+      });
+      const apply = await req(
+        ctx.app,
+        "POST",
+        `/api/disks/${diskId}/cleanup/suggestions/${create.body.id}/apply`,
+        { initiatedFromWebUI: true },
+        { "User-Agent": "Mozilla/5.0 testing" }
+      );
+      expect(apply.status).toBe(409);
+      expect(apply.body.error).toContain("stale");
+    });
+  });
+
+  describe("dismiss", () => {
     it("marks a suggestion dismissed and removes it from the pending list", async () => {
       const diskId = insertDisk(ctx.db);
       const create = await req(ctx.app, "POST", `/api/disks/${diskId}/cleanup/suggestions`, {
-        contentHash: "h1",
-        keepPath: "/a/k.bin",
-        deletePaths: ["/a/d.bin"],
-        sizeBytes: 100,
+        members: [
+          { contentHash: "h1", keepPath: "/a/k.bin", deletePaths: ["/a/d.bin"], sizeBytes: 100 },
+        ],
       });
       const dismiss = await req(
         ctx.app,
@@ -334,23 +414,6 @@ describe("agent cleanup routes", () => {
       const pending = await req(ctx.app, "GET", `/api/disks/${diskId}/cleanup/suggestions`);
       expect(pending.body.suggestions).toHaveLength(0);
     });
-
-    it("rejects applied/dismissed transitions for a non-pending suggestion", async () => {
-      const diskId = insertDisk(ctx.db);
-      const create = await req(ctx.app, "POST", `/api/disks/${diskId}/cleanup/suggestions`, {
-        contentHash: "h1",
-        keepPath: "/a/k.bin",
-        deletePaths: ["/a/d.bin"],
-        sizeBytes: 100,
-      });
-      await req(ctx.app, "POST", `/api/disks/${diskId}/cleanup/suggestions/${create.body.id}/applied`);
-      const again = await req(
-        ctx.app,
-        "POST",
-        `/api/disks/${diskId}/cleanup/suggestions/${create.body.id}/applied`
-      );
-      expect(again.status).toBe(404);
-    });
   });
 
   // ── history ─────────────────────────────────────────────────────────────
@@ -361,7 +424,6 @@ describe("agent cleanup routes", () => {
       const seed = seedDuplicateGroup(ctx, diskId, {
         paths: ["/photos/a.jpg", "/downloads/a.jpg", "/archive/a.jpg"],
       });
-      // Mark /downloads/a.jpg deleted.
       const deletedFile = seed.files.find((f) => f.path === "/downloads/a.jpg")!;
       ctx.db
         .prepare(`INSERT INTO deleted_files (file_id, scan_id, deleted_at) VALUES (?, ?, ?)`)
@@ -372,8 +434,6 @@ describe("agent cleanup routes", () => {
       expect(res.body.events).toHaveLength(1);
       const e = res.body.events[0];
       expect(e.deletedPath).toBe("/downloads/a.jpg");
-      // Siblings should include the surviving copies, with the non-deleted ones
-      // (preferred "keep" candidates) listed first.
       expect(e.siblingPaths).toContain("/photos/a.jpg");
       expect(e.siblingPaths).toContain("/archive/a.jpg");
       expect(e.siblingPaths[0]).not.toBe("/downloads/a.jpg");
