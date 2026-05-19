@@ -392,3 +392,18 @@ export interface CleanupApplyResponse {
   totalDeleted: number;
   members: CleanupApplyMemberResult[];
 }
+
+// ── Per-disk exclusion list (duplicate detection only) ─────────────────────
+
+export interface ExcludedPath {
+  id: number;
+  diskId: number;
+  path: string;
+  reason: string;
+  createdAt: string;
+}
+
+export interface ExcludedPathsResponse {
+  diskId: number;
+  exclusions: ExcludedPath[];
+}

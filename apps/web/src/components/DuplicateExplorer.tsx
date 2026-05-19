@@ -115,10 +115,12 @@ function DuplicateGroupCard({
   group,
   diskId,
   onCleanupRequest,
+  onExcludeRequest,
 }: {
   group: DuplicateGroup;
   diskId: number;
   onCleanupRequest: (group: DuplicateGroup, keepFile: DuplicateGroupFile) => void;
+  onExcludeRequest: (group: DuplicateGroup) => void;
 }) {
   const [keepFileId, setKeepFileId] = useState<number | null>(null);
 
@@ -213,20 +215,29 @@ function DuplicateGroupCard({
         </div>
       </div>
 
-      {selectedKeepFile && filesToDelete.length > 0 && (
-        <div className="pt-1 flex items-center gap-3">
-          <button
-            disabled={!group.canDelete}
-            onClick={() => onCleanupRequest(group, selectedKeepFile)}
-            className="rounded bg-red-600/80 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            Delete {filesToDelete.length} duplicate{filesToDelete.length > 1 ? "s" : ""}
-          </button>
-          {!group.canDelete && (
-            <span className="text-xs text-amber-400">Cleanup requires full-hash evidence.</span>
-          )}
-        </div>
-      )}
+      <div className="pt-1 flex items-center gap-3 flex-wrap">
+        {selectedKeepFile && filesToDelete.length > 0 && (
+          <>
+            <button
+              disabled={!group.canDelete}
+              onClick={() => onCleanupRequest(group, selectedKeepFile)}
+              className="rounded bg-red-600/80 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-500 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Delete {filesToDelete.length} duplicate{filesToDelete.length > 1 ? "s" : ""}
+            </button>
+            {!group.canDelete && (
+              <span className="text-xs text-amber-400">Cleanup requires full-hash evidence.</span>
+            )}
+          </>
+        )}
+        <button
+          onClick={() => onExcludeRequest(group)}
+          className="rounded px-3 py-1.5 text-xs font-medium text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 transition-colors ml-auto"
+          title="Exclude a folder from future duplicate detection"
+        >
+          Exclude folder…
+        </button>
+      </div>
     </div>
   );
 }
@@ -367,6 +378,116 @@ function CleanupConfirmDialog({
             </div>
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Exclude folder dialog — adds a path to excluded_paths so the NEXT
+// duplicate-detection run ignores every file at or under it.
+// ---------------------------------------------------------------------------
+
+function ExcludeFolderDialog({
+  group,
+  diskId,
+  onClose,
+}: {
+  group: DuplicateGroup;
+  diskId: number;
+  onClose: () => void;
+}) {
+  const qc = useQueryClient();
+  const allPaths = group.files.map((f) => f.path);
+  const commonPrefix = pathCommonPrefix(allPaths);
+  const initialPath = commonPrefix
+    ? commonPrefix.endsWith("/")
+      ? commonPrefix.slice(0, -1)
+      : commonPrefix
+    : (() => {
+        const p = allPaths[0] ?? "/";
+        const slash = p.lastIndexOf("/");
+        return slash > 0 ? p.slice(0, slash) : p;
+      })();
+
+  const [path, setPath] = useState(initialPath);
+  const [reason, setReason] = useState("");
+
+  const create = useMutation({
+    mutationFn: (body: { path: string; reason?: string }) =>
+      api.excludedPaths.create(diskId, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["excludedPaths", diskId] });
+      onClose();
+    },
+    onError: (err: any) => alert(`Add failed: ${err.message}`),
+  });
+
+  const submit = () => {
+    const trimmed = path.trim();
+    if (!trimmed.startsWith("/")) {
+      alert("Path must be absolute (starts with /).");
+      return;
+    }
+    create.mutate({ path: trimmed, reason: reason.trim() || undefined });
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+      <div
+        className="w-full max-w-lg rounded-xl border border-zinc-700 bg-zinc-900 p-6 space-y-5"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 className="text-base font-semibold text-white">Exclude folder</h2>
+
+        <p className="text-sm text-zinc-400">
+          Every file at or under this path will be ignored on the next
+          duplicate-detection run. Scan, diff, and copy are unaffected.
+        </p>
+
+        <div className="space-y-2">
+          <label className="text-xs text-zinc-500">Path</label>
+          <input
+            type="text"
+            value={path}
+            onChange={(e) => setPath(e.target.value)}
+            spellCheck={false}
+            className="w-full rounded border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-xs text-zinc-200 focus:outline-none focus:border-zinc-500"
+          />
+        </div>
+
+        <div className="space-y-2">
+          <label className="text-xs text-zinc-500">Reason (optional)</label>
+          <input
+            type="text"
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="e.g. self-contained archive with intentional duplicates"
+            className="w-full rounded border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-zinc-500"
+          />
+        </div>
+
+        <div className="rounded-lg border border-zinc-800 bg-zinc-950/40 px-4 py-3 text-xs text-zinc-500">
+          This duplicate group is from a past detection run and will stay
+          visible until you re-run detection. The exclusion takes effect on
+          the next run.
+        </div>
+
+        <div className="flex justify-end gap-3">
+          <button
+            onClick={onClose}
+            className="rounded px-4 py-2 text-sm text-zinc-400 hover:text-white transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            disabled={create.isPending || !path.trim()}
+            onClick={submit}
+            className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 transition-colors disabled:opacity-40"
+          >
+            {create.isPending ? "Adding…" : "Add exclusion"}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -1129,6 +1250,8 @@ export function DuplicateExplorer({
     keepFile: DuplicateGroupFile;
   } | null>(null);
 
+  const [excludeTarget, setExcludeTarget] = useState<DuplicateGroup | null>(null);
+
   const queryClient = useQueryClient();
 
   const { data, isLoading, error } = useQuery<DuplicatesResponse>({
@@ -1229,6 +1352,7 @@ export function DuplicateExplorer({
                         group={group}
                         diskId={diskId}
                         onCleanupRequest={handleCleanupRequest}
+                        onExcludeRequest={setExcludeTarget}
                       />
                     ))}
                   </div>
@@ -1262,6 +1386,14 @@ export function DuplicateExplorer({
           }
           onConfirm={handleConfirm}
           onClose={handleCloseDialog}
+        />
+      )}
+
+      {excludeTarget && (
+        <ExcludeFolderDialog
+          group={excludeTarget}
+          diskId={diskId}
+          onClose={() => setExcludeTarget(null)}
         />
       )}
     </div>

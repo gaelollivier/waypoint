@@ -1,4 +1,4 @@
-import type { AgentNotes, CleanupApplyResponse, CleanupResponse, CleanupSuggestionsResponse, DeletionHistoryResponse, DirectoryGroupFilesResponse, DirectoryGroupInventoryResponse, Disk, DiffJobSummary, DiffTreeResponse, DuplicateDirectoriesResponse, DuplicateJobSummary, DuplicateScanSummary, DuplicatesResponse, Job, JobEvent, TreeResponse } from "./types";
+import type { AgentNotes, CleanupApplyResponse, CleanupResponse, CleanupSuggestionsResponse, DeletionHistoryResponse, DirectoryGroupFilesResponse, DirectoryGroupInventoryResponse, Disk, DiffJobSummary, DiffTreeResponse, DuplicateDirectoriesResponse, DuplicateJobSummary, DuplicateScanSummary, DuplicatesResponse, ExcludedPath, ExcludedPathsResponse, Job, JobEvent, TreeResponse } from "./types";
 
 const BASE = "/api";
 
@@ -286,6 +286,23 @@ export const api = {
       request<{ id: number; status: "dismissed"; dismissedAt: string }>(
         `/disks/${diskId}/cleanup/suggestions/${suggestionId}/dismissed`,
         { method: "POST" }
+      ),
+  },
+
+  excludedPaths: {
+    list: (diskId: number) =>
+      request<ExcludedPathsResponse>(`/disks/${diskId}/excluded-paths`),
+
+    create: (diskId: number, body: { path: string; reason?: string }) =>
+      request<ExcludedPath>(`/disks/${diskId}/excluded-paths`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+
+    delete: (diskId: number, exclusionId: number) =>
+      request<{ id: number; deleted: true }>(
+        `/disks/${diskId}/excluded-paths/${exclusionId}`,
+        { method: "DELETE" }
       ),
   },
 

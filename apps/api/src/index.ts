@@ -11,6 +11,7 @@ import { treeRouter } from "./routes/tree";
 import { diffRouter } from "./routes/diff";
 import { duplicatesRouter } from "./routes/duplicates";
 import { agentCleanupRouter } from "./routes/agent-cleanup";
+import { excludedPathsRouter } from "./routes/excluded-paths";
 import { copyRouter } from "./routes/copy";
 import { systemRouter } from "./routes/system";
 import { startLoopStallDetector, trace } from "./diag/trace";
@@ -47,6 +48,7 @@ app.route("/api/disks/:id/tree", treeRouter);
 app.route("/api/disks/:id/diff", diffRouter);
 app.route("/api/disks/:id/duplicates", duplicatesRouter);
 app.route("/api/disks/:id/cleanup", agentCleanupRouter);
+app.route("/api/disks/:id/excluded-paths", excludedPathsRouter);
 app.route("/api/copy", copyRouter);
 app.route("/api/system", systemRouter);
 

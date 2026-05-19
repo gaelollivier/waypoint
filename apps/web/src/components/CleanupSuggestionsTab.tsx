@@ -210,9 +210,9 @@ function MemberRows({
       {member.deletePaths.map((p) => (
         <PathRow key={p} kind="delete" path={stripPrefix(p, prefix)} />
       ))}
-      {!member.resolved && (
+      {!member.resolved && member.staleReason !== null && (
         <div className="text-[11px] text-amber-400 pl-2 pt-0.5">
-          stale: {member.staleReason ?? "cannot resolve against latest scan"}
+          stale: {member.staleReason}
         </div>
       )}
     </div>

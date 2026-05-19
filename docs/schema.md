@@ -252,6 +252,21 @@ Per-disk glob patterns. **Applied only at copy time** — scans index everything
 
 ---
 
+### `excluded_paths`
+Per-disk path exclusions for **duplicate detection only**. Files at or under any row here are filtered out of both the Phase 1 GROUP BY and the per-group member lookups in `duplicate-job.ts`. Scan, diff, and copy are unaffected — the file is still indexed and still copied; it just never surfaces as a duplicate-detection candidate. CRUD is exposed via `GET / POST / DELETE /api/disks/:id/excluded-paths`. UI lives in the Notes tab section and the "Exclude folder…" button on each duplicate-group card.
+
+| Field | Notes |
+|---|---|
+| `id` | PK |
+| `disk_id` | FK to `disks.id` (ON DELETE CASCADE) |
+| `path` | Absolute path, stored without trailing slash. Matches `files.path = e.path OR files.path LIKE e.path \|\| '/%'`. |
+| `reason` | Optional free-text note from the user |
+| `created_at` | Timestamp |
+
+Indices: `UNIQUE (disk_id, path)`. SQL fragment used by detection: `lib/excluded-paths.ts` exports `EXCLUDED_PATHS_SQL` (a `NOT EXISTS` correlated subquery), which keeps the surrounding query sargable on the partial hash indexes.
+
+---
+
 ### `disk_locks`
 Mirrors the in-memory write-lock state to the DB so the UI can render lock status and stale locks can be cleared on startup.
 

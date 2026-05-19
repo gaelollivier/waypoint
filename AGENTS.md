@@ -80,6 +80,21 @@ If a path is gone or the hash drifted on disk, the suggestion is reported as
 `resolved: false` with a `staleReason` string — the UI shows it but disables
 Apply.
 
+### Excluded paths
+
+The user can mark a directory (or single file path) as "ignore for
+duplicate-detection purposes" via `GET / POST / DELETE
+/api/disks/:id/excluded-paths`. Files at or under an excluded path are
+filtered from both the Phase 1 GROUP BY and the per-group member lookups in
+`duplicate-job.ts`. Scan, diff, and copy are intentionally NOT affected —
+the file is still indexed and still copied; it just doesn't surface as a
+duplicate-detection candidate.
+
+Agents may read the exclusion list (e.g. to understand why a previously
+suggested group has disappeared, or to mention the exclusion in `notes`).
+Agents should NOT add or remove exclusions on their own — these are
+user-curated decisions about what "duplicate" means on a given disk.
+
 What an agent must NOT do here:
 
 - **Never call `/api/disks/:id/duplicates/cleanup` directly.** That endpoint
@@ -87,10 +102,13 @@ What an agent must NOT do here:
   don't initiate deletions, period. Suggestions are the agent's only path.
 - **Never modify the User-Agent check or `initiatedFromWebUI` flag** to make
   the cleanup endpoint callable from a non-browser client.
+- **Don't add or delete excluded paths on the user's behalf.** Surface
+  candidates in `notes` or suggestion rationale and let the user act on
+  them via the UI.
 - **Don't write any of the user's real paths or file names from these
   endpoints into commits, code comments, or docs.** Everything you read via
-  `/cleanup/history` or `/duplicates` is the user's personal data — see the
-  rule below.
+  `/cleanup/history`, `/duplicates`, or `/excluded-paths` is the user's
+  personal data — see the rule below.
 
 ---
 

@@ -228,6 +228,80 @@ describe("DuplicateDetectionJobRunner", () => {
     expect(jm.getJob(jobId)!.items_processed).toBe(2); // 2 groups
   });
 
+  it("ignores files under an excluded path (group never forms)", async () => {
+    const root = path.join(TMP_BASE, "excluded-pure");
+    writeTree(root, {
+      "Archive/cd1/support.dll": "shared archive blob",
+      "Archive/cd2/support.dll": "shared archive blob",
+      "Archive/cd3/support.dll": "shared archive blob",
+    });
+    await scanDisk(db, jm, diskId, root);
+
+    db.prepare(`INSERT INTO excluded_paths (disk_id, path) VALUES (?, ?)`)
+      .run(diskId, path.join(root, "Archive"));
+
+    const jobId = await runDuplicateDetection(db, jm, diskId);
+    expect(getGroups(db, jobId).length).toBe(0);
+  });
+
+  it("ignores excluded copies but still groups remaining non-excluded copies", async () => {
+    const root = path.join(TMP_BASE, "excluded-mixed");
+    writeTree(root, {
+      "Archive/copy.jpg":  "same",
+      "Photos/copy.jpg":   "same",
+      "Backups/copy.jpg":  "same",
+    });
+    await scanDisk(db, jm, diskId, root);
+
+    db.prepare(`INSERT INTO excluded_paths (disk_id, path) VALUES (?, ?)`)
+      .run(diskId, path.join(root, "Archive"));
+
+    const jobId = await runDuplicateDetection(db, jm, diskId);
+    const groups = getGroups(db, jobId);
+    expect(groups.length).toBe(1);
+    expect(groups[0].file_count).toBe(2);
+
+    const files = getGroupFiles(db, groups[0].id);
+    const paths = files.map((f) => f.path).sort();
+    expect(paths.every((p) => !p.startsWith(path.join(root, "Archive")))).toBe(true);
+  });
+
+  it("ignores files at the exact excluded path (single-file exclusion)", async () => {
+    const root = path.join(TMP_BASE, "excluded-exact");
+    writeTree(root, {
+      "weird.bin": "weird content",
+      "other/weird.bin": "weird content",
+    });
+    await scanDisk(db, jm, diskId, root);
+
+    // Exclude the file path itself, not a directory above it.
+    db.prepare(`INSERT INTO excluded_paths (disk_id, path) VALUES (?, ?)`)
+      .run(diskId, path.join(root, "weird.bin"));
+
+    const jobId = await runDuplicateDetection(db, jm, diskId);
+    // Only one copy remains visible to detection → no group.
+    expect(getGroups(db, jobId).length).toBe(0);
+  });
+
+  it("exclusions on another disk don't affect this disk", async () => {
+    const root = path.join(TMP_BASE, "excluded-other-disk");
+    writeTree(root, {
+      "Archive/copy.jpg": "same",
+      "Photos/copy.jpg":  "same",
+    });
+    await scanDisk(db, jm, diskId, root);
+
+    // Register a second disk and exclude on it instead — must not affect diskId.
+    const otherDisk = insertDisk(db, { mount_path: "/tmp/waypoint-duplicate-test/disk-other" });
+    db.prepare(`INSERT INTO excluded_paths (disk_id, path) VALUES (?, ?)`)
+      .run(otherDisk, path.join(root, "Archive"));
+
+    const jobId = await runDuplicateDetection(db, jm, diskId);
+    const groups = getGroups(db, jobId);
+    expect(groups.length).toBe(1);
+    expect(groups[0].file_count).toBe(2);
+  });
+
   it("filters macOS metadata noise out of duplicate groups", async () => {
     const root = path.join(TMP_BASE, "macos-noise");
     writeTree(root, {

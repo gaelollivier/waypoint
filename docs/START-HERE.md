@@ -73,6 +73,8 @@ Improvements planned but not yet scheduled into a milestone.
 
 Recently completed backlog:
 
+- Per-disk exclusion list for duplicate detection: `excluded_paths` table, `/api/disks/:id/excluded-paths` CRUD router, Notes-tab section, and "Exclude folder…" button on duplicate-group cards. Files at or under an excluded path are filtered from both the Phase 1 GROUP BY and the per-group member lookups; scan/diff/copy are unaffected.
+
 - macOS metadata noise (`.DS_Store`, `._*`) and Waypoint disk identity files (`.waypoint-disk-id`) are globally excluded from scans, diffs, duplicate detection, and copy jobs.
 - Tree view syncs the current folder path with the URL and browser history.
 - Copy job status on the diff view links to the job details page.

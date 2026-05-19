@@ -4,6 +4,7 @@ import { JobRunner } from "../job-runner";
 import type { JobManager } from "../job-manager";
 import { trace } from "../../diag/trace";
 import { EXCLUDED_NAMES_SQL } from "../../lib/excluded-names";
+import { EXCLUDED_PATHS_SQL } from "../../lib/excluded-paths";
 
 const INSERT_BATCH_SIZE = 500;
 
@@ -64,6 +65,7 @@ export class DuplicateDetectionJobRunner extends JobRunner {
              AND full_hash IS NOT NULL
              AND sampled_hash IS NOT NULL
              AND ${EXCLUDED_NAMES_SQL}
+             AND ${EXCLUDED_PATHS_SQL}
            GROUP BY full_hash, size_bytes
            HAVING file_count > 1
 
@@ -79,12 +81,13 @@ export class DuplicateDetectionJobRunner extends JobRunner {
              AND full_hash IS NULL
              AND sampled_hash IS NOT NULL
              AND ${EXCLUDED_NAMES_SQL}
+             AND ${EXCLUDED_PATHS_SQL}
            GROUP BY sampled_hash, size_bytes
            HAVING file_count > 1
          )
          ORDER BY size_bytes DESC`
       )
-      .all(scanId, scanId) as DuplicateGroupRow[];
+      .all(scanId, this.diskId, scanId, this.diskId) as DuplicateGroupRow[];
 
     const totalWastedBytes = groups.reduce(
       (acc, g) => acc + g.size_bytes * (g.file_count - 1),
@@ -122,7 +125,8 @@ export class DuplicateDetectionJobRunner extends JobRunner {
        WHERE scan_id = ?
          AND full_hash = ?
          AND size_bytes = ?
-         AND ${EXCLUDED_NAMES_SQL}`
+         AND ${EXCLUDED_NAMES_SQL}
+         AND ${EXCLUDED_PATHS_SQL}`
     );
 
     const selectSampledHashMembers = this.db.prepare(
@@ -132,7 +136,8 @@ export class DuplicateDetectionJobRunner extends JobRunner {
          AND full_hash IS NULL
          AND sampled_hash = ?
          AND size_bytes = ?
-         AND ${EXCLUDED_NAMES_SQL}`
+         AND ${EXCLUDED_NAMES_SQL}
+         AND ${EXCLUDED_PATHS_SQL}`
     );
 
     const insertFile = this.db.prepare(
@@ -159,8 +164,8 @@ export class DuplicateDetectionJobRunner extends JobRunner {
 
           const members = (
             g.hash_kind === "full"
-              ? selectFullHashMembers.all(scanId, g.content_hash, g.size_bytes)
-              : selectSampledHashMembers.all(scanId, g.content_hash, g.size_bytes)
+              ? selectFullHashMembers.all(scanId, g.content_hash, g.size_bytes, this.diskId)
+              : selectSampledHashMembers.all(scanId, g.content_hash, g.size_bytes, this.diskId)
           ) as DuplicateFileRow[];
 
           for (const m of members) {

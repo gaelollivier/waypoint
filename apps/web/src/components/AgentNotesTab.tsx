@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { AgentNotes } from "../api/types";
 import { formatDate } from "../lib/format";
+import { ExcludedPathsSection } from "./ExcludedPathsSection";
 
 /**
  * Freeform markdown editor for the disk's agent-cleanup notes. An LLM agent
@@ -63,6 +64,10 @@ export function AgentNotesTab({ diskId }: { diskId: number }) {
         >
           {save.isPending ? "Saving…" : dirty ? "Save" : "Saved"}
         </button>
+      </div>
+
+      <div className="border-t border-zinc-800 pt-5">
+        <ExcludedPathsSection diskId={diskId} />
       </div>
     </div>
   );

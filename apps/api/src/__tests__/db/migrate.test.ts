@@ -19,6 +19,7 @@ const EXPECTED_TABLES = [
   "duplicate_directory_groups",
   "duplicate_group_files",
   "duplicate_groups",
+  "excluded_paths",
   "files",
   "job_events",
   "jobs",
@@ -28,7 +29,7 @@ const EXPECTED_TABLES = [
   "verify_items",
 ];
 
-const LATEST_MIGRATION_VERSION = 19;
+const LATEST_MIGRATION_VERSION = 20;
 
 function getTables(db: Database): string[] {
   return (
