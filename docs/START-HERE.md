@@ -70,6 +70,7 @@ Improvements planned but not yet scheduled into a milestone.
 | Copy job: rich insight view (match scan job pattern) | Same philosophy as scan jobs — show a rich view of all available job insights in both the diff view (where the copy is initiated) and the job details page. Reuse the same component. |
 | Duplicate cleanup as a job with progress | Cleanup re-checks fresh sampled hashes for the kept + deleted files before unlinking. It should become a proper job with progress/pause/resume so the UI shows status rather than hanging on a single POST for large batches. |
 | fullHash scan UI | Backend supports `POST /:id/scan { fullHash: true }`; expose it as a toggle on the disk page. |
+| fullHash scan freezes the web UI | During a long fullHash scan on an HDD, the web app becomes unresponsive — job-status fetches and other API calls appear to hang. Likely cause: scan worker holding the SQLite write lock and/or starving the HTTP event loop during large sequential reads. Investigate whether the scan worker can yield more aggressively, reduce DB write batch size, or move into a separate Bun worker with its own SQLite connection (same pattern as the speed-test jobs and the duplicate-detection backlog item above). |
 
 Recently completed backlog:
 

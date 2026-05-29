@@ -50,6 +50,7 @@ export class ScanJobRunner extends JobRunner {
         this.db,
         this.jobId,
         this.diskId,
+        this.mountPath,
         previousScanId,
         this.jobManager,
         this.fullHash

@@ -115,7 +115,7 @@ duplicatesRouter.get("/", (c) => {
   const sort      = c.req.query("sort") ?? "wasted";
   const minSize   = Number(c.req.query("minSize")   ?? 0);
   const minCopies = Number(c.req.query("minCopies") ?? 2);
-  const limit     = Math.min(Number(c.req.query("limit")  ?? 50), 200);
+  const limit     = Math.min(Number(c.req.query("limit")  ?? 50), 5000);
   const offset    = Number(c.req.query("offset") ?? 0);
 
   const db = getDb();
@@ -241,7 +241,7 @@ duplicatesRouter.get("/directories", (c) => {
   const rawJobId = c.req.query("duplicateJobId");
   const sort     = c.req.query("sort") ?? "wasted";
   const minSize  = Number(c.req.query("minSize") ?? 0);
-  const limit    = Math.min(Number(c.req.query("limit") ?? 50), 200);
+  const limit    = Math.min(Number(c.req.query("limit") ?? 50), 5000);
   const offset   = Number(c.req.query("offset") ?? 0);
 
   const db = getDb();

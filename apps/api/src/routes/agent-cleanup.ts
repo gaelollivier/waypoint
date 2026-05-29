@@ -179,12 +179,28 @@ function resolveMember(
 
   const byPath = new Map(fileRows.map((r) => [r.path, r]));
 
+  // Check which of these file IDs have already been cleaned up via a previous
+  // apply. deleted_files records are written atomically with the physical
+  // deletion, so any file present there is gone from disk.
+  const foundIds = fileRows.map((r) => r.id);
+  const deletedSet = new Set<number>();
+  if (foundIds.length > 0) {
+    const idPlaceholders = foundIds.map(() => "?").join(", ");
+    const deletedRows = db
+      .prepare(`SELECT file_id FROM deleted_files WHERE file_id IN (${idPlaceholders})`)
+      .all(...foundIds) as Array<{ file_id: number }>;
+    for (const r of deletedRows) deletedSet.add(r.file_id);
+  }
+
   const keep = byPath.get(member.keepPath);
   if (!keep) {
     return { resolved: false, staleReason: `keep path no longer present in latest scan: ${member.keepPath}` };
   }
   if (keep.full_hash !== member.contentHash) {
     return { resolved: false, staleReason: "keep file hash drifted from suggestion content_hash" };
+  }
+  if (deletedSet.has(keep.id)) {
+    return { resolved: false, staleReason: `keep file was already deleted by a previous cleanup: ${member.keepPath}` };
   }
 
   const deleteFiles: Array<{ fileId: number; path: string }> = [];
@@ -195,6 +211,9 @@ function resolveMember(
     }
     if (f.full_hash !== member.contentHash) {
       return { resolved: false, staleReason: `delete file hash drifted: ${dp}` };
+    }
+    if (deletedSet.has(f.id)) {
+      return { resolved: false, staleReason: `delete path was already deleted by a previous cleanup: ${dp}` };
     }
     deleteFiles.push({ fileId: f.id, path: f.path });
   }

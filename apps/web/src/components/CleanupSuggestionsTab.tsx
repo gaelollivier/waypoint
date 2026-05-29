@@ -79,6 +79,8 @@ export function CleanupSuggestionsTab({ diskId }: { diskId: number }) {
   );
 }
 
+const COLLAPSED_MEMBER_LIMIT = 20;
+
 function SuggestionCard({
   diskId,
   suggestion,
@@ -117,10 +119,22 @@ function SuggestionCard({
   const prefix = pathCommonPrefix(allPaths);
   const isBatch = suggestion.memberCount > 1;
 
+  // Members in a batch tend to follow a single pattern; the user only needs
+  // to scan a sample to validate the rule, so we collapse the long tail.
+  const [showAll, setShowAll] = useState(false);
+  const hasMore = suggestion.members.length > COLLAPSED_MEMBER_LIMIT;
+  const visibleMembers = showAll || !hasMore
+    ? suggestion.members
+    : suggestion.members.slice(0, COLLAPSED_MEMBER_LIMIT);
+  const hiddenCount = suggestion.members.length - visibleMembers.length;
+
   return (
     <li className="rounded-lg border border-zinc-800 bg-zinc-900 p-3 space-y-3">
       <div className="flex items-baseline justify-between gap-3 flex-wrap">
         <div className="text-sm text-zinc-200">
+          <span className="font-mono text-[11px] text-zinc-500 mr-2">
+            #{suggestion.id}
+          </span>
           <span className="font-semibold text-emerald-400">
             Free {formatBytes(suggestion.totalWastedBytes)}
           </span>
@@ -136,29 +150,6 @@ function SuggestionCard({
           </span>
         )}
       </div>
-
-      <div className="space-y-1.5 text-xs font-mono overflow-x-auto">
-        {prefix && (
-          <div className="text-[11px] text-zinc-500 whitespace-nowrap pb-0.5">
-            <span className="text-zinc-600">in </span>{prefix}
-          </div>
-        )}
-        {suggestion.members.map((m, idx) => (
-          <MemberRows
-            key={m.id}
-            member={m}
-            prefix={prefix}
-            isFirst={idx === 0}
-            isBatch={isBatch}
-          />
-        ))}
-      </div>
-
-      {suggestion.rationale && (
-        <div className="text-xs italic text-zinc-400 border-l-2 border-zinc-700 pl-2">
-          {suggestion.rationale}
-        </div>
-      )}
 
       {actionable && !suggestion.allResolved && (
         <div className="text-xs text-amber-400">
@@ -189,6 +180,40 @@ function SuggestionCard({
           </button>
         </div>
       )}
+
+      {suggestion.rationale && (
+        <div className="text-xs italic text-zinc-400 border-l-2 border-zinc-700 pl-2">
+          {suggestion.rationale}
+        </div>
+      )}
+
+      <div className="space-y-1.5 text-xs font-mono overflow-x-auto">
+        {prefix && (
+          <div className="text-[11px] text-zinc-500 whitespace-nowrap pb-0.5">
+            <span className="text-zinc-600">in </span>{prefix}
+          </div>
+        )}
+        {visibleMembers.map((m, idx) => (
+          <MemberRows
+            key={m.id}
+            member={m}
+            prefix={prefix}
+            isFirst={idx === 0}
+            isBatch={isBatch}
+          />
+        ))}
+        {hasMore && (
+          <button
+            type="button"
+            onClick={() => setShowAll((v) => !v)}
+            className="mt-1 text-[11px] font-sans text-zinc-400 hover:text-zinc-200 underline underline-offset-2"
+          >
+            {showAll
+              ? `Hide ${suggestion.members.length - COLLAPSED_MEMBER_LIMIT} additional members`
+              : `Show ${hiddenCount} more (${suggestion.members.length} total)`}
+          </button>
+        )}
+      </div>
     </li>
   );
 }
@@ -204,8 +229,16 @@ function MemberRows({
   isFirst: boolean;
   isBatch: boolean;
 }) {
+  // All paths in a member share the same content_hash → same size, so we
+  // show it once at the start. Surfaces stub/empty files (Tesla Cam 595B,
+  // empty .AAE metadata 800B, etc.) before the user wastes a click.
   return (
     <div className={isBatch && !isFirst ? "pt-2 border-t border-zinc-800/50" : ""}>
+      {isBatch && (
+        <div className="text-[10px] font-mono text-zinc-500 pb-0.5">
+          {formatBytes(member.sizeBytes)}
+        </div>
+      )}
       <PathRow kind="keep" path={stripPrefix(member.keepPath, prefix)} />
       {member.deletePaths.map((p) => (
         <PathRow key={p} kind="delete" path={stripPrefix(p, prefix)} />

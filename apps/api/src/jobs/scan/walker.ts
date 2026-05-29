@@ -5,6 +5,7 @@ import { computeFullHashStreaming, computeSampledHash, HASH_ALGO_VERSION } from 
 import type { JobManager } from "../job-manager";
 import { trace } from "../../diag/trace";
 import { isExcludedName } from "../../lib/excluded-names";
+import { isExcludedScanSubdir } from "../../lib/excluded-scan-paths";
 
 // How many files to stat+hash in parallel within a single directory.
 //
@@ -41,6 +42,7 @@ export async function processNextQueueEntry(
   db: Database,
   scanJobId: number,
   diskId: number,
+  mountPath: string,
   previousScanId: number | null,
   jobManager: JobManager,
   fullHash: boolean = false
@@ -88,8 +90,9 @@ export async function processNextQueueEntry(
       return { filesIndexed: 0, bytesIndexed: 0 };
     }
 
-    // Enqueue subdirectories
-    const subdirs = dirEntries.filter((e) => e.isDirectory());
+    const subdirs = dirEntries.filter(
+      (e) => e.isDirectory() && !isExcludedScanSubdir(entry.path, e.name, mountPath),
+    );
     if (subdirs.length > 0) {
       const tC = performance.now();
       db.transaction(() => {
@@ -172,6 +175,21 @@ async function readDirEntries(
         "warning",
         "error",
         `Permission denied: ${dirPath}`,
+        { path: dirPath, code: err.code }
+      );
+      return null;
+    }
+    // ENOENT/ENOTDIR can happen mid-scan when:
+    //   - the entry vanished between the parent readdir and our scandir
+    //   - the filesystem catalog is corrupt (entries returned by readdir but
+    //     unresolvable by name — observed on external APFS volumes with
+    //     foreign-origin filenames). Skip the directory and keep scanning.
+    if (err.code === "ENOENT" || err.code === "ENOTDIR") {
+      jobManager.logEvent(
+        scanJobId,
+        "warning",
+        "error",
+        `Could not read directory ${dirPath}: ${err.code}`,
         { path: dirPath, code: err.code }
       );
       return null;

@@ -46,6 +46,34 @@ When presenting a plan for review, keep it high-level: short bullets, no
 sub-prose, no exhaustive file lists. The user reads the bullets and asks for
 detail on whatever needs digging into. Don't pre-empt with deep design.
 
+## Private notes — out of repo
+
+Anything tied to the user's real disks, paths, or content lives under
+`~/.waypoint/`, never in this repo. The layout:
+
+- `~/.waypoint/waypoint.db` (+ snapshot / WAL files) — the live SQLite
+  database. Not a note, not editable by hand; the app owns it.
+- `~/.waypoint/notes/` — **all notes and ad-hoc scratch work.** Anything
+  outside the DB belongs here.
+  - `~/.waypoint/notes/disks/<id>-<label>.md` — per-disk private notes:
+    scan-error analysis, known corruption patterns, recovery plans, any
+    context that references real paths or filenames.
+  - `~/.waypoint/notes/dupe-analysis/` — scratch directory for ad-hoc
+    dedup analysis (dated session logs, batch-builder scripts, exported
+    JSON).
+  - Other subdirs may be added here freely for new ad-hoc workstreams.
+
+When you start work on a specific disk, check
+`~/.waypoint/notes/disks/<id>-<label>.md` first — it captures context
+that the DB alone doesn't preserve (e.g. "files matching pattern X in
+this subtree are physically unreadable due to FS corruption"). When you
+learn something durable about a disk during a session, write it back to
+that file rather than to a memory record or a checked-in doc.
+
+This split exists because of the "no personal data in checked-in
+artifacts" rule below: per-disk notes inevitably contain real paths and
+filenames, so they cannot live in `docs/` or any tracked file.
+
 ## Agent-driven cleanup workflow
 
 Waypoint's duplicate cleanup is human-initiated, but an LLM agent can
