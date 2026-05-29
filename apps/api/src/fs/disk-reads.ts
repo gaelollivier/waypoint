@@ -210,3 +210,16 @@ export async function readFileAll(filePath: string): Promise<ArrayBuffer> {
 export function readFileStream(filePath: string): ReadableStream<Uint8Array> {
   return Bun.file(filePath).stream();
 }
+
+/**
+ * Returns a ReadableStream over a byte range [start, end] (inclusive) of a
+ * file. Used by the media-streaming endpoint to honour HTTP Range requests
+ * from the browser's <video> element.
+ */
+export function readFileRangeStream(
+  filePath: string,
+  start: number,
+  endInclusive: number
+): ReadableStream<Uint8Array> {
+  return Bun.file(filePath).slice(start, endInclusive + 1).stream();
+}

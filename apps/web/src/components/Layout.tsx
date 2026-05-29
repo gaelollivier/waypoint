@@ -25,6 +25,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
         <nav className="flex items-center gap-1">
           {navLink("/", "Disks")}
           {navLink("/jobs", "Jobs")}
+          {navLink("/compare", "Compare")}
         </nav>
       </header>
       <main className="flex-1 p-6">{children}</main>

@@ -6,6 +6,8 @@ const EXPECTED_TABLES = [
   "agent_notes",
   "cleanup_suggestion_members",
   "cleanup_suggestions",
+  "comparison_batches",
+  "comparison_members",
   "copy_items",
   "deleted_directories",
   "deleted_files",
@@ -29,7 +31,7 @@ const EXPECTED_TABLES = [
   "verify_items",
 ];
 
-const LATEST_MIGRATION_VERSION = 20;
+const LATEST_MIGRATION_VERSION = 21;
 
 function getTables(db: Database): string[] {
   return (

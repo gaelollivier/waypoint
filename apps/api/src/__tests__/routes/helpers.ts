@@ -14,6 +14,8 @@ import { agentCleanupRouter } from "../../routes/agent-cleanup";
 import { excludedPathsRouter } from "../../routes/excluded-paths";
 import { copyRouter } from "../../routes/copy";
 import { systemRouter } from "../../routes/system";
+import { comparisonsRouter } from "../../routes/comparisons";
+import { mediaRouter } from "../../routes/media";
 
 export interface TestContext {
   db: Database;
@@ -42,6 +44,8 @@ export function createTestApp(): TestContext {
   app.route("/api/disks/:id/excluded-paths", excludedPathsRouter);
   app.route("/api/copy", copyRouter);
   app.route("/api/system", systemRouter);
+  app.route("/api/comparisons", comparisonsRouter);
+  app.route("/api/media", mediaRouter);
 
   return { db, app };
 }

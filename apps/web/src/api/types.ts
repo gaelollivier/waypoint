@@ -407,3 +407,45 @@ export interface ExcludedPathsResponse {
   diskId: number;
   exclusions: ExcludedPath[];
 }
+
+// ── Media comparison batches ───────────────────────────────────────────────
+
+export type ComparisonVerdict = "same" | "different" | "unsure";
+
+export interface ComparisonProgress {
+  total: number;
+  pending: number;
+  same: number;
+  different: number;
+  unsure: number;
+}
+
+export interface ComparisonSide {
+  path: string;
+  sizeBytes: number | null;
+  contentHash: string | null;
+}
+
+export interface ComparisonMember {
+  id: number;
+  batchId: number;
+  position: number;
+  left: ComparisonSide;
+  right: ComparisonSide;
+  note: string;
+  verdict: ComparisonVerdict | null;
+  verdictNote: string;
+  verdictedAt: string | null;
+}
+
+export interface ComparisonBatchSummary {
+  id: number;
+  name: string;
+  rationale: string;
+  createdAt: string;
+  progress: ComparisonProgress;
+}
+
+export interface ComparisonBatchDetail extends ComparisonBatchSummary {
+  members: ComparisonMember[];
+}

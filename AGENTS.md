@@ -108,6 +108,43 @@ If a path is gone or the hash drifted on disk, the suggestion is reported as
 `resolved: false` with a `staleReason` string — the UI shows it but disables
 Apply.
 
+### Pairwise comparison batches
+
+For *candidate* duplicates that aren't byte-identical (similar size, name,
+capture year, etc.) the agent can ask the user to verdict them pair-by-pair
+in a side-by-side viewer. Verdicts feed back as ground truth about which
+"plausible duplicate" signals are safe enough to act on later.
+
+The intended loop:
+
+1. The agent identifies candidate pairs from any heuristic (sidecar year +
+   size band, basename within year, perceptual hash, etc.).
+2. The agent POSTs to `/api/comparisons` with
+   `{ name, rationale?, members: [{ leftPath, rightPath, leftSizeBytes?,
+   leftContentHash?, rightSizeBytes?, rightContentHash?, note? }] }`.
+   Cross-disk pairs are allowed.
+3. The agent sends the user the URL `/compare/:batchId` (per-pair deep links
+   via `?m=<memberId>`).
+4. The user walks through the batch in the UI and verdicts each pair as
+   `same` / `different` / `unsure`, optionally with a note.
+5. The agent reads verdicts back from `GET /api/comparisons/:batchId` and
+   uses them to inform later cleanup decisions (e.g. only auto-propose
+   cleanups in size bands the user has confirmed as `same`).
+
+The viewer streams media via `GET /api/media?path=<absolute>` with HTTP
+Range support so the browser's `<video>` element can seek; `?download=1`
+flips to an attachment disposition for the unrenderable-format fallback
+link. Requested paths are normalised and must resolve under a registered
+disk's `mount_path`.
+
+What the agent must NOT do here:
+
+- **Don't fabricate verdicts on the user's behalf.** The verdict POST is
+  reserved for the human reviewer in the UI.
+- **Don't write the user's real paths, file names, or batch rationales into
+  commits, code comments, or docs.** The same redaction rule that applies
+  to `/cleanup/*` endpoints applies to comparison member paths and notes.
+
 ### Excluded paths
 
 The user can mark a directory (or single file path) as "ignore for

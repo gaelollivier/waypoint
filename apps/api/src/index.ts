@@ -14,6 +14,8 @@ import { agentCleanupRouter } from "./routes/agent-cleanup";
 import { excludedPathsRouter } from "./routes/excluded-paths";
 import { copyRouter } from "./routes/copy";
 import { systemRouter } from "./routes/system";
+import { comparisonsRouter } from "./routes/comparisons";
+import { mediaRouter } from "./routes/media";
 import { startLoopStallDetector, trace } from "./diag/trace";
 
 // Initialize DB (runs migrations + clears stale locks) at startup
@@ -51,6 +53,8 @@ app.route("/api/disks/:id/cleanup", agentCleanupRouter);
 app.route("/api/disks/:id/excluded-paths", excludedPathsRouter);
 app.route("/api/copy", copyRouter);
 app.route("/api/system", systemRouter);
+app.route("/api/comparisons", comparisonsRouter);
+app.route("/api/media", mediaRouter);
 
 const PORT = Number(process.env.PORT ?? 3000);
 

@@ -1,4 +1,4 @@
-import type { AgentNotes, CleanupApplyResponse, CleanupResponse, CleanupSuggestionsResponse, DeletionHistoryResponse, DirectoryGroupFilesResponse, DirectoryGroupInventoryResponse, Disk, DiffJobSummary, DiffTreeResponse, DuplicateDirectoriesResponse, DuplicateJobSummary, DuplicateScanSummary, DuplicatesResponse, ExcludedPath, ExcludedPathsResponse, Job, JobEvent, TreeResponse } from "./types";
+import type { AgentNotes, CleanupApplyResponse, CleanupResponse, CleanupSuggestionsResponse, ComparisonBatchDetail, ComparisonBatchSummary, ComparisonMember, ComparisonVerdict, DeletionHistoryResponse, DirectoryGroupFilesResponse, DirectoryGroupInventoryResponse, Disk, DiffJobSummary, DiffTreeResponse, DuplicateDirectoriesResponse, DuplicateJobSummary, DuplicateScanSummary, DuplicatesResponse, ExcludedPath, ExcludedPathsResponse, Job, JobEvent, TreeResponse } from "./types";
 
 const BASE = "/api";
 
@@ -312,6 +312,34 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ path }),
       }),
+  },
+
+  comparisons: {
+    list: () => request<{ batches: ComparisonBatchSummary[] }>("/comparisons"),
+
+    get: (batchId: number) => request<ComparisonBatchDetail>(`/comparisons/${batchId}`),
+
+    verdict: (
+      batchId: number,
+      memberId: number,
+      body: { verdict: ComparisonVerdict | null; note?: string }
+    ) =>
+      request<ComparisonMember>(
+        `/comparisons/${batchId}/members/${memberId}/verdict`,
+        { method: "POST", body: JSON.stringify(body) }
+      ),
+
+    remove: (batchId: number) =>
+      request<{ id: number; deleted: true }>(`/comparisons/${batchId}`, {
+        method: "DELETE",
+      }),
+
+    /** Build a URL for the streaming media endpoint. */
+    mediaUrl: (absolutePath: string, opts?: { download?: boolean }) => {
+      const params = new URLSearchParams({ path: absolutePath });
+      if (opts?.download) params.set("download", "1");
+      return `/api/media?${params.toString()}`;
+    },
   },
 
   jobs: {
