@@ -198,6 +198,90 @@ describe("MediaMetadataJobRunner", () => {
     expect(row).toBeNull();
   });
 
+  it("backfills duration_seconds on rows extracted before the column existed", async () => {
+    // Simulate the migration-backfill case: an existing media_metadata row
+    // for a video, written before duration_seconds was a column. The row
+    // has datetime_source='quicktime' and duration_seconds=NULL. The job
+    // should re-process this file.
+    //
+    // We use the JPG fixture (extractor returns durationSeconds=null for
+    // images) but mark the row as datetime_source='quicktime' so the
+    // backfill predicate matches. After the re-run we expect the row to be
+    // updated (extracted_at changes) — duration stays null because the
+    // extractor doesn't infer one for images.
+    const jpgBytes = buildMinimalJpegWithExif({
+      dateTimeOriginal: "2022:03:04 05:06:07",
+      make: "FreshMake",
+      model: "FreshModel",
+    });
+    const jpgPath = path.join(tmpDir, "video-shaped.jpg");
+    writeFileSync(jpgPath, jpgBytes);
+    const dirId = insertDirectory(db, diskId, scanId, tmpDir);
+    const fileId = insertFile(db, diskId, scanId, dirId, jpgPath, jpgBytes.length);
+
+    // Insert a stale row mimicking a pre-duration extraction. The make/model
+    // here are intentionally wrong-looking — they'll be overwritten by the
+    // re-extraction.
+    db.prepare(
+      `INSERT INTO media_metadata
+         (file_id, datetime_original, datetime_source, captured_at_unix,
+          make, model, duration_seconds, extracted_at)
+       VALUES (?, '2099-01-01T00:00:00.000Z', 'quicktime', 999, 'Stale', 'Stale', NULL, '2024-01-01T00:00:00.000Z')`
+    ).run(fileId);
+
+    const job = jm.createJob({ type: "media_metadata_extraction", targetDiskId: diskId });
+    const runner = new MediaMetadataJobRunner({
+      jobId: job.id, jobManager: jm, db, diskId, scanId,
+    });
+    await runner.start();
+
+    const updated = jm.getJob(job.id)!;
+    expect(updated.status).toBe("completed");
+    expect(updated.items_processed).toBe(1);
+
+    // The row was re-extracted: make/model now reflect the actual fixture.
+    const row = db
+      .prepare(`SELECT make, model, datetime_source FROM media_metadata WHERE file_id = ?`)
+      .get(fileId) as { make: string; model: string; datetime_source: string };
+    expect(row.make).toBe("FreshMake");
+    expect(row.model).toBe("FreshModel");
+    expect(row.datetime_source).toBe("exif");
+  });
+
+  it("does NOT re-extract images that already have a media_metadata row", async () => {
+    // The backfill predicate (`datetime_source IN ('quicktime','none')`) must
+    // not match `'exif'` rows — images written by the post-duration job are
+    // correctly final even with duration_seconds=NULL.
+    const jpgBytes = buildMinimalJpegWithExif({
+      dateTimeOriginal: "2022:03:04 05:06:07",
+      make: "Foo",
+      model: "Bar",
+    });
+    const jpgPath = path.join(tmpDir, "already-done.jpg");
+    writeFileSync(jpgPath, jpgBytes);
+    const dirId = insertDirectory(db, diskId, scanId, tmpDir);
+    const fileId = insertFile(db, diskId, scanId, dirId, jpgPath, jpgBytes.length);
+
+    db.prepare(
+      `INSERT INTO media_metadata
+         (file_id, datetime_original, datetime_source, captured_at_unix,
+          make, model, duration_seconds, extracted_at)
+       VALUES (?, '2099-01-01T00:00:00.000Z', 'exif', 999, 'Keep', 'Me', NULL, '2024-01-01T00:00:00.000Z')`
+    ).run(fileId);
+
+    const job = jm.createJob({ type: "media_metadata_extraction", targetDiskId: diskId });
+    const runner = new MediaMetadataJobRunner({
+      jobId: job.id, jobManager: jm, db, diskId, scanId,
+    });
+    await runner.start();
+
+    expect(jm.getJob(job.id)!.items_processed).toBe(0);
+    const row = db
+      .prepare(`SELECT make, model FROM media_metadata WHERE file_id = ?`)
+      .get(fileId) as { make: string; model: string };
+    expect(row.make).toBe("Keep");
+  });
+
   it("skips files that already have a media_metadata row (idempotent re-run)", async () => {
     const jpgBytes = buildMinimalJpegWithExif({
       dateTimeOriginal: "2021:01:01 00:00:00",

@@ -54,6 +54,7 @@ async function run(files: FileTarget[]): Promise<void> {
         capturedAtUnix: null,
         make: null,
         model: null,
+        durationSeconds: null,
         extractionError: `worker_uncaught: ${(err as Error).message ?? String(err)}`,
       };
     }

@@ -244,7 +244,7 @@ export async function probeVideoMetadata(filePath: string): Promise<string | nul
       [
         "ffprobe",
         "-v", "error",
-        "-show_entries", "format_tags:stream_tags",
+        "-show_entries", "format=duration:format_tags:stream_tags",
         "-of", "json",
         filePath,
       ],

@@ -106,6 +106,34 @@ describe("parseVideoFfprobeJson — Apple QuickTime priority", () => {
     expect(out.datetimeSource).toBe("none");
   });
 
+  it("extracts duration from format.duration as a float in seconds", () => {
+    const out = parseVideoFfprobeJson(
+      JSON.stringify({
+        format: {
+          duration: "12.345",
+          tags: { "com.apple.quicktime.creationdate": "2020-01-01T00:00:00Z" },
+        },
+      })
+    );
+    expect(out.durationSeconds).toBeCloseTo(12.345, 3);
+  });
+
+  it("treats zero / negative / unparseable duration as null", () => {
+    for (const dur of ["0", "0.000000", "-1.5", "n/a", ""]) {
+      const out = parseVideoFfprobeJson(
+        JSON.stringify({ format: { duration: dur, tags: {} } })
+      );
+      expect(out.durationSeconds).toBeNull();
+    }
+  });
+
+  it("leaves duration null when format.duration is missing", () => {
+    const out = parseVideoFfprobeJson(
+      JSON.stringify({ format: { tags: { date: "2020-01-01T00:00:00Z" } } })
+    );
+    expect(out.durationSeconds).toBeNull();
+  });
+
   it("normalises empty Make/Model to null and trims whitespace", () => {
     const out = parseVideoFfprobeJson(
       JSON.stringify({
@@ -131,9 +159,8 @@ describe("parseImageExif", () => {
     expect(out.datetimeSource).toBe("none");
     expect(out.make).toBeNull();
     expect(out.model).toBeNull();
-    // The error field may be null or contain a parser message depending on
-    // exifr's defensive behaviour. Both are acceptable; what matters is that
-    // the function returned a well-formed result.
+    // Duration is always null for images by design.
+    expect(out.durationSeconds).toBeNull();
   });
 
   it("extracts DateTimeOriginal, Make, Model from a tiny synthetic JPG with EXIF", async () => {

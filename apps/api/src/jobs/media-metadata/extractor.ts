@@ -29,6 +29,12 @@ export interface ExtractedMetadata {
   capturedAtUnix: number | null;
   make: string | null;
   model: string | null;
+  /**
+   * Video container duration in seconds (float). Always null for images.
+   * Combined with `capturedAtUnix`, duration gives a near-unique match key
+   * for videos even when Make/Model are stripped by re-encoding.
+   */
+  durationSeconds: number | null;
   extractionError: string | null;
 }
 
@@ -98,6 +104,7 @@ const EMPTY: ExtractedMetadata = {
   capturedAtUnix: null,
   make: null,
   model: null,
+  durationSeconds: null,
   extractionError: null,
 };
 
@@ -136,6 +143,7 @@ export async function parseImageExif(buffer: ArrayBuffer): Promise<ExtractedMeta
     capturedAtUnix: dt?.unix ?? null,
     make: nonEmpty(parsed.Make),
     model: nonEmpty(parsed.Model),
+    durationSeconds: null,
     extractionError: null,
   };
 }
@@ -146,6 +154,8 @@ export async function parseImageExif(buffer: ArrayBuffer): Promise<ExtractedMeta
 
 interface FfprobeFormat {
   tags?: Record<string, unknown>;
+  /** Container duration in seconds. Stringified float in ffprobe output. */
+  duration?: string;
 }
 interface FfprobeOutput {
   format?: FfprobeFormat;
@@ -187,12 +197,22 @@ export function parseVideoFfprobeJson(json: string): ExtractedMetadata {
     nonEmpty(tags["com.apple.quicktime.model"]) ??
     nonEmpty(tags["model"]);
 
+  // format.duration is a stringified float; treat 0 / negative / unparseable
+  // as "no duration" so the join key naturally drops them.
+  let duration: number | null = null;
+  const durRaw = parsed.format?.duration;
+  if (typeof durRaw === "string" && durRaw.length > 0) {
+    const d = Number.parseFloat(durRaw);
+    if (Number.isFinite(d) && d > 0) duration = d;
+  }
+
   return {
     datetimeOriginal: dt?.iso ?? null,
     datetimeSource: dt ? "quicktime" : "none",
     capturedAtUnix: dt?.unix ?? null,
     make,
     model,
+    durationSeconds: duration,
     extractionError: null,
   };
 }
@@ -222,6 +242,7 @@ export async function extractFromPath(filePath: string, filename: string): Promi
     }
     return parseImageExif(buffer);
   }
+
 
   if (kind === "video") {
     const json = await probeVideoMetadata(filePath);

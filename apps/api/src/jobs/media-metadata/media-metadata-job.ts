@@ -113,10 +113,16 @@ export class MediaMetadataJobRunner extends JobRunner {
   }
 
   /**
-   * Returns files belonging to the requested scan that have a supported
-   * extension and no existing media_metadata row. Bounded by scan_id, the
-   * optional path prefix, and explicit extension filtering (so we don't even
-   * enqueue files that the extractor would mark unsupported).
+   * Returns files belonging to the requested scan that need extraction:
+   *   - no existing media_metadata row, OR
+   *   - existing row was written before `duration_seconds` was a column and
+   *     the row's datetime_source is video-shaped (quicktime / none). This
+   *     lets the migration backfill run without re-processing images, whose
+   *     duration_seconds is correctly null by design.
+   *
+   * Bounded by scan_id, the optional path prefix, and explicit extension
+   * filtering applied in TS below (so we never enqueue files the extractor
+   * would mark `unsupported_extension`).
    */
   private findCandidates(): FileTarget[] {
     const params: (string | number)[] = [this.scanId];
@@ -133,7 +139,11 @@ export class MediaMetadataJobRunner extends JobRunner {
          LEFT JOIN media_metadata mm ON mm.file_id = f.id
          WHERE f.scan_id = ?
            ${pathClause}
-           AND mm.file_id IS NULL`
+           AND (
+             mm.file_id IS NULL
+             OR (mm.duration_seconds IS NULL
+                 AND mm.datetime_source IN ('quicktime', 'none'))
+           )`
       )
       .all(...params) as Array<{ fileId: number; path: string; name: string }>;
 
@@ -190,14 +200,15 @@ export class MediaMetadataJobRunner extends JobRunner {
       .prepare(
         `INSERT INTO media_metadata
            (file_id, datetime_original, datetime_source, captured_at_unix,
-            make, model, extraction_error)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+            make, model, duration_seconds, extraction_error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(file_id) DO UPDATE SET
            datetime_original = excluded.datetime_original,
            datetime_source   = excluded.datetime_source,
            captured_at_unix  = excluded.captured_at_unix,
            make              = excluded.make,
            model             = excluded.model,
+           duration_seconds  = excluded.duration_seconds,
            extraction_error  = excluded.extraction_error,
            extracted_at      = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`
       )
@@ -208,6 +219,7 @@ export class MediaMetadataJobRunner extends JobRunner {
         m.capturedAtUnix,
         m.make,
         m.model,
+        m.durationSeconds,
         m.extractionError
       );
   }
