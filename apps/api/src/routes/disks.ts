@@ -9,6 +9,7 @@ import { getJobManager, registerRunner, unregisterRunner } from "../jobs";
 import { ScanJobRunner } from "../jobs/scan/scan-job";
 import { WriteSpeedJobRunner } from "../jobs/write-speed/write-speed-job";
 import { ReadSpeedJobRunner } from "../jobs/read-speed/read-speed-job";
+import { MediaMetadataJobRunner } from "../jobs/media-metadata/media-metadata-job";
 
 
 export const disksRouter = new Hono();
@@ -282,6 +283,93 @@ disksRouter.post("/:id/read-speed-test", async (c) => {
     db,
     diskId: id,
     sampleCount,
+  });
+
+  registerRunner(job.id, runner);
+  runner.start().finally(() => unregisterRunner(job.id));
+
+  return c.json({ jobId: job.id }, 202);
+});
+
+// Start a media metadata extraction job for a disk.
+// Body: { scanId?: number, pathPrefix?: string }
+//   - scanId defaults to the latest completed scan for the disk.
+//   - pathPrefix limits extraction to files at or under that absolute path
+//     (must be inside the disk's mount). Useful to extract one subtree at a
+//     time on a large HDD.
+disksRouter.post("/:id/media-metadata", async (c) => {
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<{ scanId?: number; pathPrefix?: string }>().catch(
+    () => ({} as { scanId?: number; pathPrefix?: string })
+  );
+  const db = getDb();
+  const disk = getDiskById(db, id);
+  if (!disk) return c.json({ error: "Disk not found" }, 404);
+  if (!disk.is_connected || !disk.mount_path) {
+    return c.json({ error: "Disk is not connected" }, 409);
+  }
+
+  // Determine target scan: explicit or latest completed.
+  let scanId = body.scanId;
+  if (scanId !== undefined && (!Number.isSafeInteger(scanId) || scanId <= 0)) {
+    return c.json({ error: "scanId must be a positive integer" }, 400);
+  }
+  if (scanId === undefined) {
+    const latest = db
+      .prepare(
+        `SELECT id FROM jobs
+         WHERE type = 'scan' AND target_disk_id = ? AND status = 'completed'
+         ORDER BY completed_at DESC LIMIT 1`
+      )
+      .get(id) as { id: number } | null;
+    if (!latest) {
+      return c.json({ error: "No completed scan found for this disk. Run a scan first." }, 409);
+    }
+    scanId = latest.id;
+  }
+
+  // Validate pathPrefix against the disk mount.
+  let pathPrefix: string | null = null;
+  if (typeof body.pathPrefix === "string" && body.pathPrefix.length > 0) {
+    pathPrefix = body.pathPrefix;
+    if (!pathPrefix.startsWith("/")) {
+      return c.json({ error: "pathPrefix must be an absolute path" }, 400);
+    }
+    if (!pathPrefix.startsWith(disk.mount_path + "/") && pathPrefix !== disk.mount_path) {
+      return c.json({ error: "pathPrefix must be inside the disk's mount path" }, 400);
+    }
+  }
+
+  // One extraction job at a time per disk.
+  const active = db
+    .prepare(
+      `SELECT id FROM jobs
+       WHERE target_disk_id = ? AND type = 'media_metadata_extraction'
+         AND status IN ('queued', 'running', 'paused')
+       LIMIT 1`
+    )
+    .get(id) as { id: number } | null;
+  if (active) {
+    return c.json(
+      { error: `A media metadata extraction is already active on this disk (job ${active.id})` },
+      409
+    );
+  }
+
+  const jm = getJobManager();
+  const job = jm.createJob({
+    type: "media_metadata_extraction",
+    targetDiskId: id,
+    payload: { scanId, pathPrefix },
+  });
+
+  const runner = new MediaMetadataJobRunner({
+    jobId: job.id,
+    jobManager: jm,
+    db,
+    diskId: id,
+    scanId,
+    pathPrefix,
   });
 
   registerRunner(job.id, runner);

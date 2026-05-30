@@ -223,3 +223,40 @@ export function readFileRangeStream(
 ): ReadableStream<Uint8Array> {
   return Bun.file(filePath).slice(start, endInclusive + 1).stream();
 }
+
+// ---------------------------------------------------------------------------
+// External tool spawns for media metadata (read-only)
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the raw `ffprobe -show_entries format_tags:stream_tags` JSON for a
+ * video file. The caller is responsible for parsing the structure.
+ *
+ * ffprobe is the only known cross-format reader for QuickTime / MP4 / MKV /
+ * WebM metadata that's already a dependency of most macOS dev setups via
+ * Homebrew's ffmpeg formula. If ffprobe is missing or exits non-zero, this
+ * returns null and the caller treats the file as having no extractable
+ * metadata. The 10s timeout guards against pathological containers.
+ */
+export async function probeVideoMetadata(filePath: string): Promise<string | null> {
+  try {
+    const proc = Bun.spawn(
+      [
+        "ffprobe",
+        "-v", "error",
+        "-show_entries", "format_tags:stream_tags",
+        "-of", "json",
+        filePath,
+      ],
+      { stderr: "ignore" }
+    );
+    const timeout = setTimeout(() => proc.kill(), 10_000);
+    const stdout = await new Response(proc.stdout).text();
+    await proc.exited;
+    clearTimeout(timeout);
+    if (proc.exitCode !== 0) return null;
+    return stdout;
+  } catch {
+    return null;
+  }
+}

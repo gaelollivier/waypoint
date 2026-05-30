@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@napi-rs/blake-hash": "^1.3.6",
+    "exifr": "^7.1.3",
     "hono": "^4.12.17"
   },
   "devDependencies": {

@@ -9,7 +9,8 @@ export type JobType =
   | "duplicate_detection"
   | "directory_duplicate_cleanup"
   | "write_speed_test"
-  | "read_speed_test";
+  | "read_speed_test"
+  | "media_metadata_extraction";
 export type JobStatus = "queued" | "running" | "paused" | "completed" | "failed" | "cancelled";
 export type JobEventLevel = "info" | "warning" | "error";
 

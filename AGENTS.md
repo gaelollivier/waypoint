@@ -145,6 +145,47 @@ What the agent must NOT do here:
   commits, code comments, or docs.** The same redaction rule that applies
   to `/cleanup/*` endpoints applies to comparison member paths and notes.
 
+### Media metadata extraction
+
+For cross-tree duplicate detection where the bytes differ but the underlying
+shot is the same (e.g. Google's storage-saver re-encodes vs the local
+original), the agent can ask Waypoint to pull EXIF / QuickTime metadata into
+a queryable `media_metadata` table. Then candidate matching can layer
+`same datetime_original + same camera make/model` onto basename or size band
+to dramatically reduce false positives.
+
+Kick it off:
+
+```
+POST /api/disks/:id/media-metadata
+Body: { scanId?: number, pathPrefix?: string }
+```
+
+- `scanId` defaults to the latest completed scan for the disk.
+- `pathPrefix` restricts extraction to that subtree (must be inside the
+  disk's mount). Useful to extract one big tree at a time on an HDD.
+
+The job is idempotent — it skips files that already have a
+`media_metadata` row. To re-extract, delete the row first. Datetime
+priority for video is `com.apple.quicktime.creationdate` → `date` →
+`creation_time`; for images we read `DateTimeOriginal`, falling back to
+`CreateDate`. Unsupported extensions (sidecars, archives, text) are not
+even enqueued.
+
+Querying it (read-only sqlite3 in `~/.waypoint/waypoint.db`):
+
+```sql
+SELECT f.path, mm.datetime_original, mm.make, mm.model
+  FROM files f
+  JOIN media_metadata mm ON mm.file_id = f.id
+ WHERE mm.captured_at_unix IS NOT NULL
+   AND mm.make = 'Apple'
+   AND mm.captured_at_unix BETWEEN ? AND ?;
+```
+
+The `media_metadata_join` index covers `(captured_at_unix, make, model)`
+so EXIF-keyed joins across trees stay cheap.
+
 ### Excluded paths
 
 The user can mark a directory (or single file path) as "ignore for

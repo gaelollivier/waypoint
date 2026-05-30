@@ -25,13 +25,14 @@ const EXPECTED_TABLES = [
   "files",
   "job_events",
   "jobs",
+  "media_metadata",
   "meta",
   "quarantine_items",
   "scan_walk_queue",
   "verify_items",
 ];
 
-const LATEST_MIGRATION_VERSION = 21;
+const LATEST_MIGRATION_VERSION = 22;
 
 function getTables(db: Database): string[] {
   return (
