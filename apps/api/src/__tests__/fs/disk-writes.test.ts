@@ -2,7 +2,13 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
-import { deleteDuplicateFile, deleteExcludedNoiseFile, removeEmptyDirectoryInsideMount, writeGeneratedTestFileAtomic } from "../../fs/disk-writes";
+import {
+  deleteDuplicateFile,
+  deleteEncodingScratchFile,
+  deleteExcludedNoiseFile,
+  removeEmptyDirectoryInsideMount,
+  writeGeneratedTestFileAtomic,
+} from "../../fs/disk-writes";
 import { computeFullHashStreaming } from "../../jobs/scan/hasher";
 import { computeFileFreshness } from "../../lib/freshness";
 import { JobManager } from "../../jobs/job-manager";
@@ -404,5 +410,85 @@ describe("removeEmptyDirectoryInsideMount", () => {
       removeEmptyDirectoryInsideMount({ directoryPath: dir, diskMountPath: root })
     ).rejects.toThrow();
     expect(existsSync(dir)).toBe(true);
+  });
+});
+
+describe("deleteEncodingScratchFile", () => {
+  it("deletes a variant-NNN.<ext> file inside the scratch root", async () => {
+    const root = makeRoot();
+    const setDir = path.join(root, "set-1", "sample-1");
+    mkdirSync(setDir, { recursive: true });
+    const file = path.join(setDir, "variant-1.mp4");
+    writeFileSync(file, "ffmpeg-output");
+    await deleteEncodingScratchFile({ filePath: file, scratchRoot: root });
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it("deletes an extracted frame", async () => {
+    const root = makeRoot();
+    const setDir = path.join(root, "set-1", "sample-1", "frames", "variant-1");
+    mkdirSync(setDir, { recursive: true });
+    const file = path.join(setDir, "frame-3.jpg");
+    writeFileSync(file, "jpeg-bytes");
+    await deleteEncodingScratchFile({ filePath: file, scratchRoot: root });
+    expect(existsSync(file)).toBe(false);
+  });
+
+  it("refuses paths outside the scratch root", async () => {
+    const root = makeRoot();
+    const outside = makeRoot();
+    const file = path.join(outside, "variant-1.mp4");
+    writeFileSync(file, "x");
+    await expect(
+      deleteEncodingScratchFile({ filePath: file, scratchRoot: root })
+    ).rejects.toThrow(/escapes scratch root/);
+    expect(existsSync(file)).toBe(true);
+  });
+
+  it("refuses to delete the scratch root itself", async () => {
+    const root = makeRoot();
+    await expect(
+      deleteEncodingScratchFile({ filePath: root, scratchRoot: root })
+    ).rejects.toThrow(/scratch root itself/);
+    expect(existsSync(root)).toBe(true);
+  });
+
+  it("refuses files whose basename isn't an encoding artifact", async () => {
+    const root = makeRoot();
+    const f1 = path.join(root, "random.mp4");
+    writeFileSync(f1, "x");
+    await expect(
+      deleteEncodingScratchFile({ filePath: f1, scratchRoot: root })
+    ).rejects.toThrow(/not an encoding artifact/);
+    expect(existsSync(f1)).toBe(true);
+
+    // macOS resource fork — must NOT be matched, even though it shadows a
+    // valid encoding artifact name.
+    const fork = path.join(root, "._variant-1.mp4");
+    writeFileSync(fork, "x");
+    await expect(
+      deleteEncodingScratchFile({ filePath: fork, scratchRoot: root })
+    ).rejects.toThrow(/not an encoding artifact/);
+    expect(existsSync(fork)).toBe(true);
+
+    // Path traversal attempt
+    const traversal = path.join(root, "set-1", "..", "variant-1.mp4");
+    mkdirSync(path.join(root, "set-1"));
+    writeFileSync(path.join(root, "variant-1.mp4"), "x");
+    // After normalisation this resolves to <root>/variant-1.mp4 which IS a
+    // valid artifact name; but the file exists at root level (not inside
+    // set-N), which is the worst place for a wildcard delete. The gateway
+    // still allows it because the name pattern passes and the path stays
+    // under scratch_root. This is the documented behaviour: the gateway
+    // proves *containment*, not *structural correctness*.
+    await deleteEncodingScratchFile({ filePath: traversal, scratchRoot: root });
+    expect(existsSync(path.join(root, "variant-1.mp4"))).toBe(false);
+  });
+
+  it("errors when the file does not exist", async () => {
+    const root = makeRoot();
+    await expect(
+      deleteEncodingScratchFile({ filePath: path.join(root, "variant-1.mp4"), scratchRoot: root })
+    ).rejects.toThrow(/does not exist/);
   });
 });

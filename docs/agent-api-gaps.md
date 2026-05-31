@@ -30,7 +30,10 @@ useful when triaging the next round of additions.
 
 ## Open gaps
 
-_(none recorded yet — add entries as you encounter them)_
+- "Which disks have media_metadata extracted, and how completely?" → no
+  endpoint; had to SELECT with a LEFT JOIN per disk. Would fit either on
+  `GET /api/disks/:id/scans` (per-scan media coverage count) or as a new
+  field on `GET /api/disks`. reach-for: 2026-05-30 picking encoding samples.
 
 ---
 

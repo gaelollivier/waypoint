@@ -125,6 +125,36 @@ describe("encoding-sample-sets", () => {
     ]);
   });
 
+  describe("POST /:id/run", () => {
+    it("returns 404 when the set does not exist", async () => {
+      const r = await req(ctx.app, "POST", "/api/encoding-sample-sets/9999/run", {});
+      expect(r.status).toBe(404);
+    });
+
+    it("rejects concurrent runs on the same set", async () => {
+      const { diskId, scanId } = setupScannedDisk(ctx);
+      insertFile(ctx, { diskId, scanId, path: "/a.mp4", size: 100 });
+
+      const created = await req(ctx.app, "POST", "/api/encoding-sample-sets", {
+        name: "x",
+        scratchRoot: "/s",
+        samples: [{ sourceDiskId: diskId, sourcePath: "/a.mp4" }],
+        variants: [{ codec: "hevc", encoder: "libx265" }],
+      });
+      const setId = created.body.id;
+
+      ctx.db
+        .prepare(
+          "INSERT INTO jobs (type, status, payload_json) VALUES ('encoding_sample_run', 'running', ?)"
+        )
+        .run(JSON.stringify({ setId }));
+
+      const r = await req(ctx.app, "POST", `/api/encoding-sample-sets/${setId}/run`, {});
+      expect(r.status).toBe(409);
+      expect(r.body.error).toContain("already in flight");
+    });
+  });
+
   it("lists sample sets newest first", async () => {
     const { diskId, scanId } = setupScannedDisk(ctx);
     insertFile(ctx, { diskId, scanId, path: "/a.mp4", size: 100 });

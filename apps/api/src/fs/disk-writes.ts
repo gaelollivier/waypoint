@@ -647,3 +647,208 @@ export async function removeEmptyDirectoryInsideMount(opts: {
 
   await rmdir(directoryPath);
 }
+
+// ---------------------------------------------------------------------------
+// Encoding scratch cleanup
+// ---------------------------------------------------------------------------
+
+/**
+ * DELETE: Removes a single encoding-scratch artifact (an ffmpeg-encoded
+ * variant output or an extracted JPEG frame) from inside the configured
+ * scratch root.
+ *
+ * Guardrails:
+ *   1. The path must resolve under `scratchRoot` — never outside it. Any
+ *      attempt to escape via `..` is collapsed by path.resolve() before the
+ *      comparison and therefore caught.
+ *   2. The path must NOT equal the scratch root itself — we refuse to
+ *      delete the root via this helper (use `removeEmptyDirectoryInsideMount`
+ *      for that, which only succeeds when the directory is already empty).
+ *   3. The basename must match the encoding-artifact pattern:
+ *      `variant-NNN.<ext>` for variant outputs or `frame-NNN.jpg` for
+ *      extracted frames. Anything else (including dotfiles like macOS
+ *      `._variant-1.mp4` resource forks) is refused.
+ *   4. The file must currently exist; missing-file is an error so the caller
+ *      can distinguish "already cleaned" from "unexpected state".
+ *
+ * This helper deliberately only handles files. Directory removal goes
+ * through `removeEmptyDirectoryInsideMount`, which uses rmdir(2) so the
+ * kernel itself rejects non-empty inputs.
+ */
+const ENCODING_ARTIFACT_PATTERN =
+  /^(variant-\d+\.[a-z0-9]+|frame-\d+\.jpg|frame-\d+\.jpeg)$/i;
+
+export async function deleteEncodingScratchFile(opts: {
+  filePath: string;
+  scratchRoot: string;
+}): Promise<void> {
+  const { filePath, scratchRoot } = opts;
+
+  if (!isWithinMount(filePath, scratchRoot)) {
+    throw new Error(
+      `deleteEncodingScratchFile: path "${filePath}" escapes scratch root "${scratchRoot}"`
+    );
+  }
+  if (path.resolve(filePath) === path.resolve(scratchRoot)) {
+    throw new Error(
+      `deleteEncodingScratchFile: refusing to delete scratch root itself`
+    );
+  }
+
+  const basename = path.basename(filePath);
+  if (!ENCODING_ARTIFACT_PATTERN.test(basename)) {
+    throw new Error(
+      `deleteEncodingScratchFile: refusing to delete "${basename}" — not an encoding artifact name`
+    );
+  }
+
+  if (!(await fileExists(filePath))) {
+    throw new Error(`deleteEncodingScratchFile: file does not exist: "${filePath}"`);
+  }
+
+  await unlink(filePath);
+}
+
+// ---------------------------------------------------------------------------
+// ffmpeg subprocess gateways
+// ---------------------------------------------------------------------------
+
+/**
+ * WRITE: Spawns ffmpeg to encode `sourcePath` to `outputPath`.
+ *
+ * Guardrails:
+ *   - `sourcePath` must resolve under `sourceMountPath` (typically a
+ *     registered disk mount).
+ *   - `outputPath` must resolve under `outputRootPath` (the scratch root
+ *     declared on the parent encoding sample set).
+ *   - `outputPath` must not already exist. We invoke ffmpeg with `-n` as a
+ *     defence-in-depth so even a race-loss returns a non-zero exit code
+ *     rather than overwriting.
+ *   - The output's parent directory is created with `mkdir -p`.
+ *
+ * Returns the exit code, captured stderr (for diagnostics), the output file
+ * size (bytes), and wall-clock seconds. Callers persist these to the
+ * `encoding_variants` row.
+ */
+export async function runFfmpegEncode(opts: {
+  sourcePath: string;
+  sourceMountPath: string;
+  outputPath: string;
+  outputRootPath: string;
+  clipStartSeconds: number | null;
+  clipDurationSeconds: number | null;
+  /** Encoder-side flags placed AFTER `-i source`, e.g. ['-c:v','libx265','-preset','slow','-crf','26']. */
+  videoArgs: string[];
+  /** Extra container/audio flags, e.g. ['-c:a','copy','-tag:v','hvc1']. */
+  containerArgs: string[];
+  signal?: AbortSignal;
+}): Promise<{ exitCode: number; stderr: string; outputBytes: number; elapsedSeconds: number }> {
+  if (!isWithinMount(opts.sourcePath, opts.sourceMountPath)) {
+    throw new Error(
+      `runFfmpegEncode: source "${opts.sourcePath}" escapes mount "${opts.sourceMountPath}"`
+    );
+  }
+  if (!isWithinMount(opts.outputPath, opts.outputRootPath)) {
+    throw new Error(
+      `runFfmpegEncode: output "${opts.outputPath}" escapes scratch root "${opts.outputRootPath}"`
+    );
+  }
+  if (await fileExists(opts.outputPath)) {
+    throw new FileAlreadyExistsError(opts.outputPath);
+  }
+
+  await mkdir(path.dirname(opts.outputPath), { recursive: true });
+
+  const args: string[] = ["-hide_banner", "-nostdin", "-n"];
+  if (opts.clipStartSeconds != null) {
+    args.push("-ss", String(opts.clipStartSeconds));
+  }
+  args.push("-i", opts.sourcePath);
+  if (opts.clipDurationSeconds != null) {
+    args.push("-t", String(opts.clipDurationSeconds));
+  }
+  args.push(...opts.videoArgs);
+  args.push(...opts.containerArgs);
+  args.push(opts.outputPath);
+
+  const startedAt = Date.now();
+  const proc = Bun.spawn(["ffmpeg", ...args], {
+    stderr: "pipe",
+    stdout: "ignore",
+    signal: opts.signal,
+  });
+  const stderrBytes = await new Response(proc.stderr).text();
+  const exitCode = await proc.exited;
+  const elapsedSeconds = (Date.now() - startedAt) / 1000;
+
+  let outputBytes = 0;
+  if (exitCode === 0) {
+    try {
+      const fh = await open(opts.outputPath, "r");
+      const stat = await fh.stat();
+      outputBytes = stat.size;
+      await fh.close();
+    } catch {
+      // fall through with size=0
+    }
+  }
+
+  return { exitCode, stderr: stderrBytes, outputBytes, elapsedSeconds };
+}
+
+/**
+ * WRITE: Extracts a single frame from `sourcePath` at `atSeconds` as a JPEG
+ * at `outputPath`.
+ *
+ * Same guardrails as `runFfmpegEncode`. Used for the comparison-tool
+ * blind-test frames.
+ */
+export async function runFfmpegFrameExtract(opts: {
+  sourcePath: string;
+  sourceMountPath: string;
+  outputPath: string;
+  outputRootPath: string;
+  atSeconds: number;
+  signal?: AbortSignal;
+}): Promise<{ exitCode: number; stderr: string }> {
+  if (!isWithinMount(opts.sourcePath, opts.sourceMountPath)) {
+    throw new Error(
+      `runFfmpegFrameExtract: source "${opts.sourcePath}" escapes mount "${opts.sourceMountPath}"`
+    );
+  }
+  if (!isWithinMount(opts.outputPath, opts.outputRootPath)) {
+    throw new Error(
+      `runFfmpegFrameExtract: output "${opts.outputPath}" escapes scratch root "${opts.outputRootPath}"`
+    );
+  }
+  if (await fileExists(opts.outputPath)) {
+    throw new FileAlreadyExistsError(opts.outputPath);
+  }
+  await mkdir(path.dirname(opts.outputPath), { recursive: true });
+
+  // -ss before -i for fast seek; -frames:v 1 to grab a single frame; -q:v 2
+  // gives a high-quality JPEG without going lossless (which would balloon
+  // each frame to ~megabytes for no perceptible gain).
+  const args = [
+    "-hide_banner",
+    "-nostdin",
+    "-n",
+    "-ss",
+    String(opts.atSeconds),
+    "-i",
+    opts.sourcePath,
+    "-frames:v",
+    "1",
+    "-q:v",
+    "2",
+    opts.outputPath,
+  ];
+  const proc = Bun.spawn(["ffmpeg", ...args], {
+    stderr: "pipe",
+    stdout: "ignore",
+    signal: opts.signal,
+  });
+  const stderr = await new Response(proc.stderr).text();
+  const exitCode = await proc.exited;
+  return { exitCode, stderr };
+}

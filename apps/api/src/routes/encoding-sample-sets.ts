@@ -3,6 +3,9 @@ import path from "path";
 import { getDb } from "../db/client";
 import { getDiskById } from "../disks/registry";
 import { recordAudit, classifyActor } from "../lib/audit";
+import { getJobManager, registerRunner, unregisterRunner } from "../jobs";
+import { EncodingSampleRunJobRunner } from "../jobs/encoding/encoding-sample-run-job";
+import { deleteEncodingScratchFile, removeEmptyDirectoryInsideMount } from "../fs/disk-writes";
 
 export const encodingSampleSetsRouter = new Hono();
 
@@ -405,9 +408,171 @@ encodingSampleSetsRouter.post("/", async (c) => {
 });
 
 /**
+ * POST /api/encoding-sample-sets/:id/run — kick off the encoder job.
+ *
+ * Body (all optional):
+ *   { concurrency?: number  // 1-12, default 2 }
+ *
+ * Returns 202 + { jobId }. Idempotent in the sense that pending variants
+ * are picked up if a previous run halted; already-done variants are skipped.
+ */
+encodingSampleSetsRouter.post("/:id{[0-9]+}/run", async (c) => {
+  const setId = Number(c.req.param("id"));
+  const db = getDb();
+  const set = db
+    .prepare(`SELECT id FROM encoding_sample_sets WHERE id = ?`)
+    .get(setId) as { id: number } | null;
+  if (!set) return c.json({ error: "Not found" }, 404);
+
+  const body = await c.req
+    .json<{ concurrency?: number }>()
+    .catch(() => ({} as { concurrency?: number }));
+  const concurrency = Math.max(1, Math.min(12, body.concurrency ?? 2));
+
+  // Refuse if a run is already active for this set.
+  const active = db
+    .prepare(
+      `SELECT id FROM jobs
+        WHERE type = 'encoding_sample_run'
+          AND status IN ('queued', 'running', 'paused')
+          AND json_extract(payload_json, '$.setId') = ?
+        LIMIT 1`
+    )
+    .get(setId) as { id: number } | null;
+  if (active) {
+    return c.json({ error: `encoding run already in flight: job ${active.id}` }, 409);
+  }
+
+  const jm = getJobManager();
+  const job = jm.createJob({
+    type: "encoding_sample_run",
+    payload: { setId, concurrency },
+  });
+
+  const runner = new EncodingSampleRunJobRunner({
+    jobId: job.id,
+    jobManager: jm,
+    db,
+    setId,
+    concurrency,
+  });
+  registerRunner(job.id, runner);
+  runner.start().finally(() => unregisterRunner(job.id));
+
+  return c.json({ jobId: job.id }, 202);
+});
+
+/**
+ * DELETE /api/encoding-sample-sets/:id/scratch — remove every encoder /
+ * frame-extraction artifact that lives under this set's scratch root, then
+ * remove the now-empty `sample-<sid>/` and `set-<id>/` directory hulls.
+ *
+ * Guarded by the `disk-writes.ts` gateway: every unlink validates that the
+ * target is under the recorded `scratch_root` and matches the
+ * `variant-NNN.<ext>` / `frame-NNN.jpg` naming pattern. Anything else is
+ * refused, so a typo in the scratch_root or a corrupted variant row cannot
+ * cascade outside the scratch tree.
+ *
+ * Does NOT delete the sample-set row itself — use `DELETE
+ * /api/encoding-sample-sets/:id` for that. Splitting the two ops keeps the
+ * blast radius of "drop the bytes on disk" separate from "drop the DB
+ * record" so a botched cleanup doesn't lose the registration metadata.
+ */
+encodingSampleSetsRouter.delete("/:id{[0-9]+}/scratch", async (c) => {
+  const id = Number(c.req.param("id"));
+  const db = getDb();
+  const userAgent = c.req.header("User-Agent") ?? null;
+
+  const set = db
+    .prepare(`SELECT id, scratch_root FROM encoding_sample_sets WHERE id = ?`)
+    .get(id) as { id: number; scratch_root: string } | null;
+  if (!set) return c.json({ error: "Not found" }, 404);
+
+  const variants = db
+    .prepare(
+      `SELECT v.id, v.sample_id, v.output_path
+         FROM encoding_variants v
+         JOIN encoding_samples s ON s.id = v.sample_id
+        WHERE s.set_id = ?
+          AND v.output_path IS NOT NULL`
+    )
+    .all(id) as Array<{ id: number; sample_id: number; output_path: string }>;
+
+  const sampleIds = new Set<number>();
+  let deletedFileCount = 0;
+  const errors: Array<{ variantId: number; outputPath: string; error: string }> = [];
+
+  for (const v of variants) {
+    sampleIds.add(v.sample_id);
+    try {
+      await deleteEncodingScratchFile({
+        filePath: v.output_path,
+        scratchRoot: set.scratch_root,
+      });
+      deletedFileCount += 1;
+      db.transaction(() => {
+        db.prepare(
+          `UPDATE encoding_variants SET output_path = NULL, output_size_bytes = NULL WHERE id = ?`
+        ).run(v.id);
+        recordAudit(db, {
+          action: "encoding_variant_scratch_delete",
+          actor: classifyActor(userAgent),
+          userAgent,
+          targetKind: "encoding_variant",
+          targetId: v.id,
+          before: { outputPath: v.output_path },
+          metadata: { setId: id, sampleId: v.sample_id },
+        });
+      })();
+    } catch (err) {
+      // File missing is the most common error here ("already cleaned by
+      // hand") — report and keep going so the rest still tidy up.
+      errors.push({
+        variantId: v.id,
+        outputPath: v.output_path,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // Empty sample/set directory hulls. We use the existing rmdir-only
+  // gateway so any unexpected non-encoding file inside makes the directory
+  // removal fail safely — leaving the artifact in place rather than
+  // recursing.
+  let removedDirCount = 0;
+  for (const sampleId of sampleIds) {
+    try {
+      await removeEmptyDirectoryInsideMount({
+        directoryPath: path.join(set.scratch_root, `set-${id}`, `sample-${sampleId}`),
+        diskMountPath: set.scratch_root,
+      });
+      removedDirCount += 1;
+    } catch {
+      // Non-empty or missing — leave it.
+    }
+  }
+  try {
+    await removeEmptyDirectoryInsideMount({
+      directoryPath: path.join(set.scratch_root, `set-${id}`),
+      diskMountPath: set.scratch_root,
+    });
+    removedDirCount += 1;
+  } catch {
+    // ditto
+  }
+
+  return c.json({
+    id,
+    deletedFiles: deletedFileCount,
+    removedDirectories: removedDirCount,
+    errors,
+  });
+});
+
+/**
  * DELETE /api/encoding-sample-sets/:id — drop the set and all child variants
- * (cascade). Does NOT touch the scratch directory; the caller is responsible
- * for cleaning up `output_path` files on disk.
+ * (cascade). Does NOT touch the scratch directory; call DELETE /:id/scratch
+ * first if you also want to remove encoded outputs.
  */
 encodingSampleSetsRouter.delete("/:id{[0-9]+}", (c) => {
   const id = Number(c.req.param("id"));
