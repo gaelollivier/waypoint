@@ -891,7 +891,16 @@ duplicatesRouter.post("/cleanup", async (c) => {
     result = await applyDuplicateCleanup(
       db,
       { diskId, diskMountPath: disk.mount_path },
-      { duplicateGroupId, keepFile, deleteFiles }
+      {
+        duplicateGroupId,
+        keepFile,
+        deleteFiles,
+        audit: {
+          actor: "ui",
+          userAgent: userAgent ?? null,
+          extraMetadata: { triggeredVia: "manual_cleanup" },
+        },
+      }
     );
   } catch (err) {
     if (err instanceof CleanupValidationError) {
@@ -1227,6 +1236,7 @@ duplicatesRouter.post("/directories/cleanup", async (c) => {
     diskMountPath: disk.mount_path,
     scanId,
     payload,
+    audit: { actor: "ui", userAgent: userAgent ?? null },
   });
 
   registerRunner(job.id, runner);

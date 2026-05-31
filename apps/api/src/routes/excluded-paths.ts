@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { getDb } from "../db/client";
 import { getDiskById } from "../disks/registry";
+import { recordAudit, classifyActor } from "../lib/audit";
 
 // ---------------------------------------------------------------------------
 // Per-disk exclusion list for duplicate detection.
@@ -87,13 +88,27 @@ excludedPathsRouter.post("/", async (c) => {
     return c.json(format(existing), 200);
   }
 
-  const inserted = db
-    .prepare(
-      `INSERT INTO excluded_paths (disk_id, path, reason)
-       VALUES (?, ?, ?)
-       RETURNING id, disk_id, path, reason, created_at`
-    )
-    .get(diskId, path, reason) as ExcludedPathRow;
+  const userAgent = c.req.header("User-Agent") ?? null;
+  const inserted = db.transaction(() => {
+    const row = db
+      .prepare(
+        `INSERT INTO excluded_paths (disk_id, path, reason)
+         VALUES (?, ?, ?)
+         RETURNING id, disk_id, path, reason, created_at`
+      )
+      .get(diskId, path, reason) as ExcludedPathRow;
+    recordAudit(db, {
+      action: "excluded_path_add",
+      actor: classifyActor(userAgent),
+      userAgent,
+      diskId,
+      targetKind: "excluded_path",
+      targetId: row.id,
+      targetPath: row.path,
+      after: format(row),
+    });
+    return row;
+  })();
 
   return c.json(format(inserted), 201);
 });
@@ -110,12 +125,29 @@ excludedPathsRouter.delete("/:exclusionId", (c) => {
   const disk = getDiskById(db, diskId);
   if (!disk) return c.json({ error: "Disk not found" }, 404);
 
-  const result = db
-    .prepare(`DELETE FROM excluded_paths WHERE id = ? AND disk_id = ?`)
-    .run(exclusionId, diskId);
-
-  if (result.changes === 0) {
+  const existing = db
+    .prepare(
+      `SELECT id, disk_id, path, reason, created_at FROM excluded_paths WHERE id = ? AND disk_id = ?`
+    )
+    .get(exclusionId, diskId) as ExcludedPathRow | null;
+  if (!existing) {
     return c.json({ error: "Exclusion not found for this disk" }, 404);
   }
+
+  const userAgent = c.req.header("User-Agent") ?? null;
+  db.transaction(() => {
+    db.prepare(`DELETE FROM excluded_paths WHERE id = ?`).run(exclusionId);
+    recordAudit(db, {
+      action: "excluded_path_remove",
+      actor: classifyActor(userAgent),
+      userAgent,
+      diskId,
+      targetKind: "excluded_path",
+      targetId: existing.id,
+      targetPath: existing.path,
+      before: format(existing),
+    });
+  })();
+
   return c.json({ id: exclusionId, deleted: true });
 });

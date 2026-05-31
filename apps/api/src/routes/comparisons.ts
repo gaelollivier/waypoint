@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { getDb } from "../db/client";
+import { recordAudit, classifyActor } from "../lib/audit";
 
 // ---------------------------------------------------------------------------
 // Media comparison batches.
@@ -250,6 +251,9 @@ comparisonsRouter.post("/", async (c) => {
     validated.push(v);
   }
 
+  const userAgent = c.req.header("User-Agent") ?? null;
+  const actor = classifyActor(userAgent);
+
   const batchId = db.transaction(() => {
     const parent = db
       .prepare(
@@ -277,6 +281,21 @@ comparisonsRouter.post("/", async (c) => {
         m.note ?? ""
       );
     }
+
+    recordAudit(db, {
+      action: "comparison_batch_create",
+      actor,
+      userAgent,
+      targetKind: "comparison_batch",
+      targetId: parent.id,
+      after: {
+        id: parent.id,
+        name: body.name as string,
+        rationale,
+        memberCount: validated.length,
+      },
+      metadata: { members: validated },
+    });
     return parent.id;
   })();
 
@@ -293,8 +312,35 @@ comparisonsRouter.delete("/:batchId", (c) => {
   }
 
   const db = getDb();
-  const result = db.prepare(`DELETE FROM comparison_batches WHERE id = ?`).run(batchId);
-  if (result.changes === 0) return c.json({ error: "Batch not found" }, 404);
+  const userAgent = c.req.header("User-Agent") ?? null;
+
+  const changed = db.transaction(() => {
+    const batch = db
+      .prepare(`SELECT id, name, rationale, created_at FROM comparison_batches WHERE id = ?`)
+      .get(batchId) as { id: number; name: string; rationale: string; created_at: string } | null;
+    if (!batch) return 0;
+    const members = db
+      .prepare(
+        `SELECT id, position, left_path, left_size_bytes, left_content_hash,
+                right_path, right_size_bytes, right_content_hash,
+                note, verdict, verdict_note, verdicted_at
+           FROM comparison_members WHERE batch_id = ? ORDER BY position`
+      )
+      .all(batchId) as MemberRow[];
+    const result = db.prepare(`DELETE FROM comparison_batches WHERE id = ?`).run(batchId);
+
+    recordAudit(db, {
+      action: "comparison_batch_delete",
+      actor: classifyActor(userAgent),
+      userAgent,
+      targetKind: "comparison_batch",
+      targetId: batchId,
+      before: { batch, members },
+    });
+    return result.changes;
+  })();
+
+  if (changed === 0) return c.json({ error: "Batch not found" }, 404);
   return c.json({ id: batchId, deleted: true });
 });
 
@@ -330,20 +376,47 @@ comparisonsRouter.post("/:batchId/members/:memberId/verdict", async (c) => {
   if (member.batch_id !== batchId) return c.json({ error: "Member does not belong to this batch" }, 404);
 
   const verdictedAt = verdict === null ? null : new Date().toISOString();
-  db.prepare(
-    `UPDATE comparison_members
-       SET verdict = ?, verdict_note = ?, verdicted_at = ?
-     WHERE id = ?`
-  ).run(verdict, note, verdictedAt, memberId);
+  const userAgent = c.req.header("User-Agent") ?? null;
 
-  const row = db
-    .prepare(
-      `SELECT id, batch_id, position, left_path, left_size_bytes, left_content_hash,
-              right_path, right_size_bytes, right_content_hash,
-              note, verdict, verdict_note, verdicted_at
-       FROM comparison_members WHERE id = ?`
-    )
-    .get(memberId) as MemberRow;
+  const row = db.transaction(() => {
+    const prior = db
+      .prepare(
+        `SELECT verdict, verdict_note, verdicted_at FROM comparison_members WHERE id = ?`
+      )
+      .get(memberId) as {
+        verdict: string | null;
+        verdict_note: string | null;
+        verdicted_at: string | null;
+      } | null;
+
+    db.prepare(
+      `UPDATE comparison_members
+         SET verdict = ?, verdict_note = ?, verdicted_at = ?
+       WHERE id = ?`
+    ).run(verdict, note, verdictedAt, memberId);
+
+    recordAudit(db, {
+      action: "comparison_verdict",
+      actor: classifyActor(userAgent),
+      userAgent,
+      targetKind: "comparison_member",
+      targetId: memberId,
+      before: prior
+        ? { verdict: prior.verdict, note: prior.verdict_note, verdictedAt: prior.verdicted_at }
+        : null,
+      after: { verdict, note, verdictedAt },
+      metadata: { batchId },
+    });
+
+    return db
+      .prepare(
+        `SELECT id, batch_id, position, left_path, left_size_bytes, left_content_hash,
+                right_path, right_size_bytes, right_content_hash,
+                note, verdict, verdict_note, verdicted_at
+         FROM comparison_members WHERE id = ?`
+      )
+      .get(memberId) as MemberRow;
+  })();
 
   return c.json(formatMember(row));
 });

@@ -22,6 +22,7 @@ import {
   freshnessMismatchReason,
   type FileFreshness,
 } from "./freshness";
+import { recordAudit, type Actor } from "./audit";
 
 export class CleanupValidationError extends Error {
   status: number;
@@ -35,6 +36,19 @@ export interface CleanupGroupInput {
   duplicateGroupId: number;
   keepFile: { fileId: number; path: string };
   deleteFiles: Array<{ fileId: number; path: string }>;
+  /**
+   * Optional audit context. When provided, every successful deletion gets a
+   * row in `audit_log` capturing enough state to revert (restore from the
+   * kept copy). Callers that don't pass this still write `deleted_files`
+   * rows but skip the audit_log row — used for internal/system flows that
+   * already have their own audit story.
+   */
+  audit?: {
+    actor: Actor;
+    userAgent?: string | null;
+    /** Extra metadata to merge into each audit row, e.g. suggestionId. */
+    extraMetadata?: Record<string, unknown>;
+  };
 }
 
 export interface CleanupGroupResult {
@@ -292,7 +306,8 @@ export async function applyDuplicateCleanup(
     }
   }
 
-  // Persist deleted_files for the deletes that landed.
+  // Persist deleted_files for the deletes that landed, and write audit rows
+  // when the caller provided audit context.
   if (results.length > 0) {
     const now = new Date().toISOString();
     const recordDeleted = db.prepare(
@@ -301,6 +316,38 @@ export async function applyDuplicateCleanup(
     db.transaction(() => {
       for (const r of results) {
         recordDeleted.run(r.fileId, selectedScanId, now);
+        if (input.audit) {
+          const file = fileMap.get(r.fileId);
+          if (!file) throw new Error(`invariant: deleted file ${r.fileId} missing from fileMap`);
+          recordAudit(db, {
+            action: "duplicate_cleanup",
+            actor: input.audit.actor,
+            userAgent: input.audit.userAgent,
+            diskId: disk.diskId,
+            targetKind: "file",
+            targetId: r.fileId,
+            targetPath: r.path,
+            before: {
+              fileId: r.fileId,
+              path: r.path,
+              sizeBytes: file.size_bytes,
+              mtime: file.mtime,
+              sampledHash: file.sampled_hash,
+              fullHash: file.full_hash,
+              scanId: file.scan_id,
+              keptFile: {
+                fileId: keepRecord.file_id,
+                path: keepRecord.path,
+                fullHash: keepRecord.full_hash,
+              },
+            },
+            metadata: {
+              duplicateGroupId,
+              duplicateJobId: group.duplicate_job_id,
+              ...input.audit.extraMetadata,
+            },
+          });
+        }
       }
     })();
   }

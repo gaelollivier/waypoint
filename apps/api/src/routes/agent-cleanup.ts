@@ -7,6 +7,7 @@ import {
   applyDuplicateCleanup,
   CleanupValidationError,
 } from "../lib/duplicate-cleanup";
+import { recordAudit, classifyActor } from "../lib/audit";
 
 // ---------------------------------------------------------------------------
 // Agent-driven cleanup support: deletion history, freeform notes, and
@@ -130,14 +131,33 @@ agentCleanupRouter.put("/notes", async (c) => {
   if (typeof body.body !== "string") {
     return c.json({ error: "Body must include a string 'body' field" }, 400);
   }
+  const newBody: string = body.body;
 
   const now = new Date().toISOString();
-  db.prepare(
-    `INSERT INTO agent_notes (disk_id, body, updated_at) VALUES (?, ?, ?)
-     ON CONFLICT(disk_id) DO UPDATE SET body = excluded.body, updated_at = excluded.updated_at`
-  ).run(diskId, body.body, now);
+  const userAgent = c.req.header("User-Agent") ?? null;
 
-  return c.json({ diskId, body: body.body, updatedAt: now });
+  db.transaction(() => {
+    const prior = db
+      .prepare(`SELECT body, updated_at FROM agent_notes WHERE disk_id = ?`)
+      .get(diskId) as { body: string; updated_at: string } | null;
+
+    db.prepare(
+      `INSERT INTO agent_notes (disk_id, body, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(disk_id) DO UPDATE SET body = excluded.body, updated_at = excluded.updated_at`
+    ).run(diskId, newBody, now);
+
+    recordAudit(db, {
+      action: "cleanup_notes_update",
+      actor: classifyActor(userAgent),
+      userAgent,
+      diskId,
+      targetKind: "agent_notes",
+      before: prior ? { body: prior.body, updatedAt: prior.updated_at } : null,
+      after: { body: newBody, updatedAt: now },
+    });
+  })();
+
+  return c.json({ diskId, body: newBody, updatedAt: now });
 });
 
 // ---------------------------------------------------------------------------
@@ -512,8 +532,19 @@ agentCleanupRouter.post("/suggestions", async (c) => {
     }
   }
 
+  const userAgent = c.req.header("User-Agent") ?? null;
+  const actor = classifyActor(userAgent);
+
   const insertedId = db.transaction(() => {
+    const supersededIds: number[] = [];
     if (batchKey !== null) {
+      const rows = db
+        .prepare(
+          `SELECT id FROM cleanup_suggestions
+           WHERE disk_id = ? AND batch_key = ? AND status = 'pending'`
+        )
+        .all(diskId, batchKey) as Array<{ id: number }>;
+      for (const r of rows) supersededIds.push(r.id);
       db.prepare(
         `DELETE FROM cleanup_suggestions
          WHERE disk_id = ? AND batch_key = ? AND status = 'pending'`
@@ -531,15 +562,40 @@ agentCleanupRouter.post("/suggestions", async (c) => {
          (suggestion_id, content_hash, keep_path, delete_paths, size_bytes)
        VALUES (?, ?, ?, ?, ?)`
     );
+    const memberSnapshots: Array<{
+      contentHash: string;
+      keepPath: string;
+      deletePaths: string[];
+      sizeBytes: number;
+    }> = [];
     for (const m of body.members) {
+      const deletePaths = Array.from(new Set(m.deletePaths));
+      const sizeBytes = Math.floor(m.sizeBytes);
       insertMember.run(
         parent.id,
         m.contentHash,
         m.keepPath,
-        JSON.stringify(Array.from(new Set(m.deletePaths))),
-        Math.floor(m.sizeBytes)
+        JSON.stringify(deletePaths),
+        sizeBytes
       );
+      memberSnapshots.push({
+        contentHash: m.contentHash,
+        keepPath: m.keepPath,
+        deletePaths,
+        sizeBytes,
+      });
     }
+
+    recordAudit(db, {
+      action: "cleanup_suggestion_create",
+      actor,
+      userAgent,
+      diskId,
+      targetKind: "cleanup_suggestion",
+      targetId: parent.id,
+      after: { id: parent.id, rationale, batchKey, members: memberSnapshots },
+      metadata: supersededIds.length > 0 ? { supersededIds } : undefined,
+    });
     return parent.id;
   })();
 
@@ -691,6 +747,15 @@ agentCleanupRouter.post("/suggestions/:suggestionId/apply", async (c) => {
             duplicateGroupId: rm.duplicateGroupId,
             keepFile: rm.keepFile,
             deleteFiles: rm.deleteFiles,
+            audit: {
+              actor: "ui",
+              userAgent: userAgent ?? null,
+              extraMetadata: {
+                triggeredVia: "suggestion_apply",
+                suggestionId,
+                suggestionMemberId: rm.memberId,
+              },
+            },
           }
         );
       } catch (err) {
@@ -739,11 +804,29 @@ agentCleanupRouter.post("/suggestions/:suggestionId/apply", async (c) => {
   }
 
   const now = new Date().toISOString();
-  db.prepare(
-    `UPDATE cleanup_suggestions
-     SET status = 'applied', applied_at = ?
-     WHERE id = ? AND disk_id = ? AND status = 'pending'`
-  ).run(now, suggestionId, diskId);
+  db.transaction(() => {
+    db.prepare(
+      `UPDATE cleanup_suggestions
+       SET status = 'applied', applied_at = ?
+       WHERE id = ? AND disk_id = ? AND status = 'pending'`
+    ).run(now, suggestionId, diskId);
+
+    recordAudit(db, {
+      action: "cleanup_suggestion_apply",
+      actor: "ui",
+      userAgent: userAgent ?? null,
+      diskId,
+      targetKind: "cleanup_suggestion",
+      targetId: suggestionId,
+      before: { status: "pending" },
+      after: { status: "applied", appliedAt: now },
+      metadata: {
+        totalDeleted,
+        memberCount: perMemberResults.length,
+        duplicateJobId: ctx.duplicateJobId,
+      },
+    });
+  })();
 
   jm.logEvent(
     ctx.duplicateJobId,
@@ -778,15 +861,31 @@ agentCleanupRouter.post("/suggestions/:suggestionId/dismissed", (c) => {
   if (!disk) return c.json({ error: "Disk not found" }, 404);
 
   const now = new Date().toISOString();
-  const result = db
-    .prepare(
-      `UPDATE cleanup_suggestions
-       SET status = 'dismissed', dismissed_at = ?
-       WHERE id = ? AND disk_id = ? AND status = 'pending'`
-    )
-    .run(now, suggestionId, diskId);
+  const userAgent = c.req.header("User-Agent") ?? null;
 
-  if (result.changes === 0) {
+  const changed = db.transaction(() => {
+    const result = db
+      .prepare(
+        `UPDATE cleanup_suggestions
+         SET status = 'dismissed', dismissed_at = ?
+         WHERE id = ? AND disk_id = ? AND status = 'pending'`
+      )
+      .run(now, suggestionId, diskId);
+    if (result.changes === 0) return 0;
+    recordAudit(db, {
+      action: "cleanup_suggestion_dismiss",
+      actor: classifyActor(userAgent),
+      userAgent,
+      diskId,
+      targetKind: "cleanup_suggestion",
+      targetId: suggestionId,
+      before: { status: "pending" },
+      after: { status: "dismissed", dismissedAt: now },
+    });
+    return result.changes;
+  })();
+
+  if (changed === 0) {
     return c.json({ error: "Suggestion not found or not in pending state" }, 404);
   }
   return c.json({ id: suggestionId, status: "dismissed", dismissedAt: now });

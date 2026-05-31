@@ -4,6 +4,7 @@ import { runMigrations } from "../../db/migrate";
 
 const EXPECTED_TABLES = [
   "agent_notes",
+  "audit_log",
   "cleanup_suggestion_members",
   "cleanup_suggestions",
   "comparison_batches",
@@ -32,7 +33,7 @@ const EXPECTED_TABLES = [
   "verify_items",
 ];
 
-const LATEST_MIGRATION_VERSION = 23;
+const LATEST_MIGRATION_VERSION = 24;
 
 function getTables(db: Database): string[] {
   return (

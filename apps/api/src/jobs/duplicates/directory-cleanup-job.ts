@@ -17,6 +17,7 @@ import { isExcludedName } from "../../lib/excluded-names";
 import { LockManager } from "../../locks/lock-manager";
 import { getLockManager } from "../../locks";
 import { trace } from "../../diag/trace";
+import { recordAudit, type Actor } from "../../lib/audit";
 
 /**
  * Job payload for directory_duplicate_cleanup.
@@ -62,6 +63,8 @@ export class DirectoryDuplicateCleanupJobRunner extends JobRunner {
   private payload: DirectoryDuplicateCleanupPayload;
   private lockManager: LockManager;
   private releaseLock: (() => void) | null = null;
+  private auditActor: Actor;
+  private auditUserAgent: string | null;
 
   constructor(opts: {
     jobId: number;
@@ -71,6 +74,7 @@ export class DirectoryDuplicateCleanupJobRunner extends JobRunner {
     diskMountPath: string;
     scanId: number;
     payload: DirectoryDuplicateCleanupPayload;
+    audit?: { actor: Actor; userAgent?: string | null };
   }) {
     super(opts.jobId, opts.jobManager);
     this.db = opts.db;
@@ -79,6 +83,8 @@ export class DirectoryDuplicateCleanupJobRunner extends JobRunner {
     this.scanId = opts.scanId;
     this.payload = opts.payload;
     this.lockManager = getLockManager();
+    this.auditActor = opts.audit?.actor ?? "system";
+    this.auditUserAgent = opts.audit?.userAgent ?? null;
   }
 
   // Coordinate the disk write lock with the runner lifecycle so the UI's
@@ -296,7 +302,14 @@ export class DirectoryDuplicateCleanupJobRunner extends JobRunner {
       // Persist the deletion state per-file as we go so a halt midway leaves
       // the DB consistent with what's on disk: every file_id we successfully
       // unlinked has a deleted_files row.
-      this.recordDeletedFile(deleteRecord.fileId);
+      this.recordDeletedFile(deleteRecord.fileId, {
+        path: deleteRecord.path,
+        sizeBytes: deleteRecord.sizeBytes,
+        mtime: deleteRecord.mtime,
+        sampledHash: deleteRecord.sampledHash,
+        fullHash: deleteRecord.fullHash,
+        keptFile: { fileId: keepFile.fileId, path: keepFile.path, fullHash: keepFile.fullHash },
+      });
 
       this.incrementProgress({
         itemsProcessed: 1,
@@ -333,7 +346,10 @@ export class DirectoryDuplicateCleanupJobRunner extends JobRunner {
     // every emptied subdir has been rmdir'd. Re-running detection on the same
     // scan will surface this as "already deleted" without needing the per-
     // file rows.
-    this.recordDeletedDirectory(del.directoryId);
+    this.recordDeletedDirectory(del.directoryId, {
+      path: del.path,
+      keptDirectoryPath: keepRoot,
+    });
 
     this.logEvent(
       "info",
@@ -446,22 +462,69 @@ export class DirectoryDuplicateCleanupJobRunner extends JobRunner {
     return ids;
   }
 
-  private recordDeletedFile(fileId: number): void {
+  private recordDeletedFile(
+    fileId: number,
+    snapshot: {
+      path: string;
+      sizeBytes: number;
+      mtime: string;
+      sampledHash: string | null;
+      fullHash: string | null;
+      keptFile: { fileId: number; path: string; fullHash: string | null };
+    }
+  ): void {
     const now = new Date().toISOString();
-    this.db
-      .prepare(
-        "INSERT OR REPLACE INTO deleted_files (file_id, scan_id, deleted_at) VALUES (?, ?, ?)"
-      )
-      .run(fileId, this.scanId, now);
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          "INSERT OR REPLACE INTO deleted_files (file_id, scan_id, deleted_at) VALUES (?, ?, ?)"
+        )
+        .run(fileId, this.scanId, now);
+
+      recordAudit(this.db, {
+        action: "duplicate_directory_cleanup_file",
+        actor: this.auditActor,
+        userAgent: this.auditUserAgent,
+        diskId: this.diskId,
+        targetKind: "file",
+        targetId: fileId,
+        targetPath: snapshot.path,
+        before: { fileId, scanId: this.scanId, ...snapshot },
+        metadata: {
+          jobId: this.jobId,
+          duplicateDirectoryGroupId: this.payload.duplicateDirectoryGroupId,
+        },
+      });
+    })();
   }
 
-  private recordDeletedDirectory(directoryId: number): void {
+  private recordDeletedDirectory(
+    directoryId: number,
+    snapshot: { path: string; keptDirectoryPath: string }
+  ): void {
     const now = new Date().toISOString();
-    this.db
-      .prepare(
-        "INSERT OR REPLACE INTO deleted_directories (directory_id, scan_id, deleted_at) VALUES (?, ?, ?)"
-      )
-      .run(directoryId, this.scanId, now);
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          "INSERT OR REPLACE INTO deleted_directories (directory_id, scan_id, deleted_at) VALUES (?, ?, ?)"
+        )
+        .run(directoryId, this.scanId, now);
+
+      recordAudit(this.db, {
+        action: "duplicate_directory_cleanup_directory",
+        actor: this.auditActor,
+        userAgent: this.auditUserAgent,
+        diskId: this.diskId,
+        targetKind: "directory",
+        targetId: directoryId,
+        targetPath: snapshot.path,
+        before: { directoryId, scanId: this.scanId, ...snapshot },
+        metadata: {
+          jobId: this.jobId,
+          duplicateDirectoryGroupId: this.payload.duplicateDirectoryGroupId,
+        },
+      });
+    })();
   }
 
   private getDirectoryPath(dirId: number): string {
