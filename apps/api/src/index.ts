@@ -20,6 +20,7 @@ import { filesRouter } from "./routes/files";
 import { directoriesRouter } from "./routes/directories";
 import { scansRouter } from "./routes/scans";
 import { auditRouter } from "./routes/audit";
+import { encodingSampleSetsRouter } from "./routes/encoding-sample-sets";
 import { startLoopStallDetector, trace } from "./diag/trace";
 
 // Initialize DB (runs migrations + clears stale locks) at startup
@@ -63,6 +64,7 @@ app.route("/api/disks/:id/files", filesRouter);
 app.route("/api/disks/:id/directories", directoriesRouter);
 app.route("/api/disks/:id/scans", scansRouter);
 app.route("/api/audit", auditRouter);
+app.route("/api/encoding-sample-sets", encodingSampleSetsRouter);
 
 const PORT = Number(process.env.PORT ?? 3000);
 
