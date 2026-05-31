@@ -1,6 +1,21 @@
-import { describe, it, expect, beforeEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterAll } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import path from "path";
 import { createTestApp, req, insertDisk, type TestContext } from "./helpers";
 import { insertJob } from "../helpers";
+
+const scratchRoots: string[] = [];
+afterAll(() => {
+  for (const r of scratchRoots) {
+    try { rmSync(r, { recursive: true, force: true }); } catch { /* noop */ }
+  }
+});
+function makeScratchRoot(): string {
+  const root = mkdtempSync(path.join(tmpdir(), "waypoint-encoding-sample-sets-route-"));
+  scratchRoots.push(root);
+  return root;
+}
 
 function setupScannedDisk(ctx: TestContext): { diskId: number; scanId: number } {
   const diskId = insertDisk(ctx.db);
@@ -471,6 +486,154 @@ describe("encoding-sample-sets", () => {
       expect(rankings.body.samples[0].variants.map((v: any) => v.score)).toEqual([2, 1, 0]);
       expect(rankings.body.aggregate.variants.map((v: any) => v.position)).toEqual([0, 2, 1]);
       expect(JSON.stringify(rankings.body)).not.toContain("/scratch/");
+    });
+  });
+
+  describe("DELETE /:id/scratch?framesOnly=true", () => {
+    it("removes frame JPEGs and resets frame rows without touching variants", async () => {
+      const scratchRoot = makeScratchRoot();
+      const { diskId, scanId } = setupScannedDisk(ctx);
+      insertFile(ctx, { diskId, scanId, path: "/a.mp4", size: 100, duration: 60 });
+      const created = await req(ctx.app, "POST", "/api/encoding-sample-sets", {
+        name: "frames-only",
+        scratchRoot,
+        samples: [{ sourceDiskId: diskId, sourcePath: "/a.mp4", clipDurationSeconds: 30 }],
+        variants: [{ codec: "hevc", encoder: "libx265", label: "v1" }],
+      });
+      const setId = created.body.id;
+      const sample = ctx.db
+        .prepare(`SELECT id FROM encoding_samples WHERE set_id = ?`)
+        .get(setId) as { id: number };
+      const variant = ctx.db
+        .prepare(`SELECT id FROM encoding_variants WHERE sample_id = ?`)
+        .get(sample.id) as { id: number };
+
+      const variantDir = path.join(scratchRoot, `set-${setId}`, `sample-${sample.id}`);
+      const variantFile = path.join(variantDir, `variant-${variant.id}.mp4`);
+      const sourceFrameDir = path.join(variantDir, "source");
+      const sourceFrame = path.join(sourceFrameDir, "frame-0.jpg");
+      const variantFrameDir = path.join(variantDir, `variant-${variant.id}`);
+      const variantFrame = path.join(variantFrameDir, "frame-0.jpg");
+      mkdirSync(sourceFrameDir, { recursive: true });
+      mkdirSync(variantFrameDir, { recursive: true });
+      writeFileSync(variantFile, "mp4-bytes");
+      writeFileSync(sourceFrame, "jpeg-src");
+      writeFileSync(variantFrame, "jpeg-var");
+
+      ctx.db
+        .prepare(
+          `UPDATE encoding_variants
+              SET status = 'done', output_path = ?, output_size_bytes = ?
+            WHERE id = ?`
+        )
+        .run(variantFile, 9, variant.id);
+      ctx.db
+        .prepare(
+          `INSERT INTO encoding_frames
+             (sample_id, variant_id, position, at_seconds, output_path, status)
+           VALUES (?, NULL, 0, 5, ?, 'done')`
+        )
+        .run(sample.id, sourceFrame);
+      ctx.db
+        .prepare(
+          `INSERT INTO encoding_frames
+             (sample_id, variant_id, position, at_seconds, output_path, status)
+           VALUES (NULL, ?, 0, 5, ?, 'done')`
+        )
+        .run(variant.id, variantFrame);
+
+      const res = await req(
+        ctx.app,
+        "DELETE",
+        `/api/encoding-sample-sets/${setId}/scratch?framesOnly=true`
+      );
+      expect(res.status).toBe(200);
+      expect(res.body.framesOnly).toBe(true);
+      expect(res.body.deletedFiles).toBe(2);
+      expect(res.body.errors).toEqual([]);
+
+      // Variant MP4 + DB row are preserved.
+      expect(existsSync(variantFile)).toBe(true);
+      const variantRow = ctx.db
+        .prepare(`SELECT status, output_path, output_size_bytes FROM encoding_variants WHERE id = ?`)
+        .get(variant.id) as { status: string; output_path: string; output_size_bytes: number };
+      expect(variantRow.status).toBe("done");
+      expect(variantRow.output_path).toBe(variantFile);
+      expect(variantRow.output_size_bytes).toBe(9);
+
+      // Frame JPEGs are gone; rows are reset to pending with NULL output_path.
+      expect(existsSync(sourceFrame)).toBe(false);
+      expect(existsSync(variantFrame)).toBe(false);
+      const frameRows = ctx.db
+        .prepare(`SELECT status, output_path FROM encoding_frames ORDER BY id`)
+        .all() as Array<{ status: string; output_path: string | null }>;
+      expect(frameRows).toEqual([
+        { status: "pending", output_path: null },
+        { status: "pending", output_path: null },
+      ]);
+
+      // The sample directory itself still exists because the variant MP4 is still in it.
+      expect(existsSync(variantDir)).toBe(true);
+
+      // Audit log: frame-delete entries only, no variant-delete entries.
+      const actions = (ctx.db
+        .prepare(`SELECT action FROM audit_log WHERE action LIKE 'encoding_%scratch_delete'`)
+        .all() as Array<{ action: string }>).map((r) => r.action);
+      expect(actions.filter((a) => a === "encoding_frame_scratch_delete")).toHaveLength(2);
+      expect(actions.filter((a) => a === "encoding_variant_scratch_delete")).toHaveLength(0);
+    });
+
+    it("idempotently resets rows whose JPEG was already gone (no error)", async () => {
+      const scratchRoot = makeScratchRoot();
+      const { diskId, scanId } = setupScannedDisk(ctx);
+      insertFile(ctx, { diskId, scanId, path: "/a.mp4", size: 100, duration: 60 });
+      const created = await req(ctx.app, "POST", "/api/encoding-sample-sets", {
+        name: "frames-missing",
+        scratchRoot,
+        samples: [{ sourceDiskId: diskId, sourcePath: "/a.mp4", clipDurationSeconds: 30 }],
+        variants: [{ codec: "hevc", encoder: "libx265" }],
+      });
+      const setId = created.body.id;
+      const sample = ctx.db
+        .prepare(`SELECT id FROM encoding_samples WHERE set_id = ?`)
+        .get(setId) as { id: number };
+      const variant = ctx.db
+        .prepare(`SELECT id FROM encoding_variants WHERE sample_id = ?`)
+        .get(sample.id) as { id: number };
+
+      // Mark variant done but never create the file; mark a frame done with a
+      // path that doesn't exist on disk. This is the state after an
+      // interrupted extract where ffmpeg exited 0 without producing output.
+      const stalePath = path.join(
+        scratchRoot, `set-${setId}`, `sample-${sample.id}`, `variant-${variant.id}`, "frame-0.jpg"
+      );
+      ctx.db
+        .prepare(`UPDATE encoding_variants SET status='done', output_path=? WHERE id=?`)
+        .run(path.join(scratchRoot, `set-${setId}`, `sample-${sample.id}`, `variant-${variant.id}.mp4`), variant.id);
+      ctx.db
+        .prepare(
+          `INSERT INTO encoding_frames (sample_id, variant_id, position, at_seconds, output_path, status)
+           VALUES (NULL, ?, 0, 5, ?, 'done')`
+        )
+        .run(variant.id, stalePath);
+
+      const res = await req(
+        ctx.app, "DELETE", `/api/encoding-sample-sets/${setId}/scratch?framesOnly=true`
+      );
+      expect(res.status).toBe(200);
+      expect(res.body.deletedFiles).toBe(0);
+      expect(res.body.errors).toEqual([]);
+
+      const row = ctx.db
+        .prepare(`SELECT status, output_path FROM encoding_frames`)
+        .get() as { status: string; output_path: string | null };
+      expect(row.status).toBe("pending");
+      expect(row.output_path).toBeNull();
+
+      const audit = ctx.db
+        .prepare(`SELECT metadata_json FROM audit_log WHERE action = 'encoding_frame_scratch_delete'`)
+        .get() as { metadata_json: string };
+      expect(JSON.parse(audit.metadata_json)).toMatchObject({ fileMissing: true });
     });
   });
 

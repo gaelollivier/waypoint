@@ -7,6 +7,7 @@ import { getJobManager, registerRunner, unregisterRunner } from "../jobs";
 import { EncodingSampleRunJobRunner } from "../jobs/encoding/encoding-sample-run-job";
 import { EncodingFrameExtractJobRunner } from "../jobs/encoding/encoding-frame-extract-job";
 import { deleteEncodingScratchFile, removeEmptyDirectoryInsideMount } from "../fs/disk-writes";
+import { fileExists } from "../fs/disk-reads";
 
 export const encodingSampleSetsRouter = new Hono();
 
@@ -1146,6 +1147,11 @@ encodingSampleSetsRouter.post("/:id{[0-9]+}/frame-comparison-batches", async (c)
  * frame-extraction artifact that lives under this set's scratch root, then
  * remove the now-empty `sample-<sid>/` and `set-<id>/` directory hulls.
  *
+ * `?framesOnly=true` narrows the wipe to the frame JPEGs and resets only
+ * `encoding_frames` rows, leaving variant MP4s and `encoding_variants` rows
+ * untouched. Useful when frames were extracted at the wrong timestamps and
+ * need a redo without paying for another encode pass.
+ *
  * Guarded by the `disk-writes.ts` gateway: every unlink validates that the
  * target is under the recorded `scratch_root` and matches the
  * `variant-NNN.<ext>` / `frame-NNN.jpg` naming pattern. Anything else is
@@ -1161,21 +1167,24 @@ encodingSampleSetsRouter.delete("/:id{[0-9]+}/scratch", async (c) => {
   const id = Number(c.req.param("id"));
   const db = getDb();
   const userAgent = c.req.header("User-Agent") ?? null;
+  const framesOnly = c.req.query("framesOnly") === "true";
 
   const set = db
     .prepare(`SELECT id, scratch_root FROM encoding_sample_sets WHERE id = ?`)
     .get(id) as { id: number; scratch_root: string } | null;
   if (!set) return c.json({ error: "Not found" }, 404);
 
-  const variants = db
-    .prepare(
-      `SELECT v.id, v.sample_id, v.output_path
-         FROM encoding_variants v
-         JOIN encoding_samples s ON s.id = v.sample_id
-        WHERE s.set_id = ?
-          AND v.output_path IS NOT NULL`
-    )
-    .all(id) as Array<{ id: number; sample_id: number; output_path: string }>;
+  const variants = framesOnly
+    ? []
+    : (db
+        .prepare(
+          `SELECT v.id, v.sample_id, v.output_path
+             FROM encoding_variants v
+             JOIN encoding_samples s ON s.id = v.sample_id
+            WHERE s.set_id = ?
+              AND v.output_path IS NOT NULL`
+        )
+        .all(id) as Array<{ id: number; sample_id: number; output_path: string }>);
 
   const frames = db
     .prepare(
@@ -1217,11 +1226,20 @@ encodingSampleSetsRouter.delete("/:id{[0-9]+}/scratch", async (c) => {
       sourceFrameDirs.add(f.resolved_sample_id);
     }
     try {
-      await deleteEncodingScratchFile({
-        filePath: f.output_path,
-        scratchRoot: set.scratch_root,
-      });
-      deletedFileCount += 1;
+      // Idempotent cleanup: if the JPEG is already gone (interrupted
+      // extract, hand-cleaned, etc.) we still want the row reset so the
+      // next extract-frames run re-creates it. Skip the gateway in that
+      // case — there's nothing to unlink, and the desired end-state
+      // (output_path NULL, status pending) is what the transaction below
+      // produces anyway.
+      const present = await fileExists(f.output_path);
+      if (present) {
+        await deleteEncodingScratchFile({
+          filePath: f.output_path,
+          scratchRoot: set.scratch_root,
+        });
+        deletedFileCount += 1;
+      }
       db.transaction(() => {
         // Reset to pending so a subsequent extract-frames run re-creates the
         // bytes without having to delete the row first.
@@ -1245,6 +1263,7 @@ encodingSampleSetsRouter.delete("/:id{[0-9]+}/scratch", async (c) => {
             setId: id,
             sampleId: f.sample_id,
             variantId: f.variant_id,
+            fileMissing: present ? undefined : true,
           },
         });
       })();
@@ -1331,10 +1350,21 @@ encodingSampleSetsRouter.delete("/:id{[0-9]+}/scratch", async (c) => {
       // ditto
     }
   }
-  for (const sampleId of sampleIds) {
+  if (!framesOnly) {
+    for (const sampleId of sampleIds) {
+      try {
+        await removeEmptyDirectoryInsideMount({
+          directoryPath: path.join(set.scratch_root, `set-${id}`, `sample-${sampleId}`),
+          diskMountPath: set.scratch_root,
+        });
+        removedDirCount += 1;
+      } catch {
+        // ditto
+      }
+    }
     try {
       await removeEmptyDirectoryInsideMount({
-        directoryPath: path.join(set.scratch_root, `set-${id}`, `sample-${sampleId}`),
+        directoryPath: path.join(set.scratch_root, `set-${id}`),
         diskMountPath: set.scratch_root,
       });
       removedDirCount += 1;
@@ -1342,18 +1372,10 @@ encodingSampleSetsRouter.delete("/:id{[0-9]+}/scratch", async (c) => {
       // ditto
     }
   }
-  try {
-    await removeEmptyDirectoryInsideMount({
-      directoryPath: path.join(set.scratch_root, `set-${id}`),
-      diskMountPath: set.scratch_root,
-    });
-    removedDirCount += 1;
-  } catch {
-    // ditto
-  }
 
   return c.json({
     id,
+    framesOnly,
     deletedFiles: deletedFileCount,
     removedDirectories: removedDirCount,
     errors,

@@ -88,6 +88,16 @@ describe("computeFrameTimestamps", () => {
     expect(ts).toBeNull();
   });
 
+  it("returns relative-to-clip timestamps when relative=true", () => {
+    const ts = computeFrameTimestamps(
+      { id: 1, clip_start_seconds: 10, clip_duration_seconds: 100, source_duration_seconds: null },
+      5,
+      true
+    );
+    // start treated as 0; midpoints at (i+0.5)/5 * 100 = 10, 30, 50, 70, 90
+    expect(ts).toEqual([10, 30, 50, 70, 90]);
+  });
+
   it("returns null when duration is zero or negative", () => {
     expect(
       computeFrameTimestamps(
@@ -148,6 +158,36 @@ describe("ensureFrameRowsForSet", () => {
     expect(variantCount).toBe(5);
   });
 
+  it("uses absolute timestamps for source rows and relative for variant rows", () => {
+    // Sample with clip_start=10 and duration=60, so source absolute timestamps
+    // sit at start+(i+0.5)/N*duration while variant timestamps drop the start
+    // because the encoded clip itself begins at second 0.
+    const { setId, sampleIds, variantIds } = createSampleSet(db, {
+      samples: 1,
+      variantsPerSample: 1,
+      markVariantsDone: true,
+    });
+    ensureFrameRowsForSet(db, setId, 5);
+
+    const sourceTs = db
+      .prepare(
+        `SELECT position, at_seconds FROM encoding_frames
+          WHERE sample_id = ? ORDER BY position`
+      )
+      .all(sampleIds[0]) as Array<{ position: number; at_seconds: number }>;
+    // start=10 + (i+0.5)/5 * 60 = 16, 28, 40, 52, 64
+    expect(sourceTs.map((r) => r.at_seconds)).toEqual([16, 28, 40, 52, 64]);
+
+    const variantTs = db
+      .prepare(
+        `SELECT position, at_seconds FROM encoding_frames
+          WHERE variant_id = ? ORDER BY position`
+      )
+      .all(variantIds[0]) as Array<{ position: number; at_seconds: number }>;
+    // (i+0.5)/5 * 60 = 6, 18, 30, 42, 54 — all within the 60 s variant clip.
+    expect(variantTs.map((r) => r.at_seconds)).toEqual([6, 18, 30, 42, 54]);
+  });
+
   it("does not create variant frames for variants that are not done", () => {
     const { setId } = createSampleSet(db, {
       samples: 1,
@@ -204,6 +244,52 @@ describe("ensureFrameRowsForSet", () => {
       .prepare(`SELECT COUNT(*) AS n FROM encoding_frames WHERE sample_id = ?`)
       .get(ok.id) as { n: number }).n;
     expect(okFrames).toBe(4);
+  });
+
+  it("retimes pending variant rows that already exist with stale at_seconds", () => {
+    const { setId, sampleIds, variantIds } = createSampleSet(db, {
+      samples: 1,
+      variantsPerSample: 1,
+      markVariantsDone: true,
+    });
+    // Seed a variant row with an obviously-wrong at_seconds (this mimics the
+    // old absolute-timestamp bug where 60+ seconds got stored for a 60 s
+    // variant clip). Source row gets a stale value too so we exercise both
+    // retime paths in one go.
+    db.prepare(
+      `INSERT INTO encoding_frames (sample_id, variant_id, position, at_seconds, status)
+       VALUES (NULL, ?, 0, 999, 'pending')`
+    ).run(variantIds[0]);
+    db.prepare(
+      `INSERT INTO encoding_frames (sample_id, variant_id, position, at_seconds, status)
+       VALUES (?, NULL, 0, 999, 'pending')`
+    ).run(sampleIds[0]);
+    // And a row that is already 'done' — must NOT be retimed.
+    db.prepare(
+      `INSERT INTO encoding_frames (sample_id, variant_id, position, at_seconds, status, output_path)
+       VALUES (NULL, ?, 1, 999, 'done', '/already-extracted.jpg')`
+    ).run(variantIds[0]);
+
+    const result = ensureFrameRowsForSet(db, setId, 5);
+    expect(result.retimedSourceRows).toBe(1);
+    expect(result.retimedVariantRows).toBe(1);
+    expect(result.insertedSourceRows).toBe(4); // positions 1..4 are new
+    expect(result.insertedVariantRows).toBe(3); // positions 2..4 are new (0 retimed, 1 was done)
+
+    const stalePending = db
+      .prepare(
+        `SELECT at_seconds FROM encoding_frames WHERE variant_id = ? AND position = 0`
+      )
+      .get(variantIds[0]) as { at_seconds: number };
+    expect(stalePending.at_seconds).not.toBe(999); // corrected
+
+    const stillDone = db
+      .prepare(
+        `SELECT at_seconds, status FROM encoding_frames WHERE variant_id = ? AND position = 1`
+      )
+      .get(variantIds[0]) as { at_seconds: number; status: string };
+    expect(stillDone.at_seconds).toBe(999); // committed timestamp preserved
+    expect(stillDone.status).toBe("done");
   });
 
   it("picks up newly-done variants on a re-run", () => {

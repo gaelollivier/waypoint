@@ -20,11 +20,18 @@ import { ensureFrameRowsForSet } from "./encoding-frames";
  * The `frame-N.jpg` basename is required by `disk-writes.deleteEncodingScratchFile`
  * so the scratch-cleanup endpoint can later unlink them.
  *
- * Source-frame timestamps are derived once per sample:
+ * Timestamps are derived once per sample and stored in `at_seconds`. The
+ * column convention is split by row kind, so the runtime can pass the value
+ * directly to ffmpeg's `-ss`:
  *
- *   start    = clip_start_seconds (or 0)
- *   duration = clip_duration_seconds (or source_duration_seconds)
- *   t_i      = start + ((i + 0.5) / framesPerVariant) * duration
+ *   source row  (variant_id IS NULL): absolute in the original file
+ *     start    = clip_start_seconds (or 0)
+ *     duration = clip_duration_seconds (or source_duration_seconds)
+ *     t_i      = start + ((i + 0.5) / framesPerVariant) * duration
+ *
+ *   variant row (sample_id IS NULL): relative to the variant clip, which
+ *   starts at second 0 because the encoder writes a trimmed output
+ *     t_i      = ((i + 0.5) / framesPerVariant) * duration
  *
  * A sample whose source duration is unknown and that has no clip window is
  * skipped with a warning event — the comparison can still proceed for the

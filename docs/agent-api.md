@@ -247,6 +247,14 @@ media or the DB set row. The disk gateway validates containment under
 the set's scratch root and only permits known generated basenames such
 as `variant-<id>.<ext>` and `frame-<n>.jpg`.
 
+`?framesOnly=true` narrows the wipe to frame JPEGs and resets only
+`encoding_frames` rows, leaving variant MP4s and `encoding_variants`
+rows untouched. Use this when frames were extracted at the wrong
+timestamps and need a redo without paying for another encode pass.
+Rows whose JPEG is already gone are still reset (file-already-missing
+is a successful idempotent cleanup, not an error); the audit row's
+metadata gets `fileMissing: true` so the no-op is traceable.
+
 ### `DELETE /api/encoding-sample-sets/:id`
 Delete the DB sample set and its child samples/variants/frames. This
 does not touch scratch bytes; call the scratch endpoint first when the
