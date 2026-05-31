@@ -6,20 +6,39 @@ import type { ComparisonBatchSummary, ComparisonProgress } from "../api/types";
 
 function progressBar(p: ComparisonProgress) {
   const total = Math.max(1, p.total);
-  const verdicted = p.same + p.different + p.unsure;
+  const verdicted = p.total - p.pending;
   const pct = (verdicted / total) * 100;
+  const leftPct = (p.preferLeft / total) * 100;
+  const rightPct = (p.preferRight / total) * 100;
+  const tiePct = (p.tie / total) * 100;
+  const samePct = (p.same / total) * 100;
+  const differentPct = (p.different / total) * 100;
+  const unsurePct = (p.unsure / total) * 100;
   return (
     <div className="space-y-1">
       <div className="h-1.5 w-full rounded-full bg-zinc-800 overflow-hidden flex">
-        <div className="h-full bg-emerald-600" style={{ width: `${(p.same / total) * 100}%` }} />
-        <div className="h-full bg-rose-600" style={{ width: `${(p.different / total) * 100}%` }} />
-        <div className="h-full bg-amber-600" style={{ width: `${(p.unsure / total) * 100}%` }} />
+        <div className="h-full bg-emerald-600" style={{ width: `${samePct}%` }} />
+        <div className="h-full bg-blue-600" style={{ width: `${leftPct}%` }} />
+        <div className="h-full bg-violet-600" style={{ width: `${rightPct}%` }} />
+        <div className="h-full bg-sky-600" style={{ width: `${tiePct}%` }} />
+        <div className="h-full bg-rose-600" style={{ width: `${differentPct}%` }} />
+        <div className="h-full bg-amber-600" style={{ width: `${unsurePct}%` }} />
       </div>
       <div className="flex justify-between text-xs text-zinc-500">
         <span>{verdicted}/{p.total} reviewed ({pct.toFixed(0)}%)</span>
         <span className="flex gap-3">
-          <span className="text-emerald-400">{p.same} same</span>
-          <span className="text-rose-400">{p.different} different</span>
+          {p.preferLeft + p.preferRight + p.tie > 0 ? (
+            <>
+              <span className="text-blue-400">{p.preferLeft} left</span>
+              <span className="text-violet-400">{p.preferRight} right</span>
+              <span className="text-sky-400">{p.tie} tie</span>
+            </>
+          ) : (
+            <>
+              <span className="text-emerald-400">{p.same} same</span>
+              <span className="text-rose-400">{p.different} different</span>
+            </>
+          )}
           <span className="text-amber-400">{p.unsure} unsure</span>
         </span>
       </div>
@@ -45,7 +64,8 @@ function BatchCard({ batch }: { batch: ComparisonBatchSummary }) {
             {batch.name}
           </Link>
           <div className="mt-1 text-xs text-zinc-500">
-            Created {formatDate(batch.createdAt)} · {batch.progress.total} pair
+            {batch.kind === "encoding_frames" ? "Encoding frames" : "Media pairs"} ·
+            {" "}Created {formatDate(batch.createdAt)} · {batch.progress.total} pair
             {batch.progress.total === 1 ? "" : "s"}
           </div>
         </div>
@@ -87,10 +107,9 @@ export function ComparePage() {
       </div>
 
       <p className="text-xs text-zinc-500">
-        Side-by-side review of media pairs. Batches are created by the cleanup agent;
-        open one to verdict each pair as <span className="text-emerald-400">same</span>,{" "}
-        <span className="text-rose-400">different</span>, or{" "}
-        <span className="text-amber-400">unsure</span>.
+        Side-by-side review of media pairs and blinded encoder frame comparisons.
+        Dedup batches use same/different verdicts; encoding batches use left/right
+        preference, tie, or unsure.
       </p>
 
       {isLoading ? (

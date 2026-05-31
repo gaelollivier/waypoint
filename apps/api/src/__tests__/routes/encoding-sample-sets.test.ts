@@ -265,6 +265,215 @@ describe("encoding-sample-sets", () => {
     });
   });
 
+  describe("POST /:id/frame-comparison-batches", () => {
+    it("creates one encoding_frames comparison batch per ready sample", async () => {
+      const { diskId, scanId } = setupScannedDisk(ctx);
+      insertFile(ctx, { diskId, scanId, path: "/a.mp4", size: 100, duration: 60 });
+
+      const created = await req(ctx.app, "POST", "/api/encoding-sample-sets", {
+        name: "x",
+        scratchRoot: "/scratch",
+        samples: [{ sourceDiskId: diskId, sourcePath: "/a.mp4", clipDurationSeconds: 30 }],
+        variants: [
+          { codec: "hevc", encoder: "libx265", label: "v1" },
+          { codec: "hevc", encoder: "libx265", label: "v2" },
+          { codec: "av1", encoder: "libsvtav1", label: "v3" },
+        ],
+      });
+      const setId = created.body.id;
+      const sample = ctx.db
+        .prepare(`SELECT id FROM encoding_samples WHERE set_id = ?`)
+        .get(setId) as { id: number };
+      const variants = ctx.db
+        .prepare(`SELECT id FROM encoding_variants WHERE sample_id = ? ORDER BY position`)
+        .all(sample.id) as Array<{ id: number }>;
+
+      for (const [i, variant] of variants.entries()) {
+        ctx.db
+          .prepare(
+            `UPDATE encoding_variants
+                SET status = 'done',
+                    output_path = ?,
+                    output_size_bytes = ?
+              WHERE id = ?`
+          )
+          .run(`/scratch/set-${setId}/sample-${sample.id}/variant-${variant.id}/variant-${variant.id}.mp4`, 1000 + i, variant.id);
+      }
+      for (let pos = 0; pos < 2; pos++) {
+        ctx.db
+          .prepare(
+            `INSERT INTO encoding_frames
+               (sample_id, variant_id, position, at_seconds, output_path, status)
+             VALUES (?, NULL, ?, ?, ?, 'done')`
+          )
+          .run(sample.id, pos, 5 + pos * 10, `/scratch/set-${setId}/sample-${sample.id}/source/frame-${pos}.jpg`);
+        for (const variant of variants) {
+          ctx.db
+            .prepare(
+              `INSERT INTO encoding_frames
+                 (sample_id, variant_id, position, at_seconds, output_path, status)
+               VALUES (NULL, ?, ?, ?, ?, 'done')`
+            )
+            .run(
+              variant.id,
+              pos,
+              5 + pos * 10,
+              `/scratch/set-${setId}/sample-${sample.id}/variant-${variant.id}/frame-${pos}.jpg`
+            );
+        }
+      }
+
+      const res = await req(
+        ctx.app,
+        "POST",
+        `/api/encoding-sample-sets/${setId}/frame-comparison-batches`,
+        { namePrefix: "blind run" }
+      );
+      expect(res.status).toBe(201);
+      expect(res.body.batches).toHaveLength(1);
+      expect(res.body.batches[0].memberCount).toBe(3); // 3 choose 2
+
+      const detail = await req(ctx.app, "GET", `/api/comparisons/${res.body.batches[0].id}`);
+      expect(detail.status).toBe(200);
+      expect(detail.body.kind).toBe("encoding_frames");
+      expect(detail.body.sampleId).toBe(sample.id);
+      expect(detail.body.members).toHaveLength(3);
+      expect(detail.body.members[0].left.variantId).toBe(variants[0].id);
+      expect(detail.body.members[0].right.variantId).toBe(variants[1].id);
+      expect(detail.body.members[0].encodingFrames.sourceFrames).toHaveLength(2);
+      expect(detail.body.members[0].encodingFrames.leftFrames).toHaveLength(2);
+      expect(detail.body.members[0].encodingFrames.rightFrames).toHaveLength(2);
+    });
+
+    it("returns 409 when no sample has enough extracted frames", async () => {
+      const { diskId, scanId } = setupScannedDisk(ctx);
+      insertFile(ctx, { diskId, scanId, path: "/a.mp4", size: 100, duration: 60 });
+      const created = await req(ctx.app, "POST", "/api/encoding-sample-sets", {
+        name: "x",
+        scratchRoot: "/scratch",
+        samples: [{ sourceDiskId: diskId, sourcePath: "/a.mp4", clipDurationSeconds: 30 }],
+        variants: [{ codec: "hevc", encoder: "libx265" }],
+      });
+
+      const res = await req(
+        ctx.app,
+        "POST",
+        `/api/encoding-sample-sets/${created.body.id}/frame-comparison-batches`,
+        {}
+      );
+      expect(res.status).toBe(409);
+      expect(res.body.skipped[0].reason).toBe("no_source_frames");
+    });
+  });
+
+  describe("GET /:id/rankings", () => {
+    it("returns 404 when the set does not exist", async () => {
+      const r = await req(ctx.app, "GET", "/api/encoding-sample-sets/9999/rankings");
+      expect(r.status).toBe(404);
+    });
+
+    it("ranks encoding variants from frame comparison verdicts", async () => {
+      const { diskId, scanId } = setupScannedDisk(ctx);
+      insertFile(ctx, { diskId, scanId, path: "/a.mp4", size: 100, duration: 60 });
+
+      const created = await req(ctx.app, "POST", "/api/encoding-sample-sets", {
+        name: "x",
+        scratchRoot: "/scratch",
+        samples: [{ sourceDiskId: diskId, sourcePath: "/a.mp4", clipDurationSeconds: 30 }],
+        variants: [
+          { codec: "hevc", encoder: "libx265", label: "v1" },
+          { codec: "hevc", encoder: "libx265", label: "v2" },
+          { codec: "av1", encoder: "libsvtav1", label: "v3" },
+        ],
+      });
+      const setId = created.body.id;
+      const sample = ctx.db
+        .prepare(`SELECT id FROM encoding_samples WHERE set_id = ?`)
+        .get(setId) as { id: number };
+      const variants = ctx.db
+        .prepare(`SELECT id FROM encoding_variants WHERE sample_id = ? ORDER BY position`)
+        .all(sample.id) as Array<{ id: number }>;
+
+      for (const [i, variant] of variants.entries()) {
+        ctx.db
+          .prepare(
+            `UPDATE encoding_variants
+                SET status = 'done',
+                    output_path = ?,
+                    output_size_bytes = ?,
+                    encode_seconds = ?
+              WHERE id = ?`
+          )
+          .run(
+            `/scratch/set-${setId}/sample-${sample.id}/variant-${variant.id}/variant-${variant.id}.mp4`,
+            1000 + i,
+            10 + i,
+            variant.id
+          );
+      }
+      for (let pos = 0; pos < 2; pos++) {
+        ctx.db
+          .prepare(
+            `INSERT INTO encoding_frames
+               (sample_id, variant_id, position, at_seconds, output_path, status)
+             VALUES (?, NULL, ?, ?, ?, 'done')`
+          )
+          .run(sample.id, pos, 5 + pos * 10, `/scratch/set-${setId}/sample-${sample.id}/source/frame-${pos}.jpg`);
+        for (const variant of variants) {
+          ctx.db
+            .prepare(
+              `INSERT INTO encoding_frames
+                 (sample_id, variant_id, position, at_seconds, output_path, status)
+               VALUES (NULL, ?, ?, ?, ?, 'done')`
+            )
+            .run(
+              variant.id,
+              pos,
+              5 + pos * 10,
+              `/scratch/set-${setId}/sample-${sample.id}/variant-${variant.id}/frame-${pos}.jpg`
+            );
+        }
+      }
+
+      const batch = await req(
+        ctx.app,
+        "POST",
+        `/api/encoding-sample-sets/${setId}/frame-comparison-batches`,
+        {}
+      );
+      expect(batch.status).toBe(201);
+      const batchId = batch.body.batches[0].id;
+      const members = ctx.db
+        .prepare(`SELECT id FROM comparison_members WHERE batch_id = ? ORDER BY position`)
+        .all(batchId) as Array<{ id: number }>;
+      expect(members).toHaveLength(3);
+
+      ctx.db
+        .prepare(`UPDATE comparison_members SET verdict = ? WHERE id = ?`)
+        .run("prefer_left", members[0].id); // v1 beats v2
+      ctx.db
+        .prepare(`UPDATE comparison_members SET verdict = ? WHERE id = ?`)
+        .run("prefer_left", members[1].id); // v1 beats v3
+      ctx.db
+        .prepare(`UPDATE comparison_members SET verdict = ? WHERE id = ?`)
+        .run("prefer_right", members[2].id); // v3 beats v2
+
+      const rankings = await req(ctx.app, "GET", `/api/encoding-sample-sets/${setId}/rankings`);
+      expect(rankings.status).toBe(200);
+      expect(rankings.body.set.scratchRoot).toBeUndefined();
+      expect(rankings.body.samples).toHaveLength(1);
+      expect(rankings.body.samples[0].comparisons.total).toBe(3);
+      expect(rankings.body.samples[0].variants.map((v: any) => v.variantId)).toEqual([
+        variants[0].id,
+        variants[2].id,
+        variants[1].id,
+      ]);
+      expect(rankings.body.samples[0].variants.map((v: any) => v.score)).toEqual([2, 1, 0]);
+      expect(rankings.body.aggregate.variants.map((v: any) => v.position)).toEqual([0, 2, 1]);
+      expect(JSON.stringify(rankings.body)).not.toContain("/scratch/");
+    });
+  });
+
   it("lists sample sets newest first", async () => {
     const { diskId, scanId } = setupScannedDisk(ctx);
     insertFile(ctx, { diskId, scanId, path: "/a.mp4", size: 100 });

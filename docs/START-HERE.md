@@ -80,10 +80,11 @@ Recently completed backlog:
   support a small video re-encoding experiment loop. The API can register
   source samples + variant matrices, run ffmpeg encodes into a guarded
   scratch root, extract evenly-spaced JPEG frames from source clips and
-  completed variants, list frame rows, and clean generated scratch
-  artifacts through the disk-write gateway. The next remaining piece is
-  the UI/comparison flow on top of the existing `/compare` shell, followed
-  by the ranking/aggregation endpoint.
+  completed variants, list frame rows, create blinded frame-comparison
+  batches, render those batches in `/compare`, aggregate verdict rankings,
+  and clean generated scratch artifacts through the disk-write gateway.
+  The next remaining piece is a small rankings UI on the sample-set detail
+  view.
 
 - Media metadata extraction job: new `media_metadata` table + `media_metadata_extraction` job type. Worker thread per chunk extracts EXIF (via `exifr`) for image extensions and QuickTime/MP4 container tags (via `ffprobe`) for video, normalising to `{datetime_original, datetime_source, captured_at_unix, make, model}`. Datetime priority for video: `com.apple.quicktime.creationdate` → `date` → `creation_time`. Idempotent — skips files that already have a row. `POST /api/disks/:id/media-metadata { scanId?, pathPrefix? }` kicks it off; one job per disk at a time. Reads go through the disk-reads gateway. Tests cover the pure parsers (15) and the worker-driven job loop (4). No UI yet — first consumer is the duplicate-detection agent layering on basename+EXIF+camera matching.
 

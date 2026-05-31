@@ -336,6 +336,17 @@ Encoding batches may set `sample_id` to the source sample being compared.
 refer to `encoding_variants`. The existing path fields remain the
 renderable media/frame paths.
 
+`comparison_members.verdict` accepts both the original dedup verdicts
+(`same`, `different`, `unsure`) and encoder-preference verdicts
+(`prefer_left`, `prefer_right`, `tie`). The API enforces which subset is
+valid for each batch kind.
+
+`GET /api/encoding-sample-sets/:id/rankings` reads only
+`comparison_batches.kind = 'encoding_frames'` rows for the set's samples and
+scores variant ids without returning source paths, output paths, or scratch
+roots. `prefer_*` verdicts count as 1 point for the chosen variant; `tie`
+counts as 0.5 for both variants.
+
 ---
 
 ## Config

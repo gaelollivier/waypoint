@@ -218,6 +218,28 @@ frames first, variant position, then frame position. Each row includes
 `sampleId`, `variantId`, `resolvedSampleId`, `position`, `atSeconds`,
 `outputPath`, `status`, and error/timestamp fields.
 
+### `POST /api/encoding-sample-sets/:id/frame-comparison-batches`
+Create blinded frame-comparison batches for a set after extraction has
+completed. Optional body: `{ "namePrefix": "blind run", "rationale": "..." }`.
+The route creates one `comparison_batches.kind = 'encoding_frames'` row
+per sample that has source frames and at least two completed variants
+with matching extracted frame counts. Each batch member is one pairwise
+variant comparison and stores `left_variant_id` / `right_variant_id` for
+the `/compare/:batchId` UI.
+
+Returns `201 { setId, batches, skipped }`. Returns 409 when no sample has
+enough completed frame data.
+
+### `GET /api/encoding-sample-sets/:id/rankings`
+Aggregate encoding-frame comparison verdicts into per-sample and cross-sample
+variant rankings. `prefer_left` / `prefer_right` count as wins for the chosen
+variant, `tie` counts as 0.5 points for both variants, and `unsure` / pending
+members are reported but do not affect score.
+
+The response intentionally omits source/output paths and scratch roots; it
+returns sample ids, variant ids, encoder settings, output sizes, encode times,
+comparison counts, scores, win rates, and ranks.
+
 ### `DELETE /api/encoding-sample-sets/:id/scratch`
 Delete generated encoder outputs and extracted frame JPEGs for the set,
 then remove now-empty scratch directories. This does not delete source
@@ -278,6 +300,8 @@ Single entry.
 | `GET /api/encoding-sample-sets` | encoding comparison sample sets |
 | `GET /api/encoding-sample-sets/:id` | one encoding set with samples and variants |
 | `GET /api/encoding-sample-sets/:id/frames` | extracted source/variant frame rows |
+| `POST /api/encoding-sample-sets/:id/frame-comparison-batches` | create blinded encoding-frame comparison batches |
+| `GET /api/encoding-sample-sets/:id/rankings` | aggregate encoding-frame verdict rankings |
 
 ---
 
@@ -317,7 +341,7 @@ Actions emitted today:
 | `duplicate_directory_cleanup_directory` | `directory` | the parent directory record |
 | `comparison_batch_create` | `comparison_batch` | after = batch summary; metadata = members |
 | `comparison_batch_delete` | `comparison_batch` | before = batch + members |
-| `comparison_verdict` | `comparison_member` | before/after = verdict triple |
+| `comparison_verdict` | `comparison_member` | before/after = verdict triple. Dedup batches accept `same` / `different` / `unsure`; encoding-frame batches accept `prefer_left` / `prefer_right` / `tie` / `unsure`. |
 | `encoding_sample_set_create` | `encoding_sample_set` | after = set + samples + variants |
 | `encoding_sample_set_delete` | `encoding_sample_set` | before = set + samples + variants |
 | `encoding_variant_encode` | `encoding_variant` | system entry after a successful encode |

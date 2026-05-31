@@ -78,6 +78,96 @@ interface SampleSetRow {
   created_at: string;
 }
 
+interface FrameComparisonBatchBody {
+  namePrefix?: string;
+  rationale?: string;
+}
+
+interface FrameComparisonSampleRow {
+  id: number;
+  position: number;
+  label: string;
+}
+
+interface FrameComparisonVariantRow {
+  id: number;
+  position: number;
+  label: string;
+  output_path: string;
+  output_size_bytes: number | null;
+  frame_count: number;
+}
+
+interface RankingMemberRow {
+  sample_id: number;
+  left_variant_id: number | null;
+  right_variant_id: number | null;
+  verdict:
+    | "same"
+    | "different"
+    | "unsure"
+    | "prefer_left"
+    | "prefer_right"
+    | "tie"
+    | null;
+}
+
+interface VariantRankingStats {
+  variantId: number;
+  sampleId: number;
+  position: number;
+  codec: string;
+  encoder: string;
+  preset: string | null;
+  crf: number | null;
+  label: string;
+  outputSizeBytes: number | null;
+  encodeSeconds: number | null;
+  comparisons: number;
+  pending: number;
+  wins: number;
+  losses: number;
+  ties: number;
+  unsure: number;
+  score: number;
+  winRate: number | null;
+  rank: number;
+}
+
+interface SampleRankingStats {
+  sampleId: number;
+  position: number;
+  label: string;
+  comparisons: {
+    total: number;
+    pending: number;
+    preferLeft: number;
+    preferRight: number;
+    tie: number;
+    unsure: number;
+  };
+  variants: VariantRankingStats[];
+}
+
+interface AggregateVariantRankingStats {
+  position: number;
+  codec: string;
+  encoder: string;
+  preset: string | null;
+  crf: number | null;
+  label: string;
+  sampleCount: number;
+  comparisons: number;
+  pending: number;
+  wins: number;
+  losses: number;
+  ties: number;
+  unsure: number;
+  score: number;
+  winRate: number | null;
+  rank: number;
+}
+
 // ─── Format helpers ─────────────────────────────────────────────────────────
 
 function formatSampleSet(row: SampleSetRow) {
@@ -86,6 +176,15 @@ function formatSampleSet(row: SampleSetRow) {
     name: row.name,
     notes: row.notes,
     scratchRoot: row.scratch_root,
+    status: row.status,
+    createdAt: row.created_at,
+  };
+}
+
+function formatSampleSetSummary(row: SampleSetRow) {
+  return {
+    id: row.id,
+    name: row.name,
     status: row.status,
     createdAt: row.created_at,
   };
@@ -184,6 +283,49 @@ function validateBody(body: unknown): CreateSampleSetBody | { error: string } {
     }
   }
   return b as unknown as CreateSampleSetBody;
+}
+
+function validateFrameComparisonBody(
+  body: unknown
+): FrameComparisonBatchBody | { error: string } {
+  if (body === null || body === undefined) return {};
+  if (typeof body !== "object") return { error: "body must be an object" };
+  const b = body as Record<string, unknown>;
+  if (b.namePrefix !== undefined && typeof b.namePrefix !== "string") {
+    return { error: "namePrefix must be a string" };
+  }
+  if (b.rationale !== undefined && typeof b.rationale !== "string") {
+    return { error: "rationale must be a string" };
+  }
+  return {
+    namePrefix: b.namePrefix,
+    rationale: b.rationale,
+  } as FrameComparisonBatchBody;
+}
+
+function rankVariants<T extends { score: number; wins: number; losses: number; outputSizeBytes?: number | null; position: number }>(
+  variants: T[]
+): T[] {
+  const sorted = [...variants].sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    if (b.wins !== a.wins) return b.wins - a.wins;
+    if (a.losses !== b.losses) return a.losses - b.losses;
+    const aSize = a.outputSizeBytes ?? Number.POSITIVE_INFINITY;
+    const bSize = b.outputSizeBytes ?? Number.POSITIVE_INFINITY;
+    if (aSize !== bSize) return aSize - bSize;
+    return a.position - b.position;
+  });
+  return sorted.map((variant, index) => ({ ...variant, rank: index + 1 }));
+}
+
+function withWinRate<T extends { wins: number; losses: number; ties: number; score: number }>(
+  variant: T
+): T & { winRate: number | null } {
+  const decided = variant.wins + variant.losses + variant.ties;
+  return {
+    ...variant,
+    winRate: decided === 0 ? null : variant.score / decided,
+  };
 }
 
 // ─── Routes ─────────────────────────────────────────────────────────────────
@@ -622,6 +764,381 @@ encodingSampleSetsRouter.get("/:id{[0-9]+}/frames", (c) => {
       completedAt: r.completed_at,
     })),
   });
+});
+
+/**
+ * GET /api/encoding-sample-sets/:id/rankings
+ *
+ * Aggregates encoding-frame comparison verdicts into per-sample and
+ * cross-sample variant rankings. The response intentionally returns variant
+ * settings and metrics only, not source or output paths.
+ */
+encodingSampleSetsRouter.get("/:id{[0-9]+}/rankings", (c) => {
+  const setId = Number(c.req.param("id"));
+  const db = getDb();
+  const set = db
+    .prepare(`SELECT * FROM encoding_sample_sets WHERE id = ?`)
+    .get(setId) as SampleSetRow | null;
+  if (!set) return c.json({ error: "Not found" }, 404);
+
+  const samples = db
+    .prepare(
+      `SELECT id, position, label
+         FROM encoding_samples
+        WHERE set_id = ?
+        ORDER BY position`
+    )
+    .all(setId) as FrameComparisonSampleRow[];
+
+  const variants = db
+    .prepare(
+      `SELECT v.id, v.sample_id, v.position, v.codec, v.encoder, v.preset,
+              v.crf, v.label, v.output_size_bytes, v.encode_seconds
+         FROM encoding_variants v
+         JOIN encoding_samples s ON s.id = v.sample_id
+        WHERE s.set_id = ?
+        ORDER BY s.position, v.position`
+    )
+    .all(setId) as Array<
+    Pick<
+      VariantRow,
+      | "id"
+      | "sample_id"
+      | "position"
+      | "codec"
+      | "encoder"
+      | "preset"
+      | "crf"
+      | "label"
+      | "output_size_bytes"
+      | "encode_seconds"
+    >
+  >;
+
+  const sampleStats = new Map<number, SampleRankingStats>();
+  for (const sample of samples) {
+    sampleStats.set(sample.id, {
+      sampleId: sample.id,
+      position: sample.position,
+      label: sample.label,
+      comparisons: {
+        total: 0,
+        pending: 0,
+        preferLeft: 0,
+        preferRight: 0,
+        tie: 0,
+        unsure: 0,
+      },
+      variants: [],
+    });
+  }
+
+  const variantStats = new Map<number, VariantRankingStats>();
+  for (const variant of variants) {
+    const sample = sampleStats.get(variant.sample_id);
+    if (sample === undefined) {
+      throw new Error("invariant: variant belongs to a sample outside the set");
+    }
+    const stats: VariantRankingStats = {
+      variantId: variant.id,
+      sampleId: variant.sample_id,
+      position: variant.position,
+      codec: variant.codec,
+      encoder: variant.encoder,
+      preset: variant.preset,
+      crf: variant.crf,
+      label: variant.label,
+      outputSizeBytes: variant.output_size_bytes,
+      encodeSeconds: variant.encode_seconds,
+      comparisons: 0,
+      pending: 0,
+      wins: 0,
+      losses: 0,
+      ties: 0,
+      unsure: 0,
+      score: 0,
+      winRate: null,
+      rank: 0,
+    };
+    variantStats.set(variant.id, stats);
+    sample.variants.push(stats);
+  }
+
+  if (samples.length > 0) {
+    const placeholders = samples.map(() => "?").join(", ");
+    const members = db
+      .prepare(
+        `SELECT b.sample_id, m.left_variant_id, m.right_variant_id, m.verdict
+           FROM comparison_batches b
+           JOIN comparison_members m ON m.batch_id = b.id
+          WHERE b.kind = 'encoding_frames'
+            AND b.sample_id IN (${placeholders})
+          ORDER BY b.sample_id, b.id, m.position`
+      )
+      .all(...samples.map((s) => s.id)) as RankingMemberRow[];
+
+    for (const member of members) {
+      const sample = sampleStats.get(member.sample_id);
+      if (sample === undefined) {
+        throw new Error("invariant: comparison batch sample is outside the set");
+      }
+      if (member.left_variant_id === null || member.right_variant_id === null) {
+        throw new Error("invariant: encoding comparison member is missing variant ids");
+      }
+      const left = variantStats.get(member.left_variant_id);
+      const right = variantStats.get(member.right_variant_id);
+      if (left === undefined || right === undefined) {
+        throw new Error("invariant: encoding comparison member references a variant outside the set");
+      }
+
+      sample.comparisons.total++;
+      left.comparisons++;
+      right.comparisons++;
+
+      switch (member.verdict) {
+        case null:
+          sample.comparisons.pending++;
+          left.pending++;
+          right.pending++;
+          break;
+        case "prefer_left":
+          sample.comparisons.preferLeft++;
+          left.wins++;
+          right.losses++;
+          left.score += 1;
+          break;
+        case "prefer_right":
+          sample.comparisons.preferRight++;
+          right.wins++;
+          left.losses++;
+          right.score += 1;
+          break;
+        case "tie":
+          sample.comparisons.tie++;
+          left.ties++;
+          right.ties++;
+          left.score += 0.5;
+          right.score += 0.5;
+          break;
+        case "unsure":
+          sample.comparisons.unsure++;
+          left.unsure++;
+          right.unsure++;
+          break;
+        case "same":
+        case "different":
+          throw new Error("invariant: dedup verdict stored on encoding comparison member");
+      }
+    }
+  }
+
+  const rankedSamples = Array.from(sampleStats.values()).map((sample) => ({
+    ...sample,
+    variants: rankVariants(sample.variants.map(withWinRate)),
+  }));
+
+  const aggregateByPosition = new Map<number, AggregateVariantRankingStats>();
+  for (const variant of variantStats.values()) {
+    const existing = aggregateByPosition.get(variant.position);
+    if (existing === undefined) {
+      aggregateByPosition.set(variant.position, {
+        position: variant.position,
+        codec: variant.codec,
+        encoder: variant.encoder,
+        preset: variant.preset,
+        crf: variant.crf,
+        label: variant.label,
+        sampleCount: 1,
+        comparisons: variant.comparisons,
+        pending: variant.pending,
+        wins: variant.wins,
+        losses: variant.losses,
+        ties: variant.ties,
+        unsure: variant.unsure,
+        score: variant.score,
+        winRate: null,
+        rank: 0,
+      });
+    } else {
+      existing.sampleCount++;
+      existing.comparisons += variant.comparisons;
+      existing.pending += variant.pending;
+      existing.wins += variant.wins;
+      existing.losses += variant.losses;
+      existing.ties += variant.ties;
+      existing.unsure += variant.unsure;
+      existing.score += variant.score;
+    }
+  }
+
+  const aggregateVariants = rankVariants(
+    Array.from(aggregateByPosition.values()).map(withWinRate)
+  );
+
+  return c.json({
+    set: formatSampleSetSummary(set),
+    aggregate: { variants: aggregateVariants },
+    samples: rankedSamples,
+  });
+});
+
+/**
+ * POST /api/encoding-sample-sets/:id/frame-comparison-batches
+ *
+ * Builds one blinded `comparison_batches.kind='encoding_frames'` batch per
+ * sample that has source frames plus at least two completed variants with
+ * extracted frames. Members are all pairwise variant combinations for that
+ * sample. The compare UI uses the variant foreign keys to render the frame
+ * grids; the path columns still point at the renderable encoded outputs.
+ */
+encodingSampleSetsRouter.post("/:id{[0-9]+}/frame-comparison-batches", async (c) => {
+  const setId = Number(c.req.param("id"));
+  const db = getDb();
+  const set = db
+    .prepare(`SELECT * FROM encoding_sample_sets WHERE id = ?`)
+    .get(setId) as SampleSetRow | null;
+  if (!set) return c.json({ error: "Not found" }, 404);
+
+  const parsed = validateFrameComparisonBody(
+    await c.req.json<unknown>().catch(() => ({}))
+  );
+  if ("error" in parsed) return c.json({ error: parsed.error }, 400);
+
+  const samples = db
+    .prepare(
+      `SELECT id, position, label
+         FROM encoding_samples
+        WHERE set_id = ?
+        ORDER BY position`
+    )
+    .all(setId) as FrameComparisonSampleRow[];
+
+  const userAgent = c.req.header("User-Agent") ?? null;
+  const actor = classifyActor(userAgent);
+  const skipped: Array<{ sampleId: number; reason: string }> = [];
+  const created: Array<{ id: number; sampleId: number; memberCount: number }> = [];
+
+  db.transaction(() => {
+    for (const sample of samples) {
+      const sourceFrameCount = (
+        db
+          .prepare(
+            `SELECT COUNT(*) AS n
+               FROM encoding_frames
+              WHERE sample_id = ?
+                AND status = 'done'
+                AND output_path IS NOT NULL`
+          )
+          .get(sample.id) as { n: number }
+      ).n;
+      if (sourceFrameCount === 0) {
+        skipped.push({ sampleId: sample.id, reason: "no_source_frames" });
+        continue;
+      }
+
+      const variants = db
+        .prepare(
+          `SELECT v.id, v.position, v.label, v.output_path, v.output_size_bytes,
+                  COUNT(f.id) AS frame_count
+             FROM encoding_variants v
+             JOIN encoding_frames f
+               ON f.variant_id = v.id
+              AND f.status = 'done'
+              AND f.output_path IS NOT NULL
+            WHERE v.sample_id = ?
+              AND v.status = 'done'
+              AND v.output_path IS NOT NULL
+            GROUP BY v.id
+           HAVING frame_count = ?
+            ORDER BY v.position`
+        )
+        .all(sample.id, sourceFrameCount) as FrameComparisonVariantRow[];
+
+      if (variants.length < 2) {
+        skipped.push({ sampleId: sample.id, reason: "fewer_than_two_ready_variants" });
+        continue;
+      }
+
+      const namePrefix =
+        parsed.namePrefix?.trim() ||
+        `${set.name} frame comparison`;
+      const name = `${namePrefix} - sample ${sample.position + 1}`;
+      const rationale =
+        parsed.rationale ??
+        "Blind frame comparison between completed encoding variants.";
+      const batch = db
+        .prepare(
+          `INSERT INTO comparison_batches (name, rationale, kind, sample_id)
+           VALUES (?, ?, 'encoding_frames', ?)
+           RETURNING id`
+        )
+        .get(name, rationale, sample.id) as { id: number };
+
+      const insertMember = db.prepare(
+        `INSERT INTO comparison_members
+           (batch_id, position,
+            left_path, left_size_bytes, left_variant_id,
+            right_path, right_size_bytes, right_variant_id,
+            note)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+
+      let position = 0;
+      for (let i = 0; i < variants.length; i++) {
+        for (let j = i + 1; j < variants.length; j++) {
+          const left = variants[i];
+          const right = variants[j];
+          insertMember.run(
+            batch.id,
+            position,
+            left.output_path,
+            left.output_size_bytes,
+            left.id,
+            right.output_path,
+            right.output_size_bytes,
+            right.id,
+            `sample ${sample.position + 1}, variant pair ${position + 1}`
+          );
+          position += 1;
+        }
+      }
+
+      recordAudit(db, {
+        action: "comparison_batch_create",
+        actor,
+        userAgent,
+        targetKind: "comparison_batch",
+        targetId: batch.id,
+        after: {
+          id: batch.id,
+          name,
+          rationale,
+          kind: "encoding_frames",
+          sampleId: sample.id,
+          memberCount: position,
+        },
+        metadata: {
+          setId,
+          sampleId: sample.id,
+          variantIds: variants.map((v) => v.id),
+        },
+      });
+
+      created.push({ id: batch.id, sampleId: sample.id, memberCount: position });
+    }
+  })();
+
+  if (created.length === 0) {
+    return c.json(
+      {
+        error: "no samples have enough completed frame data to compare",
+        skipped,
+      },
+      409
+    );
+  }
+
+  return c.json({ setId, batches: created, skipped }, 201);
 });
 
 /**

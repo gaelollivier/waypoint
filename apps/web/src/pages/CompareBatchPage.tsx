@@ -5,6 +5,8 @@ import { Link } from "../components/Router";
 import { formatBytes, formatDate } from "../lib/format";
 import type {
   ComparisonBatchDetail,
+  ComparisonKind,
+  EncodingComparisonFrame,
   ComparisonMember,
   ComparisonSide,
   ComparisonVerdict,
@@ -109,11 +111,98 @@ function MediaPanel({ side, label }: { side: ComparisonSide; label: string }) {
   );
 }
 
+function FrameImage({ frame, label }: { frame: EncodingComparisonFrame | null; label: string }) {
+  const [errored, setErrored] = useState(false);
+  useEffect(() => { setErrored(false); }, [frame?.path]);
+
+  if (!frame) {
+    return (
+      <div className="aspect-video rounded border border-zinc-800 bg-zinc-950 flex items-center justify-center text-xs text-zinc-600">
+        Missing
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-1">
+      <div className="aspect-video rounded border border-zinc-800 bg-black overflow-hidden flex items-center justify-center">
+        {errored ? (
+          <a
+            href={api.comparisons.mediaUrl(frame.path, { download: true })}
+            className="text-xs text-blue-400 hover:text-blue-300 underline"
+          >
+            Download frame
+          </a>
+        ) : (
+          <img
+            src={api.comparisons.mediaUrl(frame.path)}
+            alt={`${label} frame ${frame.position}`}
+            className="w-full h-full object-contain"
+            onError={() => setErrored(true)}
+          />
+        )}
+      </div>
+      <div className="text-[11px] text-zinc-600">
+        {frame.atSeconds.toFixed(1)}s
+      </div>
+    </div>
+  );
+}
+
+function EncodingFramesPanel({ member }: { member: ComparisonMember }) {
+  const frames = member.encodingFrames;
+  if (!frames) {
+    return (
+      <div className="rounded border border-zinc-800 bg-zinc-900 p-6 text-sm text-zinc-400">
+        No extracted frames are attached to this comparison member.
+      </div>
+    );
+  }
+
+  const sourceByPosition = new Map(frames.sourceFrames.map((f) => [f.position, f]));
+  const leftByPosition = new Map(frames.leftFrames.map((f) => [f.position, f]));
+  const rightByPosition = new Map(frames.rightFrames.map((f) => [f.position, f]));
+  const positions = Array.from(
+    new Set([
+      ...frames.sourceFrames.map((f) => f.position),
+      ...frames.leftFrames.map((f) => f.position),
+      ...frames.rightFrames.map((f) => f.position),
+    ])
+  ).sort((a, b) => a - b);
+
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-[72px_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)] gap-3 text-xs uppercase tracking-wide text-zinc-500">
+        <div />
+        <div>Source</div>
+        <div>Left</div>
+        <div>Right</div>
+      </div>
+
+      <div className="space-y-3">
+        {positions.map((position) => (
+          <div
+            key={position}
+            className="grid grid-cols-[72px_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)] gap-3 items-start"
+          >
+            <div className="text-xs text-zinc-500 pt-2">Frame {position + 1}</div>
+            <FrameImage frame={sourceByPosition.get(position) ?? null} label="source" />
+            <FrameImage frame={leftByPosition.get(position) ?? null} label="left" />
+            <FrameImage frame={rightByPosition.get(position) ?? null} label="right" />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function VerdictBar({
+  kind,
   member,
   onVerdict,
   pending,
 }: {
+  kind: ComparisonKind;
   member: ComparisonMember;
   onVerdict: (v: ComparisonVerdict | null, note: string) => void;
   pending: boolean;
@@ -139,9 +228,20 @@ function VerdictBar({
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900 p-4 space-y-3">
       <div className="flex flex-wrap items-center gap-2">
-        {btn("same", "Same (S)", "bg-emerald-700 text-white")}
-        {btn("different", "Different (D)", "bg-rose-700 text-white")}
-        {btn("unsure", "Unsure (U)", "bg-amber-700 text-white")}
+        {kind === "encoding_frames" ? (
+          <>
+            {btn("prefer_left", "Left (L)", "bg-blue-700 text-white")}
+            {btn("prefer_right", "Right (R)", "bg-violet-700 text-white")}
+            {btn("tie", "Tie (T)", "bg-sky-700 text-white")}
+            {btn("unsure", "Unsure (U)", "bg-amber-700 text-white")}
+          </>
+        ) : (
+          <>
+            {btn("same", "Same (S)", "bg-emerald-700 text-white")}
+            {btn("different", "Different (D)", "bg-rose-700 text-white")}
+            {btn("unsure", "Unsure (U)", "bg-amber-700 text-white")}
+          </>
+        )}
         {member.verdict !== null && (
           <button
             onClick={() => onVerdict(null, "")}
@@ -206,7 +306,14 @@ function Pair({
     const handler = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
-      if (e.key === "s" || e.key === "S") onVerdict("same", member.verdictNote);
+      if (batch.kind === "encoding_frames") {
+        if (e.key === "l" || e.key === "L") onVerdict("prefer_left", member.verdictNote);
+        else if (e.key === "r" || e.key === "R") onVerdict("prefer_right", member.verdictNote);
+        else if (e.key === "t" || e.key === "T") onVerdict("tie", member.verdictNote);
+        else if (e.key === "u" || e.key === "U") onVerdict("unsure", member.verdictNote);
+        else if (e.key === "ArrowRight" || e.key === "n") onNext();
+        else if (e.key === "ArrowLeft" || e.key === "p") onPrev();
+      } else if (e.key === "s" || e.key === "S") onVerdict("same", member.verdictNote);
       else if (e.key === "d" || e.key === "D") onVerdict("different", member.verdictNote);
       else if (e.key === "u" || e.key === "U") onVerdict("unsure", member.verdictNote);
       else if (e.key === "ArrowRight" || e.key === "n") onNext();
@@ -214,7 +321,7 @@ function Pair({
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [onVerdict, onNext, onPrev, member.verdictNote]);
+  }, [batch.kind, onVerdict, onNext, onPrev, member.verdictNote]);
 
   return (
     <div className="space-y-4">
@@ -224,12 +331,21 @@ function Pair({
         </div>
       )}
 
-      <div className="flex flex-col lg:flex-row gap-4">
-        <MediaPanel side={member.left} label="Left" />
-        <MediaPanel side={member.right} label="Right" />
-      </div>
+      {batch.kind === "encoding_frames" ? (
+        <EncodingFramesPanel member={member} />
+      ) : (
+        <div className="flex flex-col lg:flex-row gap-4">
+          <MediaPanel side={member.left} label="Left" />
+          <MediaPanel side={member.right} label="Right" />
+        </div>
+      )}
 
-      <VerdictBar member={member} onVerdict={onVerdict} pending={verdictMutation.isPending} />
+      <VerdictBar
+        kind={batch.kind}
+        member={member}
+        onVerdict={onVerdict}
+        pending={verdictMutation.isPending}
+      />
     </div>
   );
 }
@@ -237,6 +353,9 @@ function Pair({
 function verdictDot(v: ComparisonVerdict | null) {
   if (v === "same") return "bg-emerald-500";
   if (v === "different") return "bg-rose-500";
+  if (v === "prefer_left") return "bg-blue-500";
+  if (v === "prefer_right") return "bg-violet-500";
+  if (v === "tie") return "bg-sky-500";
   if (v === "unsure") return "bg-amber-500";
   return "bg-zinc-600";
 }
@@ -321,7 +440,11 @@ export function CompareBatchPage({ id }: { id: string }) {
   }
 
   const { progress } = batch;
-  const verdicted = progress.same + progress.different + progress.unsure;
+  const verdicted = progress.total - progress.pending;
+  const shortcutText =
+    batch.kind === "encoding_frames"
+      ? "Shortcuts: L=left · R=right · T=tie · U=unsure · ←/→ navigate"
+      : "Shortcuts: S=same · D=different · U=unsure · ←/→ navigate";
 
   return (
     <div className="max-w-6xl mx-auto space-y-4">
@@ -373,7 +496,7 @@ export function CompareBatchPage({ id }: { id: string }) {
               Next →
             </button>
             <span className="ml-auto text-xs text-zinc-500">
-              Shortcuts: S=same · D=different · U=unsure · ←/→ navigate
+              {shortcutText}
             </span>
           </div>
 
@@ -385,4 +508,3 @@ export function CompareBatchPage({ id }: { id: string }) {
     </div>
   );
 }
-

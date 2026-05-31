@@ -246,7 +246,10 @@ export interface Job {
     | "duplicate_detection"
     | "directory_duplicate_cleanup"
     | "write_speed_test"
-    | "read_speed_test";
+    | "read_speed_test"
+    | "media_metadata_extraction"
+    | "encoding_sample_run"
+    | "encoding_frame_extract";
   status: "queued" | "running" | "paused" | "completed" | "failed" | "cancelled";
   phase: string | null;
   parentJobId: number | null;
@@ -410,7 +413,15 @@ export interface ExcludedPathsResponse {
 
 // ── Media comparison batches ───────────────────────────────────────────────
 
-export type ComparisonVerdict = "same" | "different" | "unsure";
+export type ComparisonKind = "dedup" | "encoding_frames" | "encoding_video";
+
+export type ComparisonVerdict =
+  | "same"
+  | "different"
+  | "unsure"
+  | "prefer_left"
+  | "prefer_right"
+  | "tie";
 
 export interface ComparisonProgress {
   total: number;
@@ -418,12 +429,32 @@ export interface ComparisonProgress {
   same: number;
   different: number;
   unsure: number;
+  preferLeft: number;
+  preferRight: number;
+  tie: number;
 }
 
 export interface ComparisonSide {
   path: string;
   sizeBytes: number | null;
   contentHash: string | null;
+  variantId: number | null;
+}
+
+export interface EncodingComparisonFrame {
+  id: number;
+  position: number;
+  atSeconds: number;
+  path: string;
+}
+
+export interface EncodingComparisonFrames {
+  sampleId: number;
+  leftVariantId: number | null;
+  rightVariantId: number | null;
+  sourceFrames: EncodingComparisonFrame[];
+  leftFrames: EncodingComparisonFrame[];
+  rightFrames: EncodingComparisonFrame[];
 }
 
 export interface ComparisonMember {
@@ -436,16 +467,70 @@ export interface ComparisonMember {
   verdict: ComparisonVerdict | null;
   verdictNote: string;
   verdictedAt: string | null;
+  encodingFrames?: EncodingComparisonFrames;
 }
 
 export interface ComparisonBatchSummary {
   id: number;
   name: string;
   rationale: string;
+  kind: ComparisonKind;
+  sampleId: number | null;
   createdAt: string;
   progress: ComparisonProgress;
 }
 
 export interface ComparisonBatchDetail extends ComparisonBatchSummary {
   members: ComparisonMember[];
+}
+
+// ── Encoding sample-set rankings ──────────────────────────────────────────
+
+export interface EncodingRankingVariant {
+  variantId?: number;
+  sampleId?: number;
+  position: number;
+  codec: string;
+  encoder: string;
+  preset: string | null;
+  crf: number | null;
+  label: string;
+  outputSizeBytes?: number | null;
+  encodeSeconds?: number | null;
+  sampleCount?: number;
+  comparisons: number;
+  pending: number;
+  wins: number;
+  losses: number;
+  ties: number;
+  unsure: number;
+  score: number;
+  winRate: number | null;
+  rank: number;
+}
+
+export interface EncodingSampleRanking {
+  sampleId: number;
+  position: number;
+  label: string;
+  comparisons: {
+    total: number;
+    pending: number;
+    preferLeft: number;
+    preferRight: number;
+    tie: number;
+    unsure: number;
+  };
+  variants: EncodingRankingVariant[];
+}
+
+export interface EncodingRankingsResponse {
+  set: {
+    id: number;
+    name: string;
+    status: "pending" | "encoding" | "ready" | "archived";
+    createdAt: string;
+  };
+  aggregate: { variants: EncodingRankingVariant[] };
+  samples: EncodingSampleRanking[];
 }

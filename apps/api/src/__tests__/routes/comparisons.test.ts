@@ -40,6 +40,8 @@ describe("comparisons routes", () => {
 
       const get = await req(ctx.app, "GET", `/api/comparisons/${res.body.id}`);
       expect(get.status).toBe(200);
+      expect(get.body.kind).toBe("dedup");
+      expect(get.body.sampleId).toBeNull();
       expect(get.body.members).toHaveLength(3);
       expect(get.body.members[0].position).toBe(0);
       expect(get.body.members[0].left.path).toBe("/a/1");
@@ -145,6 +147,49 @@ describe("comparisons routes", () => {
       const after = await req(ctx.app, "GET", `/api/comparisons/${batchId}`);
       expect(after.body.progress.same).toBe(1);
       expect(after.body.progress.pending).toBe(1);
+    });
+
+    it("accepts preference verdicts only for encoding frame batches", async () => {
+      const dedup = await req(ctx.app, "POST", "/api/comparisons", {
+        name: "x",
+        members: [{ leftPath: "/a", rightPath: "/b" }],
+      });
+      const dedupGet = await req(ctx.app, "GET", `/api/comparisons/${dedup.body.id}`);
+      const dedupMemberId = dedupGet.body.members[0].id;
+      const rejected = await req(
+        ctx.app,
+        "POST",
+        `/api/comparisons/${dedup.body.id}/members/${dedupMemberId}/verdict`,
+        { verdict: "prefer_left" }
+      );
+      expect(rejected.status).toBe(400);
+
+      const batch = ctx.db
+        .prepare(
+          `INSERT INTO comparison_batches (name, rationale, kind)
+           VALUES (?, ?, 'encoding_frames') RETURNING id`
+        )
+        .get("enc", "") as { id: number };
+      const member = ctx.db
+        .prepare(
+          `INSERT INTO comparison_members
+             (batch_id, position, left_path, right_path)
+           VALUES (?, ?, ?, ?) RETURNING id`
+        )
+        .get(batch.id, 0, "/scratch/left.mp4", "/scratch/right.mp4") as { id: number };
+
+      const accepted = await req(
+        ctx.app,
+        "POST",
+        `/api/comparisons/${batch.id}/members/${member.id}/verdict`,
+        { verdict: "prefer_left", note: "left keeps more detail" }
+      );
+      expect(accepted.status).toBe(200);
+      expect(accepted.body.verdict).toBe("prefer_left");
+
+      const after = await req(ctx.app, "GET", `/api/comparisons/${batch.id}`);
+      expect(after.body.progress.preferLeft).toBe(1);
+      expect(after.body.progress.pending).toBe(0);
     });
 
     it("can reset a verdict to null", async () => {
