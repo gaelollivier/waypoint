@@ -16,6 +16,10 @@ import { copyRouter } from "../../routes/copy";
 import { systemRouter } from "../../routes/system";
 import { comparisonsRouter } from "../../routes/comparisons";
 import { mediaRouter } from "../../routes/media";
+import { filesRouter } from "../../routes/files";
+import { directoriesRouter } from "../../routes/directories";
+import { scansRouter } from "../../routes/scans";
+import { auditRouter } from "../../routes/audit";
 
 export interface TestContext {
   db: Database;
@@ -46,6 +50,10 @@ export function createTestApp(): TestContext {
   app.route("/api/system", systemRouter);
   app.route("/api/comparisons", comparisonsRouter);
   app.route("/api/media", mediaRouter);
+  app.route("/api/disks/:id/files", filesRouter);
+  app.route("/api/disks/:id/directories", directoriesRouter);
+  app.route("/api/disks/:id/scans", scansRouter);
+  app.route("/api/audit", auditRouter);
 
   return { db, app };
 }

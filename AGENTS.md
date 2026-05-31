@@ -9,6 +9,7 @@ Before making changes, read:
 - `AGENTS.md` (this file)
 - `.claude/commands/`
 - `docs/START-HERE.md`
+- `docs/agent-api.md` (the HTTP API surface you'll query)
 
 ## Commands — always use these, never bare tools
 
@@ -33,6 +34,26 @@ directly.** Use the scripts above so:
 If the workflow you want isn't covered by an existing script, add one to the
 appropriate `package.json` (root or workspace) and document it here. Don't
 work around the missing script with an ad-hoc invocation.
+
+## Querying the system
+
+**Read state through the HTTP API first.** `docs/agent-api.md` is the
+canonical map of what is exposed (file/directory/scan queries with
+filters and cursors, audit log, etc.) — it is the paved path for any
+agent reading or writing state. If the doc is out of date, fix it
+there rather than working around it.
+
+**SQL escape hatch:** for queries no endpoint exposes, run
+`bun run sql -c "SELECT …"`. It opens `~/.waypoint/waypoint.db`
+read-only; writes are rejected on purpose. Every time you reach for
+the script, append a one-line entry to `docs/agent-api-gaps.md` so we
+can promote popular query shapes into real endpoints next time.
+
+**Writes go through the API, never direct SQL.** Every mutating
+endpoint writes a row to `audit_log` in the same transaction
+(`recordAudit` in `apps/api/src/lib/audit.ts`). New write endpoints
+MUST emit an audit entry so future reverts can reconstruct the prior
+state.
 
 ## Default workflow
 

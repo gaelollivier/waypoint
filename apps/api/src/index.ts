@@ -16,6 +16,10 @@ import { copyRouter } from "./routes/copy";
 import { systemRouter } from "./routes/system";
 import { comparisonsRouter } from "./routes/comparisons";
 import { mediaRouter } from "./routes/media";
+import { filesRouter } from "./routes/files";
+import { directoriesRouter } from "./routes/directories";
+import { scansRouter } from "./routes/scans";
+import { auditRouter } from "./routes/audit";
 import { startLoopStallDetector, trace } from "./diag/trace";
 
 // Initialize DB (runs migrations + clears stale locks) at startup
@@ -55,6 +59,10 @@ app.route("/api/copy", copyRouter);
 app.route("/api/system", systemRouter);
 app.route("/api/comparisons", comparisonsRouter);
 app.route("/api/media", mediaRouter);
+app.route("/api/disks/:id/files", filesRouter);
+app.route("/api/disks/:id/directories", directoriesRouter);
+app.route("/api/disks/:id/scans", scansRouter);
+app.route("/api/audit", auditRouter);
 
 const PORT = Number(process.env.PORT ?? 3000);
 
