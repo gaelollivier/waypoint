@@ -155,6 +155,116 @@ describe("encoding-sample-sets", () => {
     });
   });
 
+  describe("POST /:id/extract-frames", () => {
+    it("returns 404 when the set does not exist", async () => {
+      const r = await req(ctx.app, "POST", "/api/encoding-sample-sets/9999/extract-frames", {});
+      expect(r.status).toBe(404);
+    });
+
+    it("refuses while a frame-extract job is already in flight", async () => {
+      const { diskId, scanId } = setupScannedDisk(ctx);
+      insertFile(ctx, { diskId, scanId, path: "/a.mp4", size: 100, duration: 60 });
+      const created = await req(ctx.app, "POST", "/api/encoding-sample-sets", {
+        name: "x",
+        scratchRoot: "/s",
+        samples: [{ sourceDiskId: diskId, sourcePath: "/a.mp4", clipDurationSeconds: 30 }],
+        variants: [{ codec: "hevc", encoder: "libx265" }],
+      });
+      const setId = created.body.id;
+      ctx.db
+        .prepare(
+          "INSERT INTO jobs (type, status, payload_json) VALUES ('encoding_frame_extract', 'running', ?)"
+        )
+        .run(JSON.stringify({ setId }));
+
+      const r = await req(ctx.app, "POST", `/api/encoding-sample-sets/${setId}/extract-frames`, {});
+      expect(r.status).toBe(409);
+      expect(r.body.error).toContain("frame extraction already in flight");
+    });
+
+    it("refuses while the encoder is still running for the set", async () => {
+      const { diskId, scanId } = setupScannedDisk(ctx);
+      insertFile(ctx, { diskId, scanId, path: "/a.mp4", size: 100, duration: 60 });
+      const created = await req(ctx.app, "POST", "/api/encoding-sample-sets", {
+        name: "x",
+        scratchRoot: "/s",
+        samples: [{ sourceDiskId: diskId, sourcePath: "/a.mp4", clipDurationSeconds: 30 }],
+        variants: [{ codec: "hevc", encoder: "libx265" }],
+      });
+      const setId = created.body.id;
+      ctx.db
+        .prepare(
+          "INSERT INTO jobs (type, status, payload_json) VALUES ('encoding_sample_run', 'running', ?)"
+        )
+        .run(JSON.stringify({ setId }));
+
+      const r = await req(ctx.app, "POST", `/api/encoding-sample-sets/${setId}/extract-frames`, {});
+      expect(r.status).toBe(409);
+      expect(r.body.error).toContain("encode run still in flight");
+    });
+  });
+
+  describe("GET /:id/frames", () => {
+    it("returns 404 when the set does not exist", async () => {
+      const r = await req(ctx.app, "GET", "/api/encoding-sample-sets/9999/frames");
+      expect(r.status).toBe(404);
+    });
+
+    it("returns frames ordered by sample → source-first → variant position", async () => {
+      const { diskId, scanId } = setupScannedDisk(ctx);
+      insertFile(ctx, { diskId, scanId, path: "/a.mp4", size: 100, duration: 60 });
+
+      const created = await req(ctx.app, "POST", "/api/encoding-sample-sets", {
+        name: "x",
+        scratchRoot: "/s",
+        samples: [{ sourceDiskId: diskId, sourcePath: "/a.mp4", clipDurationSeconds: 30 }],
+        variants: [{ codec: "hevc", encoder: "libx265" }],
+      });
+      const setId = created.body.id;
+
+      // Reach into the DB to seed frames directly so we don't have to run the
+      // actual ffmpeg job.
+      const sample = ctx.db
+        .prepare(`SELECT id FROM encoding_samples WHERE set_id = ?`)
+        .get(setId) as { id: number };
+      const variant = ctx.db
+        .prepare(`SELECT id FROM encoding_variants WHERE sample_id = ?`)
+        .get(sample.id) as { id: number };
+
+      ctx.db
+        .prepare(
+          `INSERT INTO encoding_frames (sample_id, variant_id, position, at_seconds, status)
+           VALUES (?, NULL, ?, ?, ?)`
+        )
+        .run(sample.id, 0, 5, "done");
+      ctx.db
+        .prepare(
+          `INSERT INTO encoding_frames (sample_id, variant_id, position, at_seconds, status)
+           VALUES (?, NULL, ?, ?, ?)`
+        )
+        .run(sample.id, 1, 15, "pending");
+      ctx.db
+        .prepare(
+          `INSERT INTO encoding_frames (sample_id, variant_id, position, at_seconds, status)
+           VALUES (NULL, ?, ?, ?, ?)`
+        )
+        .run(variant.id, 0, 5, "pending");
+
+      const r = await req(ctx.app, "GET", `/api/encoding-sample-sets/${setId}/frames`);
+      expect(r.status).toBe(200);
+      expect(r.body.frames).toHaveLength(3);
+      // Source frames come before variant frames for the same sample.
+      expect(r.body.frames[0].sampleId).toBe(sample.id);
+      expect(r.body.frames[0].variantId).toBeNull();
+      expect(r.body.frames[0].position).toBe(0);
+      expect(r.body.frames[1].sampleId).toBe(sample.id);
+      expect(r.body.frames[1].position).toBe(1);
+      expect(r.body.frames[2].variantId).toBe(variant.id);
+      expect(r.body.frames[2].sampleId).toBeNull();
+      expect(r.body.frames[2].resolvedSampleId).toBe(sample.id);
+    });
+  });
+
   it("lists sample sets newest first", async () => {
     const { diskId, scanId } = setupScannedDisk(ctx);
     insertFile(ctx, { diskId, scanId, path: "/a.mp4", size: 100 });

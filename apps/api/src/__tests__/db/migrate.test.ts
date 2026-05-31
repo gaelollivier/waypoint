@@ -22,6 +22,7 @@ const EXPECTED_TABLES = [
   "duplicate_directory_groups",
   "duplicate_group_files",
   "duplicate_groups",
+  "encoding_frames",
   "encoding_sample_sets",
   "encoding_samples",
   "encoding_variants",
@@ -36,7 +37,7 @@ const EXPECTED_TABLES = [
   "verify_items",
 ];
 
-const LATEST_MIGRATION_VERSION = 25;
+const LATEST_MIGRATION_VERSION = 26;
 
 function getTables(db: Database): string[] {
   return (

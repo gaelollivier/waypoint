@@ -146,6 +146,92 @@ Single file lookup by id. Useful when an earlier query returned the id.
 
 ---
 
+## Encoding comparison
+
+The encoding-comparison flow lets the user register a small matrix of
+source video samples and encoder variants, run ffmpeg encodes into a
+guarded scratch root, then pre-extract JPEG frames for blind comparison.
+All scratch writes/deletes go through `apps/api/src/fs/disk-writes.ts`.
+
+### `GET /api/encoding-sample-sets`
+List encoding sample sets newest first. Each set includes its status,
+notes, scratch root, and creation time.
+
+### `GET /api/encoding-sample-sets/:id`
+Fetch one set with its samples and variants. Samples include cached
+source metadata captured at registration time; variants include encoder
+settings plus output path, output size, encode duration, status, and
+error detail.
+
+### `POST /api/encoding-sample-sets`
+Register a set. Body shape:
+
+```json
+{
+  "name": "trial",
+  "notes": "",
+  "scratchRoot": "/Volumes/<disk>/.waypoint-encoding-scratch",
+  "samples": [
+    {
+      "sourceDiskId": 1,
+      "sourcePath": "/Volumes/<disk>/sample.mov",
+      "clipStartSeconds": 10,
+      "clipDurationSeconds": 60,
+      "label": "sample"
+    }
+  ],
+  "variants": [
+    {
+      "codec": "hevc",
+      "encoder": "libx265",
+      "preset": "medium",
+      "crf": 26,
+      "label": "x265 medium 26"
+    }
+  ]
+}
+```
+
+The source path must resolve to a file in the source disk's latest scan.
+The route creates `samples.length × variants.length` pending variants
+and writes an audit row.
+
+### `POST /api/encoding-sample-sets/:id/run`
+Start the encoder job for pending variants in a set. Optional body:
+`{ "concurrency": 2 }`. Returns `202 { jobId }`; refuses if another
+encode run for the set is queued, running, or paused.
+
+### `POST /api/encoding-sample-sets/:id/extract-frames`
+Start frame extraction for source clips and completed variants. Optional
+body: `{ "framesPerVariant": 5, "concurrency": 4 }`; values are clamped
+to 1-20 frames and 1-8 workers. Returns `202 { jobId }`; refuses if an
+extract job is already active for the set or if the encoder job is still
+in flight.
+
+Frame timestamps are centered in equal sub-intervals across each clip
+window. Source frames live under `sample-<id>/source/frame-<n>.jpg`;
+variant frames live under `sample-<id>/variant-<id>/frame-<n>.jpg`.
+
+### `GET /api/encoding-sample-sets/:id/frames`
+List every frame row for a set, ordered by sample position, source
+frames first, variant position, then frame position. Each row includes
+`sampleId`, `variantId`, `resolvedSampleId`, `position`, `atSeconds`,
+`outputPath`, `status`, and error/timestamp fields.
+
+### `DELETE /api/encoding-sample-sets/:id/scratch`
+Delete generated encoder outputs and extracted frame JPEGs for the set,
+then remove now-empty scratch directories. This does not delete source
+media or the DB set row. The disk gateway validates containment under
+the set's scratch root and only permits known generated basenames such
+as `variant-<id>.<ext>` and `frame-<n>.jpg`.
+
+### `DELETE /api/encoding-sample-sets/:id`
+Delete the DB sample set and its child samples/variants/frames. This
+does not touch scratch bytes; call the scratch endpoint first when the
+generated artifacts should also be removed.
+
+---
+
 ## Browsing what changed
 
 ### `GET /api/audit`
@@ -189,6 +275,9 @@ Single entry.
 | `GET /api/comparisons` | comparison batches |
 | `GET /api/comparisons/:batchId` | one batch with members |
 | `GET /api/media?path=…` | streams a file (Range support) — used by the comparison viewer |
+| `GET /api/encoding-sample-sets` | encoding comparison sample sets |
+| `GET /api/encoding-sample-sets/:id` | one encoding set with samples and variants |
+| `GET /api/encoding-sample-sets/:id/frames` | extracted source/variant frame rows |
 
 ---
 
@@ -229,6 +318,13 @@ Actions emitted today:
 | `comparison_batch_create` | `comparison_batch` | after = batch summary; metadata = members |
 | `comparison_batch_delete` | `comparison_batch` | before = batch + members |
 | `comparison_verdict` | `comparison_member` | before/after = verdict triple |
+| `encoding_sample_set_create` | `encoding_sample_set` | after = set + samples + variants |
+| `encoding_sample_set_delete` | `encoding_sample_set` | before = set + samples + variants |
+| `encoding_variant_encode` | `encoding_variant` | system entry after a successful encode |
+| `encoding_variant_encode_failed` | `encoding_variant` | system entry after a failed encode |
+| `encoding_variant_scratch_delete` | `encoding_variant` | generated variant output was removed |
+| `encoding_frame_extract_start` | `encoding_sample_set` | frame extraction job was queued |
+| `encoding_frame_scratch_delete` | `encoding_frame` | generated frame output was removed |
 
 **Do NOT introduce a write endpoint without an audit entry.** Every
 mutation should be reversible from the audit log alone.

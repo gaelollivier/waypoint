@@ -11,7 +11,8 @@ export type JobType =
   | "write_speed_test"
   | "read_speed_test"
   | "media_metadata_extraction"
-  | "encoding_sample_run";
+  | "encoding_sample_run"
+  | "encoding_frame_extract";
 export type JobStatus = "queued" | "running" | "paused" | "completed" | "failed" | "cancelled";
 export type JobEventLevel = "info" | "warning" | "error";
 

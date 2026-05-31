@@ -81,7 +81,7 @@ One row per job, primitive or composite. Polymorphic via `type`.
 | Field | Notes |
 |---|---|
 | `id` | INTEGER PK |
-| `type` | `scan` / `diff` / `copy` / `verify` / `duplicate_detection` / `write_speed_test` / `backup` (composite) |
+| `type` | `scan` / `diff` / `copy` / `verify` / `duplicate_detection` / `directory_duplicate_cleanup` / `write_speed_test` / `read_speed_test` / `media_metadata_extraction` / `encoding_sample_run` / `encoding_frame_extract` / `backup` (composite) |
 | `parent_job_id` | Set on sub-jobs of a composite. Nullable. |
 | `status` | `queued` / `running` / `paused` / `completed` / `failed` / `cancelled` |
 | `phase` | For composite jobs: `scanning_source` / `scanning_dest` / `diffing` / `copying` / `done`. NULL for primitives. |
@@ -234,6 +234,107 @@ Per-file verify state. Same shape as `copy_items` but simpler.
 | `recomputed_hash` | Set on completion |
 | `completed_at` | |
 | `error_detail` | |
+
+---
+
+## Encoding comparison
+
+These tables support the media re-encoding experiment workflow: register
+a small set of representative source clips, encode a variant matrix into
+a guarded scratch root, extract still frames, then present blinded
+comparisons through the comparison UI.
+
+### `encoding_sample_sets`
+One encoding experiment. The `scratch_root` is the only filesystem root
+where generated encoder outputs and extracted frames for this set may be
+written or deleted.
+
+| Field | Notes |
+|---|---|
+| `id` | PK |
+| `name` | User-visible experiment name |
+| `notes` | Optional notes |
+| `scratch_root` | Absolute scratch directory root for generated artifacts |
+| `status` | `pending` / `encoding` / `ready` / `archived` |
+| `created_at` | Timestamp |
+
+### `encoding_samples`
+One source clip registered into an experiment. Source metadata is cached
+at registration time so the UI can still render experiment context after
+later scans.
+
+| Field | Notes |
+|---|---|
+| `id` | PK |
+| `set_id` | FK to `encoding_sample_sets.id` |
+| `position` | Stable order within the set |
+| `source_disk_id` | FK to the registered disk holding the source clip |
+| `source_path` | Absolute source media path |
+| `source_file_id` | FK to the latest scanned file row at registration time |
+| `clip_start_seconds` / `clip_duration_seconds` | Optional window to encode/sample |
+| `label` | Optional display label |
+| `source_size_bytes` | Cached source size |
+| `source_duration_seconds` | Cached source duration from media metadata |
+| `source_make` / `source_model` | Cached camera metadata |
+| `source_captured_at_unix` | Cached capture timestamp |
+
+Index: `(set_id, position)`.
+
+### `encoding_variants`
+One encoder setting applied to one sample. The encoder job fills in the
+output fields as each ffmpeg subprocess completes.
+
+| Field | Notes |
+|---|---|
+| `id` | PK |
+| `sample_id` | FK to `encoding_samples.id` |
+| `position` | Stable order within the sample |
+| `codec` | Logical codec family, e.g. `hevc`, `av1`, `h264`, `reference` |
+| `encoder` | ffmpeg encoder, e.g. `libx265`, `hevc_videotoolbox`, `libsvtav1`, `copy` |
+| `preset` | Encoder-specific preset, nullable |
+| `crf` | Encoder-specific quality value, nullable |
+| `extra_args_json` | JSON array of additional ffmpeg args |
+| `label` | Optional display label |
+| `output_path` | Generated variant file path under `scratch_root` |
+| `output_size_bytes` | Generated file size |
+| `encode_seconds` | Wall-clock encode time |
+| `status` | `pending` / `running` / `done` / `failed` / `skipped` |
+| `error_detail` | Captured failure detail |
+| `started_at` / `completed_at` | Timestamps |
+
+Indices: `(sample_id, position)`, `(status)`.
+
+### `encoding_frames`
+Extracted JPEG frames for either a source sample or an encoded variant.
+Exactly one of `sample_id` or `variant_id` is set. Rows are pre-created
+idempotently by the frame-extraction job, then filled with an `output_path`
+after ffmpeg writes the JPEG.
+
+| Field | Notes |
+|---|---|
+| `id` | PK |
+| `sample_id` | FK to `encoding_samples.id`, set for source frames |
+| `variant_id` | FK to `encoding_variants.id`, set for variant frames |
+| `position` | 0-based frame index |
+| `at_seconds` | Absolute timestamp in the source/variant timeline |
+| `output_path` | Generated JPEG path under `scratch_root` |
+| `status` | `pending` / `running` / `done` / `failed` |
+| `error_detail` | Captured failure detail |
+| `started_at` / `completed_at` | Timestamps |
+
+Indices: unique `(sample_id, position)` where `sample_id IS NOT NULL`,
+unique `(variant_id, position)` where `variant_id IS NOT NULL`, and
+`(status)`.
+
+### Encoding comparison fields on `comparison_*`
+
+`comparison_batches.kind` is `dedup` for normal duplicate-review batches
+and may be `encoding_frames` or `encoding_video` for encoding comparison.
+Encoding batches may set `sample_id` to the source sample being compared.
+
+`comparison_members.left_variant_id` and `right_variant_id` optionally
+refer to `encoding_variants`. The existing path fields remain the
+renderable media/frame paths.
 
 ---
 

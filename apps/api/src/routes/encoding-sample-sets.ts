@@ -5,6 +5,7 @@ import { getDiskById } from "../disks/registry";
 import { recordAudit, classifyActor } from "../lib/audit";
 import { getJobManager, registerRunner, unregisterRunner } from "../jobs";
 import { EncodingSampleRunJobRunner } from "../jobs/encoding/encoding-sample-run-job";
+import { EncodingFrameExtractJobRunner } from "../jobs/encoding/encoding-frame-extract-job";
 import { deleteEncodingScratchFile, removeEmptyDirectoryInsideMount } from "../fs/disk-writes";
 
 export const encodingSampleSetsRouter = new Hono();
@@ -463,6 +464,167 @@ encodingSampleSetsRouter.post("/:id{[0-9]+}/run", async (c) => {
 });
 
 /**
+ * POST /api/encoding-sample-sets/:id/extract-frames — kick off the frame
+ * extraction job. Pre-creates `encoding_frames` rows for every sample (source
+ * frames) and every variant whose status is 'done', then extracts JPEGs via
+ * ffmpeg.
+ *
+ * Body (all optional):
+ *   { framesPerVariant?: number  // 1-20, default 5
+ *     concurrency?: number       // 1-8,  default 4 }
+ *
+ * Returns 202 + { jobId }. Refuses if another extract is in flight for this
+ * set, or if the encoder job for this set is still running (variants might
+ * still be encoding and we'd race them).
+ */
+encodingSampleSetsRouter.post("/:id{[0-9]+}/extract-frames", async (c) => {
+  const setId = Number(c.req.param("id"));
+  const db = getDb();
+  const set = db
+    .prepare(`SELECT id FROM encoding_sample_sets WHERE id = ?`)
+    .get(setId) as { id: number } | null;
+  if (!set) return c.json({ error: "Not found" }, 404);
+
+  const body = await c.req
+    .json<{ framesPerVariant?: number; concurrency?: number }>()
+    .catch(() => ({} as { framesPerVariant?: number; concurrency?: number }));
+  const framesPerVariant = Math.max(1, Math.min(20, body.framesPerVariant ?? 5));
+  const concurrency = Math.max(1, Math.min(8, body.concurrency ?? 4));
+
+  // Refuse if a frame-extract job is already in flight for this set, or the
+  // encoder is still finishing variants we'd want to sample.
+  const activeFrames = db
+    .prepare(
+      `SELECT id FROM jobs
+        WHERE type = 'encoding_frame_extract'
+          AND status IN ('queued', 'running', 'paused')
+          AND json_extract(payload_json, '$.setId') = ?
+        LIMIT 1`
+    )
+    .get(setId) as { id: number } | null;
+  if (activeFrames) {
+    return c.json(
+      { error: `frame extraction already in flight: job ${activeFrames.id}` },
+      409
+    );
+  }
+  const activeEncode = db
+    .prepare(
+      `SELECT id FROM jobs
+        WHERE type = 'encoding_sample_run'
+          AND status IN ('queued', 'running', 'paused')
+          AND json_extract(payload_json, '$.setId') = ?
+        LIMIT 1`
+    )
+    .get(setId) as { id: number } | null;
+  if (activeEncode) {
+    return c.json(
+      { error: `encode run still in flight (job ${activeEncode.id}); wait for it to finish` },
+      409
+    );
+  }
+
+  const userAgent = c.req.header("User-Agent") ?? null;
+  const actor = classifyActor(userAgent);
+
+  const jm = getJobManager();
+  const job = jm.createJob({
+    type: "encoding_frame_extract",
+    payload: { setId, framesPerVariant, concurrency },
+  });
+
+  recordAudit(db, {
+    action: "encoding_frame_extract_start",
+    actor,
+    userAgent,
+    targetKind: "encoding_sample_set",
+    targetId: setId,
+    after: { jobId: job.id, framesPerVariant, concurrency },
+    revertible: false,
+  });
+
+  const runner = new EncodingFrameExtractJobRunner({
+    jobId: job.id,
+    jobManager: jm,
+    db,
+    setId,
+    framesPerVariant,
+    concurrency,
+  });
+  registerRunner(job.id, runner);
+  runner.start().finally(() => unregisterRunner(job.id));
+
+  return c.json({ jobId: job.id }, 202);
+});
+
+/**
+ * GET /api/encoding-sample-sets/:id/frames — list every `encoding_frames` row
+ * for the set. Used by the comparison UI to know which frames to render and
+ * by callers checking extract progress.
+ *
+ * Returns frames ordered (sample position → source frames first → variant
+ * position → frame position), so the UI can stream-render top-down without
+ * having to re-sort.
+ */
+encodingSampleSetsRouter.get("/:id{[0-9]+}/frames", (c) => {
+  const id = Number(c.req.param("id"));
+  const db = getDb();
+  const set = db
+    .prepare(`SELECT id FROM encoding_sample_sets WHERE id = ?`)
+    .get(id) as { id: number } | null;
+  if (!set) return c.json({ error: "Not found" }, 404);
+
+  const rows = db
+    .prepare(
+      `SELECT f.id, f.sample_id, f.variant_id, f.position, f.at_seconds,
+              f.output_path, f.status, f.error_detail,
+              f.started_at, f.completed_at,
+              COALESCE(f.sample_id, v.sample_id) AS resolved_sample_id,
+              s.position AS sample_position,
+              v.position AS variant_position
+         FROM encoding_frames f
+         LEFT JOIN encoding_variants v ON v.id = f.variant_id
+         LEFT JOIN encoding_samples s ON s.id = COALESCE(f.sample_id, v.sample_id)
+        WHERE s.set_id = ?
+        ORDER BY s.position,
+                 f.variant_id IS NULL DESC,
+                 v.position,
+                 f.position`
+    )
+    .all(id) as Array<{
+      id: number;
+      sample_id: number | null;
+      variant_id: number | null;
+      position: number;
+      at_seconds: number;
+      output_path: string | null;
+      status: "pending" | "running" | "done" | "failed";
+      error_detail: string | null;
+      started_at: string | null;
+      completed_at: string | null;
+      resolved_sample_id: number;
+      sample_position: number;
+      variant_position: number | null;
+    }>;
+
+  return c.json({
+    frames: rows.map((r) => ({
+      id: r.id,
+      sampleId: r.sample_id,
+      variantId: r.variant_id,
+      resolvedSampleId: r.resolved_sample_id,
+      position: r.position,
+      atSeconds: r.at_seconds,
+      outputPath: r.output_path,
+      status: r.status,
+      errorDetail: r.error_detail,
+      startedAt: r.started_at,
+      completedAt: r.completed_at,
+    })),
+  });
+});
+
+/**
  * DELETE /api/encoding-sample-sets/:id/scratch — remove every encoder /
  * frame-extraction artifact that lives under this set's scratch root, then
  * remove the now-empty `sample-<sid>/` and `set-<id>/` directory hulls.
@@ -498,9 +660,86 @@ encodingSampleSetsRouter.delete("/:id{[0-9]+}/scratch", async (c) => {
     )
     .all(id) as Array<{ id: number; sample_id: number; output_path: string }>;
 
+  const frames = db
+    .prepare(
+      `SELECT f.id, f.sample_id, f.variant_id, f.output_path,
+              COALESCE(f.sample_id, v.sample_id) AS resolved_sample_id
+         FROM encoding_frames f
+         LEFT JOIN encoding_variants v ON v.id = f.variant_id
+         LEFT JOIN encoding_samples s ON s.id = COALESCE(f.sample_id, v.sample_id)
+        WHERE s.set_id = ?
+          AND f.output_path IS NOT NULL`
+    )
+    .all(id) as Array<{
+      id: number;
+      sample_id: number | null;
+      variant_id: number | null;
+      output_path: string;
+      resolved_sample_id: number;
+    }>;
+
   const sampleIds = new Set<number>();
+  // Sub-dirs to attempt to rmdir after their contents are gone:
+  // every variant whose frames we unlinked needs `sample-<sid>/variant-<vid>/`
+  // cleaned, plus `sample-<sid>/source/` if any source frames were unlinked.
+  const variantFrameDirs = new Set<string>(); // `${sampleId}:${variantId}`
+  const sourceFrameDirs = new Set<number>();  // sampleId
   let deletedFileCount = 0;
-  const errors: Array<{ variantId: number; outputPath: string; error: string }> = [];
+  const errors: Array<{
+    kind: "variant" | "frame";
+    id: number;
+    outputPath: string;
+    error: string;
+  }> = [];
+
+  for (const f of frames) {
+    sampleIds.add(f.resolved_sample_id);
+    if (f.variant_id !== null) {
+      variantFrameDirs.add(`${f.resolved_sample_id}:${f.variant_id}`);
+    } else {
+      sourceFrameDirs.add(f.resolved_sample_id);
+    }
+    try {
+      await deleteEncodingScratchFile({
+        filePath: f.output_path,
+        scratchRoot: set.scratch_root,
+      });
+      deletedFileCount += 1;
+      db.transaction(() => {
+        // Reset to pending so a subsequent extract-frames run re-creates the
+        // bytes without having to delete the row first.
+        db.prepare(
+          `UPDATE encoding_frames
+              SET output_path = NULL,
+                  status = 'pending',
+                  error_detail = NULL,
+                  started_at = NULL,
+                  completed_at = NULL
+            WHERE id = ?`
+        ).run(f.id);
+        recordAudit(db, {
+          action: "encoding_frame_scratch_delete",
+          actor: classifyActor(userAgent),
+          userAgent,
+          targetKind: "encoding_frame",
+          targetId: f.id,
+          before: { outputPath: f.output_path },
+          metadata: {
+            setId: id,
+            sampleId: f.sample_id,
+            variantId: f.variant_id,
+          },
+        });
+      })();
+    } catch (err) {
+      errors.push({
+        kind: "frame",
+        id: f.id,
+        outputPath: f.output_path,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 
   for (const v of variants) {
     sampleIds.add(v.sample_id);
@@ -528,18 +767,53 @@ encodingSampleSetsRouter.delete("/:id{[0-9]+}/scratch", async (c) => {
       // File missing is the most common error here ("already cleaned by
       // hand") — report and keep going so the rest still tidy up.
       errors.push({
-        variantId: v.id,
+        kind: "variant",
+        id: v.id,
         outputPath: v.output_path,
         error: err instanceof Error ? err.message : String(err),
       });
     }
   }
 
-  // Empty sample/set directory hulls. We use the existing rmdir-only
-  // gateway so any unexpected non-encoding file inside makes the directory
-  // removal fail safely — leaving the artifact in place rather than
-  // recursing.
+  // Empty directory hulls. We use the existing rmdir-only gateway so any
+  // unexpected non-encoding file inside makes the directory removal fail
+  // safely — leaving the artifact in place rather than recursing.
+  //
+  // Order matters: deepest first (frame subdirs → sample dirs → set dir).
   let removedDirCount = 0;
+  for (const key of variantFrameDirs) {
+    const [sampleIdStr, variantIdStr] = key.split(":");
+    try {
+      await removeEmptyDirectoryInsideMount({
+        directoryPath: path.join(
+          set.scratch_root,
+          `set-${id}`,
+          `sample-${sampleIdStr}`,
+          `variant-${variantIdStr}`
+        ),
+        diskMountPath: set.scratch_root,
+      });
+      removedDirCount += 1;
+    } catch {
+      // Non-empty or missing — leave it.
+    }
+  }
+  for (const sampleId of sourceFrameDirs) {
+    try {
+      await removeEmptyDirectoryInsideMount({
+        directoryPath: path.join(
+          set.scratch_root,
+          `set-${id}`,
+          `sample-${sampleId}`,
+          "source"
+        ),
+        diskMountPath: set.scratch_root,
+      });
+      removedDirCount += 1;
+    } catch {
+      // ditto
+    }
+  }
   for (const sampleId of sampleIds) {
     try {
       await removeEmptyDirectoryInsideMount({
@@ -548,7 +822,7 @@ encodingSampleSetsRouter.delete("/:id{[0-9]+}/scratch", async (c) => {
       });
       removedDirCount += 1;
     } catch {
-      // Non-empty or missing — leave it.
+      // ditto
     }
   }
   try {

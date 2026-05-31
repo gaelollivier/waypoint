@@ -28,7 +28,7 @@ Personal backup tool for cold storage drives. SSD source → multiple HDDs (one 
 
 **Scale baseline measured**: ~173K files / ~3.55TB on the source SSD. Standard SQLite indices are sufficient.
 
-**Test suite**: `bun test` in `apps/api/` — 209 tests across 15 files. Pre-commit hook runs `tsc --noEmit` (web) + `bun test` (API) on every commit.
+**Test suite**: `bun test` in `apps/api/` — 393 tests across 27 files. Pre-commit hook runs `tsc --noEmit` (web) + `bun test` (API) on every commit.
 
 **Diagnostic trace**: when `WAYPOINT_TRACE` is unset or non-zero, the API writes JSONL trace lines to `/tmp/waypoint-trace.log` (path overridable via `WAYPOINT_TRACE_PATH`). Includes `loop_stall` events whenever the main event loop blocks >250ms. Used to root-cause the M6 freeze (correlated-LIKE end-of-scan UPDATE, see `open-questions.md`). Set `WAYPOINT_TRACE=0` to disable.
 
@@ -74,6 +74,16 @@ Improvements planned but not yet scheduled into a milestone.
 | Perceptual / content fingerprinting for re-encoded duplicates | Byte-identical dedup is exhausted on at least one large tree, but visually-identical re-encoded copies (e.g. Google's storage-saver pass, Drive thumbnails, transcoded videos) remain undetected. Two-layer design sketch: (a) image pHash/dHash via a new opportunistic job that adds a `perceptual_hash` column to `files`, computed lazily on photo/video extensions; (b) for videos, a fast pre-filter on duration + dimensions + codec from mediainfo, with frame-sampled pHash and optionally chromaprint audio fingerprint as confirmation. Detector produces advisory suggestion rows; **never auto-applied** — pHash alone isn't safe (burst-mode shots collide). Require a second signal (EXIF DateTimeOriginal, sidecar timestamp, size band) before surfacing as a cleanup proposal. The pairwise comparison UI (`/compare`) is the ground-truth surface for tuning these thresholds: agent emits candidate pairs into a batch, user verdicts each as same / different / unsure, agent reads verdicts back before deciding what to auto-propose. |
 
 Recently completed backlog:
+
+- Encoding comparison backend MVP: new `encoding_sample_sets`,
+  `encoding_samples`, `encoding_variants`, and `encoding_frames` tables
+  support a small video re-encoding experiment loop. The API can register
+  source samples + variant matrices, run ffmpeg encodes into a guarded
+  scratch root, extract evenly-spaced JPEG frames from source clips and
+  completed variants, list frame rows, and clean generated scratch
+  artifacts through the disk-write gateway. The next remaining piece is
+  the UI/comparison flow on top of the existing `/compare` shell, followed
+  by the ranking/aggregation endpoint.
 
 - Media metadata extraction job: new `media_metadata` table + `media_metadata_extraction` job type. Worker thread per chunk extracts EXIF (via `exifr`) for image extensions and QuickTime/MP4 container tags (via `ffprobe`) for video, normalising to `{datetime_original, datetime_source, captured_at_unix, make, model}`. Datetime priority for video: `com.apple.quicktime.creationdate` → `date` → `creation_time`. Idempotent — skips files that already have a row. `POST /api/disks/:id/media-metadata { scanId?, pathPrefix? }` kicks it off; one job per disk at a time. Reads go through the disk-reads gateway. Tests cover the pure parsers (15) and the worker-driven job loop (4). No UI yet — first consumer is the duplicate-detection agent layering on basename+EXIF+camera matching.
 
