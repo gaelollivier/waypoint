@@ -22,6 +22,8 @@ const VIDEO_EXTS = new Set(["mp4", "m4v", "mov", "webm", "ogv", "mkv", "3gp"]);
 const AUDIO_EXTS = new Set(["mp3", "m4a", "wav", "aac", "flac", "ogg"]);
 
 type MediaKind = "image" | "video" | "audio" | "other";
+type ViewMode = "side-by-side" | "toggle";
+type ActiveSide = "left" | "right";
 
 function mediaKind(path: string): MediaKind {
   const ext = path.split(".").pop()?.toLowerCase() ?? "";
@@ -31,7 +33,57 @@ function mediaKind(path: string): MediaKind {
   return "other";
 }
 
-function MediaPanel({ side, label }: { side: ComparisonSide; label: string }) {
+function sideLabel(side: ActiveSide) {
+  return side === "left" ? "A" : "B";
+}
+
+function swapSide(side: ActiveSide): ActiveSide {
+  return side === "left" ? "right" : "left";
+}
+
+function ViewModeControl({
+  mode,
+  onModeChange,
+}: {
+  mode: ViewMode;
+  onModeChange: (mode: ViewMode) => void;
+}) {
+  const button = (nextMode: ViewMode, label: string) => {
+    const active = mode === nextMode;
+    return (
+      <button
+        type="button"
+        onClick={() => onModeChange(nextMode)}
+        className={`px-3 py-1.5 text-xs font-medium transition-colors ${
+          active
+            ? "bg-zinc-200 text-zinc-950"
+            : "text-zinc-400 hover:bg-zinc-800 hover:text-white"
+        }`}
+      >
+        {label}
+      </button>
+    );
+  };
+
+  return (
+    <div className="inline-flex overflow-hidden rounded-md border border-zinc-800 bg-zinc-900">
+      {button("side-by-side", "Side by side")}
+      {button("toggle", "Toggle A/B")}
+    </div>
+  );
+}
+
+function MediaPanel({
+  side,
+  label,
+  immersive = false,
+  onActivate,
+}: {
+  side: ComparisonSide;
+  label: string;
+  immersive?: boolean;
+  onActivate?: () => void;
+}) {
   const [errored, setErrored] = useState(false);
   const kind = mediaKind(side.path);
   const streamUrl = api.comparisons.mediaUrl(side.path);
@@ -40,11 +92,29 @@ function MediaPanel({ side, label }: { side: ComparisonSide; label: string }) {
   // Reset error state when the source path changes (prev/next nav).
   useEffect(() => { setErrored(false); }, [side.path]);
 
-  return (
-    <div className="flex-1 min-w-0 flex flex-col gap-3">
-      <div className="text-xs uppercase tracking-wide text-zinc-500">{label}</div>
+  const maxHeight = immersive ? "max-h-[calc(100vh-18rem)]" : "max-h-[70vh]";
 
-      <div className="flex-1 min-h-0 rounded-md border border-zinc-800 bg-black overflow-hidden flex items-center justify-center">
+  return (
+    <div className="min-w-0 flex flex-col gap-3">
+      <div
+        role={onActivate ? "button" : undefined}
+        tabIndex={onActivate ? 0 : undefined}
+        onClick={onActivate}
+        onKeyDown={(e) => {
+          if (!onActivate) return;
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onActivate();
+          }
+        }}
+        aria-label={onActivate ? `Show ${label === "A" ? "B" : "A"}` : undefined}
+        className={`relative min-h-0 rounded-md border border-zinc-800 bg-black overflow-hidden flex items-center justify-center ${
+          immersive ? "h-[calc(100vh-18rem)] min-h-[360px]" : "min-h-[320px] lg:min-h-[520px]"
+        } ${onActivate ? "cursor-pointer select-none" : ""}`}
+      >
+        <div className="absolute left-3 top-3 z-10 rounded bg-black/80 px-2.5 py-1 text-sm font-semibold tracking-wide text-white">
+          {label}
+        </div>
         {errored ? (
           <div className="text-center p-6 space-y-3">
             <p className="text-sm text-zinc-400">
@@ -61,7 +131,7 @@ function MediaPanel({ side, label }: { side: ComparisonSide; label: string }) {
           <img
             src={streamUrl}
             alt={side.path}
-            className="max-w-full max-h-[70vh] object-contain"
+            className={`max-w-full ${maxHeight} object-contain`}
             onError={() => setErrored(true)}
           />
         ) : kind === "video" ? (
@@ -70,7 +140,7 @@ function MediaPanel({ side, label }: { side: ComparisonSide; label: string }) {
             src={streamUrl}
             controls
             preload="metadata"
-            className="max-w-full max-h-[70vh]"
+            className={`max-w-full ${maxHeight}`}
             onError={() => setErrored(true)}
           />
         ) : kind === "audio" ? (
@@ -111,21 +181,54 @@ function MediaPanel({ side, label }: { side: ComparisonSide; label: string }) {
   );
 }
 
-function FrameImage({ frame, label }: { frame: EncodingComparisonFrame | null; label: string }) {
+function FramePanel({
+  frame,
+  label,
+  immersive = false,
+  onActivate,
+}: {
+  frame: EncodingComparisonFrame | null;
+  label: string;
+  immersive?: boolean;
+  onActivate?: () => void;
+}) {
   const [errored, setErrored] = useState(false);
   useEffect(() => { setErrored(false); }, [frame?.path]);
 
   if (!frame) {
     return (
-      <div className="aspect-video rounded border border-zinc-800 bg-zinc-950 flex items-center justify-center text-xs text-zinc-600">
-        Missing
+      <div className="relative aspect-video rounded border border-zinc-800 bg-zinc-950 flex items-center justify-center text-xs text-zinc-600">
+        <div className="absolute left-3 top-3 rounded bg-black/80 px-2.5 py-1 text-sm font-semibold tracking-wide text-white">
+          {label}
+        </div>
+        Missing frame
       </div>
     );
   }
 
+  const maxHeight = immersive ? "max-h-[calc(100vh-18rem)]" : "max-h-[70vh]";
+
   return (
-    <div className="space-y-1">
-      <div className="aspect-video rounded border border-zinc-800 bg-black overflow-hidden flex items-center justify-center">
+    <div className="space-y-2">
+      <div
+        role={onActivate ? "button" : undefined}
+        tabIndex={onActivate ? 0 : undefined}
+        onClick={onActivate}
+        onKeyDown={(e) => {
+          if (!onActivate) return;
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onActivate();
+          }
+        }}
+        aria-label={onActivate ? `Show ${label === "A" ? "B" : "A"}` : undefined}
+        className={`relative rounded border border-zinc-800 bg-black overflow-hidden flex items-center justify-center ${
+          immersive ? "h-[calc(100vh-18rem)] min-h-[360px]" : "aspect-video"
+        } ${onActivate ? "cursor-pointer select-none" : ""}`}
+      >
+        <div className="absolute left-3 top-3 z-10 rounded bg-black/80 px-2.5 py-1 text-sm font-semibold tracking-wide text-white">
+          {label}
+        </div>
         {errored ? (
           <a
             href={api.comparisons.mediaUrl(frame.path, { download: true })}
@@ -137,7 +240,7 @@ function FrameImage({ frame, label }: { frame: EncodingComparisonFrame | null; l
           <img
             src={api.comparisons.mediaUrl(frame.path)}
             alt={`${label} frame ${frame.position}`}
-            className="w-full h-full object-contain"
+            className={`max-w-full ${maxHeight} object-contain`}
             onError={() => setErrored(true)}
           />
         )}
@@ -149,8 +252,32 @@ function FrameImage({ frame, label }: { frame: EncodingComparisonFrame | null; l
   );
 }
 
-function EncodingFramesPanel({ member }: { member: ComparisonMember }) {
+function EncodingFramesPanel({
+  member,
+  mode,
+  activeSide,
+  onActiveSideChange,
+}: {
+  member: ComparisonMember;
+  mode: ViewMode;
+  activeSide: ActiveSide;
+  onActiveSideChange: (side: ActiveSide) => void;
+}) {
+  const [frameIndex, setFrameIndex] = useState(0);
   const frames = member.encodingFrames;
+  const leftByPosition = new Map(frames?.leftFrames.map((f) => [f.position, f]) ?? []);
+  const rightByPosition = new Map(frames?.rightFrames.map((f) => [f.position, f]) ?? []);
+  const positions = Array.from(
+    new Set([
+      ...(frames?.leftFrames.map((f) => f.position) ?? []),
+      ...(frames?.rightFrames.map((f) => f.position) ?? []),
+    ])
+  ).sort((a, b) => a - b);
+
+  useEffect(() => {
+    if (frameIndex >= positions.length) setFrameIndex(0);
+  }, [frameIndex, positions.length]);
+
   if (!frames) {
     return (
       <div className="rounded border border-zinc-800 bg-zinc-900 p-6 text-sm text-zinc-400">
@@ -159,39 +286,56 @@ function EncodingFramesPanel({ member }: { member: ComparisonMember }) {
     );
   }
 
-  const sourceByPosition = new Map(frames.sourceFrames.map((f) => [f.position, f]));
-  const leftByPosition = new Map(frames.leftFrames.map((f) => [f.position, f]));
-  const rightByPosition = new Map(frames.rightFrames.map((f) => [f.position, f]));
-  const positions = Array.from(
-    new Set([
-      ...frames.sourceFrames.map((f) => f.position),
-      ...frames.leftFrames.map((f) => f.position),
-      ...frames.rightFrames.map((f) => f.position),
-    ])
-  ).sort((a, b) => a - b);
+  if (positions.length === 0) {
+    return (
+      <div className="rounded border border-zinc-800 bg-zinc-900 p-6 text-sm text-zinc-400">
+        No completed A/B frames are attached to this comparison member.
+      </div>
+    );
+  }
+
+  const currentPosition = positions[frameIndex] ?? positions[0];
+  const leftFrame = leftByPosition.get(currentPosition) ?? null;
+  const rightFrame = rightByPosition.get(currentPosition) ?? null;
+  const activeFrame = activeSide === "left" ? leftFrame : rightFrame;
+  const goPrevFrame = () => setFrameIndex((i) => (i <= 0 ? positions.length - 1 : i - 1));
+  const goNextFrame = () => setFrameIndex((i) => (i >= positions.length - 1 ? 0 : i + 1));
 
   return (
     <div className="space-y-3">
-      <div className="grid grid-cols-[72px_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)] gap-3 text-xs uppercase tracking-wide text-zinc-500">
-        <div />
-        <div>Source</div>
-        <div>Left</div>
-        <div>Right</div>
+      <div className="flex flex-wrap items-center gap-2 text-sm">
+        <button
+          type="button"
+          onClick={goPrevFrame}
+          className="rounded bg-zinc-800 px-3 py-1.5 hover:bg-zinc-700"
+        >
+          ← Frame
+        </button>
+        <span className="text-zinc-400">
+          Frame {frameIndex + 1} / {positions.length}
+        </span>
+        <button
+          type="button"
+          onClick={goNextFrame}
+          className="rounded bg-zinc-800 px-3 py-1.5 hover:bg-zinc-700"
+        >
+          Frame →
+        </button>
       </div>
 
-      <div className="space-y-3">
-        {positions.map((position) => (
-          <div
-            key={position}
-            className="grid grid-cols-[72px_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)] gap-3 items-start"
-          >
-            <div className="text-xs text-zinc-500 pt-2">Frame {position + 1}</div>
-            <FrameImage frame={sourceByPosition.get(position) ?? null} label="source" />
-            <FrameImage frame={leftByPosition.get(position) ?? null} label="left" />
-            <FrameImage frame={rightByPosition.get(position) ?? null} label="right" />
-          </div>
-        ))}
-      </div>
+      {mode === "side-by-side" ? (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <FramePanel frame={leftFrame} label="A" />
+          <FramePanel frame={rightFrame} label="B" />
+        </div>
+      ) : (
+        <FramePanel
+          frame={activeFrame}
+          label={sideLabel(activeSide)}
+          immersive
+          onActivate={() => onActiveSideChange(swapSide(activeSide))}
+        />
+      )}
     </div>
   );
 }
@@ -230,8 +374,8 @@ function VerdictBar({
       <div className="flex flex-wrap items-center gap-2">
         {kind === "encoding_frames" ? (
           <>
-            {btn("prefer_left", "Left (L)", "bg-blue-700 text-white")}
-            {btn("prefer_right", "Right (R)", "bg-violet-700 text-white")}
+            {btn("prefer_left", "A better (A)", "bg-blue-700 text-white")}
+            {btn("prefer_right", "B better (B)", "bg-violet-700 text-white")}
             {btn("tie", "Tie (T)", "bg-sky-700 text-white")}
             {btn("unsure", "Unsure (U)", "bg-amber-700 text-white")}
           </>
@@ -285,6 +429,10 @@ function Pair({
   onNext: () => void;
 }) {
   const queryClient = useQueryClient();
+  const [viewMode, setViewMode] = useState<ViewMode>(() =>
+    window.matchMedia("(max-width: 767px)").matches ? "toggle" : "side-by-side"
+  );
+  const [activeSide, setActiveSide] = useState<ActiveSide>("left");
   const verdictMutation = useMutation({
     mutationFn: (body: { verdict: ComparisonVerdict | null; note: string }) =>
       api.comparisons.verdict(batch.id, member.id, body),
@@ -307,15 +455,24 @@ function Pair({
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
       if (batch.kind === "encoding_frames") {
-        if (e.key === "l" || e.key === "L") onVerdict("prefer_left", member.verdictNote);
-        else if (e.key === "r" || e.key === "R") onVerdict("prefer_right", member.verdictNote);
+        if (e.key === "a" || e.key === "A" || e.key === "l" || e.key === "L") {
+          onVerdict("prefer_left", member.verdictNote);
+        } else if (e.key === "b" || e.key === "B" || e.key === "r" || e.key === "R") onVerdict("prefer_right", member.verdictNote);
         else if (e.key === "t" || e.key === "T") onVerdict("tie", member.verdictNote);
         else if (e.key === "u" || e.key === "U") onVerdict("unsure", member.verdictNote);
+        else if (e.key === " ") {
+          e.preventDefault();
+          setActiveSide((side) => swapSide(side));
+        }
         else if (e.key === "ArrowRight" || e.key === "n") onNext();
         else if (e.key === "ArrowLeft" || e.key === "p") onPrev();
       } else if (e.key === "s" || e.key === "S") onVerdict("same", member.verdictNote);
       else if (e.key === "d" || e.key === "D") onVerdict("different", member.verdictNote);
       else if (e.key === "u" || e.key === "U") onVerdict("unsure", member.verdictNote);
+      else if (e.key === " ") {
+        e.preventDefault();
+        setActiveSide((side) => swapSide(side));
+      }
       else if (e.key === "ArrowRight" || e.key === "n") onNext();
       else if (e.key === "ArrowLeft" || e.key === "p") onPrev();
     };
@@ -331,13 +488,50 @@ function Pair({
         </div>
       )}
 
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <ViewModeControl mode={viewMode} onModeChange={setViewMode} />
+        {viewMode === "toggle" && (
+          <div className="inline-flex overflow-hidden rounded-md border border-zinc-800 bg-zinc-900">
+            {(["left", "right"] as const).map((side) => {
+              const active = activeSide === side;
+              return (
+                <button
+                  key={side}
+                  type="button"
+                  onClick={() => setActiveSide(side)}
+                  className={`px-3 py-1.5 text-xs font-medium transition-colors ${
+                    active
+                      ? "bg-zinc-200 text-zinc-950"
+                      : "text-zinc-400 hover:bg-zinc-800 hover:text-white"
+                  }`}
+                >
+                  {sideLabel(side)}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
       {batch.kind === "encoding_frames" ? (
-        <EncodingFramesPanel member={member} />
-      ) : (
-        <div className="flex flex-col lg:flex-row gap-4">
-          <MediaPanel side={member.left} label="Left" />
-          <MediaPanel side={member.right} label="Right" />
+        <EncodingFramesPanel
+          member={member}
+          mode={viewMode}
+          activeSide={activeSide}
+          onActiveSideChange={setActiveSide}
+        />
+      ) : viewMode === "side-by-side" ? (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <MediaPanel side={member.left} label="A" />
+          <MediaPanel side={member.right} label="B" />
         </div>
+      ) : (
+        <MediaPanel
+          side={activeSide === "left" ? member.left : member.right}
+          label={sideLabel(activeSide)}
+          immersive
+          onActivate={() => setActiveSide((side) => swapSide(side))}
+        />
       )}
 
       <VerdictBar
@@ -443,7 +637,7 @@ export function CompareBatchPage({ id }: { id: string }) {
   const verdicted = progress.total - progress.pending;
   const shortcutText =
     batch.kind === "encoding_frames"
-      ? "Shortcuts: L=left · R=right · T=tie · U=unsure · ←/→ navigate"
+      ? "Shortcuts: A=A better · B=B better · T=tie · U=unsure · ←/→ navigate"
       : "Shortcuts: S=same · D=different · U=unsure · ←/→ navigate";
 
   return (
