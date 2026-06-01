@@ -57,9 +57,10 @@ state.
 
 ## Default workflow
 
-- After every change, open a pull request into `main`
+- Work directly on `main`; do not create feature branches or pull requests
+  unless the user explicitly asks for one
 - Inspect `git status -sb` and the staged diff before committing
-- Prefer creating the PR with `gh pr create` after pushing the branch
+- Commit changes after each completed task or step
 
 ## Presenting plans
 
