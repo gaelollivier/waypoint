@@ -61,12 +61,140 @@ state.
   unless the user explicitly asks for one
 - Inspect `git status -sb` and the staged diff before committing
 - Commit changes after each completed task or step
+- **Test in the UI, not via curl.** The user only validates features through
+  the browser. Reserve curl for backend debugging — and even then, run it
+  yourself rather than handing the user a curl command to paste.
 
 ## Presenting plans
 
 When presenting a plan for review, keep it high-level: short bullets, no
 sub-prose, no exhaustive file lists. The user reads the bullets and asks for
 detail on whatever needs digging into. Don't pre-empt with deep design.
+
+Surface design decisions one at a time as short summaries; wait for the
+user to ask before expanding. The user wants to keep direction in their
+hands and not discover a wrong choice after a lot of work has been done.
+
+## Naming — full words, no abbreviations
+
+Code identifiers, filenames, DB column / table names, API routes, and
+documentation use full English words. The most common offender:
+**"duplicate", not "dupe"** — anywhere a job runner, table, route, or
+component is named (`DuplicateDetectionJobRunner`, `duplicate_groups`,
+`/api/disks/:id/duplicates`). The shorthand is fine in casual chat,
+never in artifacts.
+
+## UI architecture — disk page is the primary surface
+
+Users think in disks, not jobs. The disk detail page owns all
+user-facing operations for that disk: progress, charts, events,
+errors, history. The job detail page (`/jobs/:id`) is a debug-only
+surface — do not add features there that aren't also in the shared
+`JobDetails` component.
+
+- Build the shared `JobDetails` once (progress, charts, events,
+  controls) and embed it in both `DiskDetailPage` (when a job is
+  active) and `JobDetailPage`.
+- Disk-scoped events/errors aggregate every job that touched the
+  disk; job-scoped views live on the job page only.
+- Pause/resume/cancel controls live inside `JobDetails` so both
+  surfaces get them.
+- Applies to every job type — scan, copy, verify, backup, encoder,
+  frame-extract, future ones.
+
+## Remote browser — never use OS dialogs or client-only paths
+
+The user reaches the web UI from a separate device (phone, laptop on
+LAN). The browser is NOT on the server. Any feature relying on the
+client machine matching the server machine is broken:
+
+- No `osascript` folder pickers, no native OS dialogs, no
+  `showOpenFilePicker`.
+- File / folder pickers must be server-side: API endpoints that
+  list the server's filesystem, rendered as a tree in React.
+- "Open in Finder" / "reveal in file manager" can be offered but only
+  as a same-machine convenience; never the primary path.
+
+## URLs to share with the user
+
+When you send the user a UI link, use the LAN IP of the web app:
+
+```
+http://192.168.x.x:5173/<path>
+```
+
+- **Port 5173** is the Vite dev server (web app). The browser always
+  hits this; Vite proxies `/api` + `/healthz` to the API on :3000.
+- **Port 3000** is the API only — useful for curl checks you run
+  yourself, not for the user.
+- **Never `localhost`** — the user's browser is on a different
+  device. Discover the LAN IP at link-share time:
+  `ipconfig getifaddr en0` (Wi-Fi) or `en1`. If neither returns,
+  ask rather than guess.
+
+## Working around `bun --watch` for long jobs
+
+`bun run dev` runs the API under `bun --watch`. Any source edit
+restarts the API process and kills in-flight jobs — scans, copies,
+media-metadata extraction, ffmpeg encodes — without a clean resume.
+
+When you need to edit source while a long job is running:
+
+1. Create a worktree off `main`:
+   `git worktree add -b <feature-branch> /path/to/worktree main`
+2. Run tests, typecheck, and commits inside the worktree. Tests use
+   an in-memory DB so they don't touch live state.
+3. Do NOT start a second `bun run dev` in the worktree — it would
+   open the same `~/.waypoint/waypoint.db` and at minimum confuse
+   the disk-lock manager.
+4. When the job finishes, merge the feature branch into `main` on
+   the original worktree. The watcher restarts cleanly once with the
+   new code.
+5. `git worktree remove` when done.
+
+If you only need to inspect / query while a job runs, just use the
+HTTP API or the read-only `bun run sql` — no edits, no restart.
+
+## Cleanup suggestions — sizing and card layout
+
+When the agent posts cleanup suggestions to
+`POST /api/disks/:id/cleanup/suggestions`, bundle aggressively into
+fewer, larger batches. A batch with >500 members is fine — the user
+explicitly prefers reviewing fewer batches. Do not split a coherent
+rule into N sub-batches just to shrink failure blast radius;
+mid-batch apply failures don't roll back the rows already deleted,
+and the user can retry.
+
+The Suggestions tab card layout (in
+`apps/web/src/components/CleanupSuggestionsTab.tsx`) has two
+non-obvious constraints set by the user:
+
+1. **Action buttons (Apply / Dismiss) live at the TOP of the card**,
+   immediately after the header summary and any stale warning. Not
+   the bottom — the user reviews many cards and shouldn't scroll for
+   large batches.
+2. **Member-row list collapses past the first 20 rows** behind a
+   "Show N more (X total)" toggle. Files in a single batch follow a
+   similar pattern, so the user scans a sample before deciding.
+
+Card order: header summary → stale warning (if any) → Apply/Dismiss
+buttons → rationale → "in `<prefix>`" → first 20 member rows →
+"Show N more" toggle.
+
+When extending the card, keep buttons above the path list and do not
+undo the collapse-by-default behavior.
+
+## `/review` and acknowledged-gap workflow
+
+When the user triages a `/review` finding as "by design" or "won't
+do", record it in `docs/decisions.md` under "Acknowledged review
+gaps" and update the `/review` skill / script to filter that pattern
+out of future reports. The user doesn't want to see the same known
+gaps re-reported every cycle.
+
+Before presenting a review report, compare findings against the
+acknowledged-gap list and surface a previously-acknowledged gap
+only if the situation has materially changed.
 
 ## Private notes — out of repo
 
@@ -386,6 +514,36 @@ A single accidental bulk-delete of backup data is catastrophic and
 irreversible. Requiring human initiation via a browser UI — with an explicit
 confirmation step — is a deliberate friction layer that prevents automated
 tools from causing data loss.
+
+### Corollary: no shell-level deletes on registered disk mounts
+
+`rm`, `rm -rf`, `unlink`, `find -delete`, or any other shell or
+direct-fs deletion against a path under `/Volumes/<disk>/` (or any
+registered disk mount) is forbidden — even for cleanup of files the
+agent created itself in the same session, even for "obviously safe"
+hidden directories like `.waypoint-encoding-scratch/`. The mount
+root defines "off-limits", not the file's apparent origin.
+
+For unwanted files / directories the agent created on a registered
+disk, the options are:
+
+1. Use a Waypoint API endpoint that routes through
+   `apps/api/src/fs/disk-writes.ts` and emits an `audit_log` row. If
+   no such endpoint exists yet, add one rather than reaching for
+   `rm`.
+2. Ask the user to delete it manually.
+
+Smoke tests that write to a real disk must have a clean teardown
+path in place before the first write. If there isn't one, build it
+first or use a staging path under `/tmp/`. The host SSD outside disk
+mounts (`~/.waypoint/`, `/tmp/`) follows normal common sense, but
+the same bias toward "ask first" applies when something looks
+valuable.
+
+The whole safety architecture (`disk-writes.ts` gateway, the
+human-only deletion rule above, browser-only cleanup guardrails)
+exists specifically to make this class of incident impossible.
+Shelling out around it makes the architecture meaningless.
 
 ---
 
