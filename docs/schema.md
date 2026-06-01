@@ -336,6 +336,11 @@ Encoding batches may set `sample_id` to the source sample being compared.
 refer to `encoding_variants`. The existing path fields remain the
 renderable media/frame paths.
 
+For new `encoding_frames` batches, each comparison member is exactly one
+sampled A/B frame pair. `left_frame_id` and `right_frame_id` point at the
+specific `encoding_frames` rows rendered for that verdict. Legacy rows may
+have null frame ids.
+
 `comparison_members.verdict` accepts both the original dedup verdicts
 (`same`, `different`, `unsure`) and encoder-preference verdicts
 (`prefer_left`, `prefer_right`, `tie`). The API enforces which subset is

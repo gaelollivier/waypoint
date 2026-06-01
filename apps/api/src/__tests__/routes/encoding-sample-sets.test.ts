@@ -346,18 +346,24 @@ describe("encoding-sample-sets", () => {
       );
       expect(res.status).toBe(201);
       expect(res.body.batches).toHaveLength(1);
-      expect(res.body.batches[0].memberCount).toBe(3); // 3 choose 2
+      expect(res.body.batches[0].memberCount).toBe(6); // 3 choose 2 × 2 frames
 
       const detail = await req(ctx.app, "GET", `/api/comparisons/${res.body.batches[0].id}`);
       expect(detail.status).toBe(200);
       expect(detail.body.kind).toBe("encoding_frames");
       expect(detail.body.sampleId).toBe(sample.id);
-      expect(detail.body.members).toHaveLength(3);
-      expect(detail.body.members[0].left.variantId).toBe(variants[0].id);
-      expect(detail.body.members[0].right.variantId).toBe(variants[1].id);
-      expect(detail.body.members[0].encodingFrames.sourceFrames).toHaveLength(2);
-      expect(detail.body.members[0].encodingFrames.leftFrames).toHaveLength(2);
-      expect(detail.body.members[0].encodingFrames.rightFrames).toHaveLength(2);
+      expect(detail.body.members).toHaveLength(6);
+      expect(detail.body.members.every((m: any) => m.left.path.endsWith(".jpg"))).toBe(true);
+      expect(detail.body.members.every((m: any) => m.right.path.endsWith(".jpg"))).toBe(true);
+      expect(detail.body.members.every((m: any) => m.encodingFrames.sourceFrames.length === 0)).toBe(true);
+      expect(detail.body.members.every((m: any) => m.encodingFrames.leftFrames.length === 1)).toBe(true);
+      expect(detail.body.members.every((m: any) => m.encodingFrames.rightFrames.length === 1)).toBe(true);
+      const pairCounts = new Map<string, number>();
+      for (const member of detail.body.members) {
+        const pairKey = [member.left.variantId, member.right.variantId].sort((a, b) => a - b).join(":");
+        pairCounts.set(pairKey, (pairCounts.get(pairKey) ?? 0) + 1);
+      }
+      expect([...pairCounts.values()].sort()).toEqual([2, 2, 2]);
     });
 
     it("returns 409 when no sample has enough extracted frames", async () => {
@@ -377,7 +383,7 @@ describe("encoding-sample-sets", () => {
         {}
       );
       expect(res.status).toBe(409);
-      expect(res.body.skipped[0].reason).toBe("no_source_frames");
+      expect(res.body.skipped[0].reason).toBe("fewer_than_two_ready_variants");
     });
   });
 
@@ -454,24 +460,39 @@ describe("encoding-sample-sets", () => {
         ctx.app,
         "POST",
         `/api/encoding-sample-sets/${setId}/frame-comparison-batches`,
-        {}
+        { framesPerVariantPair: 1 }
       );
       expect(batch.status).toBe(201);
       const batchId = batch.body.batches[0].id;
       const members = ctx.db
-        .prepare(`SELECT id FROM comparison_members WHERE batch_id = ? ORDER BY position`)
-        .all(batchId) as Array<{ id: number }>;
+        .prepare(
+          `SELECT id, left_variant_id, right_variant_id
+             FROM comparison_members
+            WHERE batch_id = ?
+            ORDER BY position`
+        )
+        .all(batchId) as Array<{ id: number; left_variant_id: number; right_variant_id: number }>;
       expect(members).toHaveLength(3);
 
-      ctx.db
-        .prepare(`UPDATE comparison_members SET verdict = ? WHERE id = ?`)
-        .run("prefer_left", members[0].id); // v1 beats v2
-      ctx.db
-        .prepare(`UPDATE comparison_members SET verdict = ? WHERE id = ?`)
-        .run("prefer_left", members[1].id); // v1 beats v3
-      ctx.db
-        .prepare(`UPDATE comparison_members SET verdict = ? WHERE id = ?`)
-        .run("prefer_right", members[2].id); // v3 beats v2
+      const preferWinner = (a: number, b: number, winner: number) => {
+        const member = members.find(
+          (m) =>
+            (m.left_variant_id === a && m.right_variant_id === b) ||
+            (m.left_variant_id === b && m.right_variant_id === a)
+        );
+        expect(member).toBeDefined();
+        if (member === undefined) {
+          throw new Error("invariant: expected comparison member for variant pair");
+        }
+        const verdict = member.left_variant_id === winner ? "prefer_left" : "prefer_right";
+        ctx.db
+          .prepare(`UPDATE comparison_members SET verdict = ? WHERE id = ?`)
+          .run(verdict, member.id);
+      };
+
+      preferWinner(variants[0].id, variants[1].id, variants[0].id);
+      preferWinner(variants[0].id, variants[2].id, variants[0].id);
+      preferWinner(variants[1].id, variants[2].id, variants[2].id);
 
       const rankings = await req(ctx.app, "GET", `/api/encoding-sample-sets/${setId}/rankings`);
       expect(rankings.status).toBe(200);

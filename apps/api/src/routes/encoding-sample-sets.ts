@@ -82,6 +82,7 @@ interface SampleSetRow {
 interface FrameComparisonBatchBody {
   namePrefix?: string;
   rationale?: string;
+  framesPerVariantPair: number;
 }
 
 interface FrameComparisonSampleRow {
@@ -96,7 +97,26 @@ interface FrameComparisonVariantRow {
   label: string;
   output_path: string;
   output_size_bytes: number | null;
-  frame_count: number;
+}
+
+interface FrameComparisonFrameRow {
+  id: number;
+  variant_id: number;
+  position: number;
+  at_seconds: number;
+  output_path: string;
+}
+
+interface FramePairMember {
+  leftPath: string;
+  leftSizeBytes: number | null;
+  leftVariantId: number;
+  leftFrameId: number;
+  rightPath: string;
+  rightSizeBytes: number | null;
+  rightVariantId: number;
+  rightFrameId: number;
+  note: string;
 }
 
 interface RankingMemberRow {
@@ -289,7 +309,7 @@ function validateBody(body: unknown): CreateSampleSetBody | { error: string } {
 function validateFrameComparisonBody(
   body: unknown
 ): FrameComparisonBatchBody | { error: string } {
-  if (body === null || body === undefined) return {};
+  if (body === null || body === undefined) return { framesPerVariantPair: 2 };
   if (typeof body !== "object") return { error: "body must be an object" };
   const b = body as Record<string, unknown>;
   if (b.namePrefix !== undefined && typeof b.namePrefix !== "string") {
@@ -298,10 +318,30 @@ function validateFrameComparisonBody(
   if (b.rationale !== undefined && typeof b.rationale !== "string") {
     return { error: "rationale must be a string" };
   }
+  if (
+    b.framesPerVariantPair !== undefined &&
+    (!Number.isInteger(b.framesPerVariantPair) || (b.framesPerVariantPair as number) <= 0)
+  ) {
+    return { error: "framesPerVariantPair must be a positive integer" };
+  }
   return {
     namePrefix: b.namePrefix,
     rationale: b.rationale,
+    framesPerVariantPair: Math.max(
+      1,
+      Math.min(20, (b.framesPerVariantPair as number | undefined) ?? 2)
+    ),
   } as FrameComparisonBatchBody;
+}
+
+function stableShuffleKey(seed: string, ...parts: Array<string | number | null>): number {
+  let hash = 2166136261;
+  const input = `${seed}|${parts.join("|")}`;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
 }
 
 function rankVariants<T extends { score: number; wins: number; losses: number; outputSizeBytes?: number | null; position: number }>(
@@ -987,10 +1027,9 @@ encodingSampleSetsRouter.get("/:id{[0-9]+}/rankings", (c) => {
  * POST /api/encoding-sample-sets/:id/frame-comparison-batches
  *
  * Builds one blinded `comparison_batches.kind='encoding_frames'` batch per
- * sample that has source frames plus at least two completed variants with
- * extracted frames. Members are all pairwise variant combinations for that
- * sample. The compare UI uses the variant foreign keys to render the frame
- * grids; the path columns still point at the renderable encoded outputs.
+ * sample that has at least one ready variant pair with enough extracted
+ * frames. Each member is exactly one sampled A/B frame pair, and the review
+ * order plus left/right assignment are shuffled per batch to reduce bias.
  */
 encodingSampleSetsRouter.post("/:id{[0-9]+}/frame-comparison-batches", async (c) => {
   const setId = Number(c.req.param("id"));
@@ -1021,43 +1060,38 @@ encodingSampleSetsRouter.post("/:id{[0-9]+}/frame-comparison-batches", async (c)
 
   db.transaction(() => {
     for (const sample of samples) {
-      const sourceFrameCount = (
-        db
-          .prepare(
-            `SELECT COUNT(*) AS n
-               FROM encoding_frames
-              WHERE sample_id = ?
-                AND status = 'done'
-                AND output_path IS NOT NULL`
-          )
-          .get(sample.id) as { n: number }
-      ).n;
-      if (sourceFrameCount === 0) {
-        skipped.push({ sampleId: sample.id, reason: "no_source_frames" });
-        continue;
-      }
-
       const variants = db
         .prepare(
-          `SELECT v.id, v.position, v.label, v.output_path, v.output_size_bytes,
-                  COUNT(f.id) AS frame_count
+          `SELECT v.id, v.position, v.label, v.output_path, v.output_size_bytes
              FROM encoding_variants v
-             JOIN encoding_frames f
-               ON f.variant_id = v.id
-              AND f.status = 'done'
-              AND f.output_path IS NOT NULL
             WHERE v.sample_id = ?
               AND v.status = 'done'
               AND v.output_path IS NOT NULL
-            GROUP BY v.id
-           HAVING frame_count = ?
             ORDER BY v.position`
         )
-        .all(sample.id, sourceFrameCount) as FrameComparisonVariantRow[];
+        .all(sample.id) as FrameComparisonVariantRow[];
 
       if (variants.length < 2) {
         skipped.push({ sampleId: sample.id, reason: "fewer_than_two_ready_variants" });
         continue;
+      }
+
+      const variantPlaceholders = variants.map(() => "?").join(", ");
+      const frameRows = db
+        .prepare(
+          `SELECT variant_id, id, position, at_seconds, output_path
+             FROM encoding_frames
+            WHERE variant_id IN (${variantPlaceholders})
+              AND status = 'done'
+              AND output_path IS NOT NULL
+            ORDER BY variant_id, position`
+        )
+        .all(...variants.map((v) => v.id)) as FrameComparisonFrameRow[];
+      const framesByVariant = new Map<number, Map<number, FrameComparisonFrameRow>>();
+      for (const frame of frameRows) {
+        const byPosition = framesByVariant.get(frame.variant_id) ?? new Map();
+        byPosition.set(frame.position, frame);
+        framesByVariant.set(frame.variant_id, byPosition);
       }
 
       const namePrefix =
@@ -1066,7 +1100,7 @@ encodingSampleSetsRouter.post("/:id{[0-9]+}/frame-comparison-batches", async (c)
       const name = `${namePrefix} - sample ${sample.position + 1}`;
       const rationale =
         parsed.rationale ??
-        "Blind frame comparison between completed encoding variants.";
+        "Blind sampled-frame comparison between completed encoding variants.";
       const batch = db
         .prepare(
           `INSERT INTO comparison_batches (name, rationale, kind, sample_id)
@@ -1075,33 +1109,107 @@ encodingSampleSetsRouter.post("/:id{[0-9]+}/frame-comparison-batches", async (c)
         )
         .get(name, rationale, sample.id) as { id: number };
 
+      const members: FramePairMember[] = [];
+      for (let i = 0; i < variants.length; i++) {
+        for (let j = i + 1; j < variants.length; j++) {
+          const first = variants[i];
+          const second = variants[j];
+          const firstFrames = framesByVariant.get(first.id) ?? new Map();
+          const secondFrames = framesByVariant.get(second.id) ?? new Map();
+          const commonPositions = Array.from(firstFrames.keys())
+            .filter((position) => secondFrames.has(position))
+            .sort(
+              (a, b) =>
+                stableShuffleKey(`batch:${batch.id}:sample-frames`, first.id, second.id, a) -
+                stableShuffleKey(`batch:${batch.id}:sample-frames`, first.id, second.id, b)
+            )
+            .slice(0, parsed.framesPerVariantPair);
+          if (commonPositions.length < parsed.framesPerVariantPair) {
+            continue;
+          }
+
+          for (const framePosition of commonPositions) {
+            const firstFrame = firstFrames.get(framePosition);
+            const secondFrame = secondFrames.get(framePosition);
+            if (firstFrame === undefined || secondFrame === undefined) {
+              throw new Error("invariant: common frame position missing from variant frame map");
+            }
+            const swap =
+              stableShuffleKey(
+                `batch:${batch.id}:side`,
+                first.id,
+                second.id,
+                framePosition
+              ) % 2 === 1;
+            const left = swap
+              ? { variant: second, frame: secondFrame }
+              : { variant: first, frame: firstFrame };
+            const right = swap
+              ? { variant: first, frame: firstFrame }
+              : { variant: second, frame: secondFrame };
+            members.push({
+              leftPath: left.frame.output_path,
+              leftSizeBytes: left.variant.output_size_bytes,
+              leftVariantId: left.variant.id,
+              leftFrameId: left.frame.id,
+              rightPath: right.frame.output_path,
+              rightSizeBytes: right.variant.output_size_bytes,
+              rightVariantId: right.variant.id,
+              rightFrameId: right.frame.id,
+              note: `sample ${sample.position + 1}, frame ${framePosition + 1}`,
+            });
+          }
+        }
+      }
+
+      if (members.length === 0) {
+        db.prepare(`DELETE FROM comparison_batches WHERE id = ?`).run(batch.id);
+        skipped.push({ sampleId: sample.id, reason: "no_variant_pairs_with_enough_common_frames" });
+        continue;
+      }
+
+      members.sort(
+        (a, b) =>
+          stableShuffleKey(
+            `batch:${batch.id}:member-order`,
+            a.leftVariantId,
+            a.rightVariantId,
+            a.leftFrameId,
+            a.rightFrameId
+          ) -
+          stableShuffleKey(
+            `batch:${batch.id}:member-order`,
+            b.leftVariantId,
+            b.rightVariantId,
+            b.leftFrameId,
+            b.rightFrameId
+          )
+      );
+
       const insertMember = db.prepare(
         `INSERT INTO comparison_members
            (batch_id, position,
-            left_path, left_size_bytes, left_variant_id,
-            right_path, right_size_bytes, right_variant_id,
+            left_path, left_size_bytes, left_variant_id, left_frame_id,
+            right_path, right_size_bytes, right_variant_id, right_frame_id,
             note)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
 
-      let position = 0;
-      for (let i = 0; i < variants.length; i++) {
-        for (let j = i + 1; j < variants.length; j++) {
-          const left = variants[i];
-          const right = variants[j];
-          insertMember.run(
-            batch.id,
-            position,
-            left.output_path,
-            left.output_size_bytes,
-            left.id,
-            right.output_path,
-            right.output_size_bytes,
-            right.id,
-            `sample ${sample.position + 1}, variant pair ${position + 1}`
-          );
-          position += 1;
-        }
+      for (let position = 0; position < members.length; position++) {
+        const member = members[position];
+        insertMember.run(
+          batch.id,
+          position,
+          member.leftPath,
+          member.leftSizeBytes,
+          member.leftVariantId,
+          member.leftFrameId,
+          member.rightPath,
+          member.rightSizeBytes,
+          member.rightVariantId,
+          member.rightFrameId,
+          member.note
+        );
       }
 
       recordAudit(db, {
@@ -1116,16 +1224,17 @@ encodingSampleSetsRouter.post("/:id{[0-9]+}/frame-comparison-batches", async (c)
           rationale,
           kind: "encoding_frames",
           sampleId: sample.id,
-          memberCount: position,
+          memberCount: members.length,
         },
         metadata: {
           setId,
           sampleId: sample.id,
+          framesPerVariantPair: parsed.framesPerVariantPair,
           variantIds: variants.map((v) => v.id),
         },
       });
 
-      created.push({ id: batch.id, sampleId: sample.id, memberCount: position });
+      created.push({ id: batch.id, sampleId: sample.id, memberCount: members.length });
     }
   })();
 

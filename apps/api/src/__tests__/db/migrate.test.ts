@@ -37,7 +37,7 @@ const EXPECTED_TABLES = [
   "verify_items",
 ];
 
-const LATEST_MIGRATION_VERSION = 27;
+const LATEST_MIGRATION_VERSION = 28;
 
 function getTables(db: Database): string[] {
   return (

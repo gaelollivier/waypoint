@@ -61,6 +61,8 @@ interface MemberRow {
   verdicted_at: string | null;
   left_variant_id: number | null;
   right_variant_id: number | null;
+  left_frame_id: number | null;
+  right_frame_id: number | null;
 }
 
 interface EncodingFrameRow {
@@ -166,6 +168,48 @@ function loadEncodingFrames(
   const byMember = new Map<number, EncodingFramesForMember>();
   if (batch.kind !== "encoding_frames" || batch.sample_id === null) return byMember;
 
+  const flatFrameIds = Array.from(
+    new Set(
+      members
+        .flatMap((m) => [m.left_frame_id, m.right_frame_id])
+        .filter((id): id is number => id !== null)
+    )
+  );
+  const framesById = new Map<number, EncodingFrameRow>();
+  if (flatFrameIds.length > 0) {
+    const placeholders = flatFrameIds.map(() => "?").join(", ");
+    const rows = db
+      .prepare(
+        `SELECT id, position, at_seconds, output_path
+           FROM encoding_frames
+          WHERE id IN (${placeholders})
+            AND status = 'done'
+            AND output_path IS NOT NULL`
+      )
+      .all(...flatFrameIds) as EncodingFrameRow[];
+    for (const row of rows) {
+      framesById.set(row.id, row);
+    }
+  }
+
+  const legacyMembers = members.filter(
+    (m) => m.left_frame_id === null && m.right_frame_id === null
+  );
+  for (const member of members) {
+    if (member.left_frame_id === null || member.right_frame_id === null) continue;
+    const leftFrame = framesById.get(member.left_frame_id) ?? null;
+    const rightFrame = framesById.get(member.right_frame_id) ?? null;
+    byMember.set(member.id, {
+      sampleId: batch.sample_id,
+      leftVariantId: member.left_variant_id,
+      rightVariantId: member.right_variant_id,
+      sourceFrames: [],
+      leftFrames: leftFrame ? [leftFrame] : [],
+      rightFrames: rightFrame ? [rightFrame] : [],
+    });
+  }
+  if (legacyMembers.length === 0) return byMember;
+
   const sourceFrames = db
     .prepare(
       `SELECT id, position, at_seconds, output_path
@@ -179,7 +223,7 @@ function loadEncodingFrames(
 
   const variantIds = Array.from(
     new Set(
-      members
+      legacyMembers
         .flatMap((m) => [m.left_variant_id, m.right_variant_id])
         .filter((id): id is number => id !== null)
     )
@@ -209,7 +253,7 @@ function loadEncodingFrames(
     }
   }
 
-  for (const member of members) {
+  for (const member of legacyMembers) {
     byMember.set(member.id, {
       sampleId: batch.sample_id,
       leftVariantId: member.left_variant_id,
@@ -274,7 +318,8 @@ comparisonsRouter.get("/:batchId", (c) => {
       `SELECT id, batch_id, position, left_path, left_size_bytes, left_content_hash,
               right_path, right_size_bytes, right_content_hash,
               note, verdict, verdict_note, verdicted_at,
-              left_variant_id, right_variant_id
+              left_variant_id, right_variant_id,
+              left_frame_id, right_frame_id
        FROM comparison_members
        WHERE batch_id = ?
        ORDER BY position, id`
@@ -466,7 +511,8 @@ comparisonsRouter.delete("/:batchId", (c) => {
         `SELECT id, position, left_path, left_size_bytes, left_content_hash,
                 right_path, right_size_bytes, right_content_hash,
                 note, verdict, verdict_note, verdicted_at,
-                left_variant_id, right_variant_id
+                left_variant_id, right_variant_id,
+                left_frame_id, right_frame_id
            FROM comparison_members WHERE batch_id = ? ORDER BY position`
       )
       .all(batchId) as MemberRow[];
@@ -578,7 +624,8 @@ comparisonsRouter.post("/:batchId/members/:memberId/verdict", async (c) => {
         `SELECT id, batch_id, position, left_path, left_size_bytes, left_content_hash,
                 right_path, right_size_bytes, right_content_hash,
                 note, verdict, verdict_note, verdicted_at,
-                left_variant_id, right_variant_id
+                left_variant_id, right_variant_id,
+                left_frame_id, right_frame_id
          FROM comparison_members WHERE id = ?`
       )
       .get(memberId) as MemberRow;

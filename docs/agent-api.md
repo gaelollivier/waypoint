@@ -220,12 +220,17 @@ frames first, variant position, then frame position. Each row includes
 
 ### `POST /api/encoding-sample-sets/:id/frame-comparison-batches`
 Create blinded frame-comparison batches for a set after extraction has
-completed. Optional body: `{ "namePrefix": "blind run", "rationale": "..." }`.
+completed. Optional body:
+`{ "namePrefix": "blind run", "rationale": "...", "framesPerVariantPair": 2 }`.
+`framesPerVariantPair` defaults to 2 and is clamped to 1-20.
+
 The route creates one `comparison_batches.kind = 'encoding_frames'` row
-per sample that has source frames and at least two completed variants
-with matching extracted frame counts. Each batch member is one pairwise
-variant comparison and stores `left_variant_id` / `right_variant_id` for
-the `/compare/:batchId` UI.
+per sample that has at least one completed variant pair with enough common
+extracted frame positions. Each batch member is exactly one flat A/B JPEG
+pair, with `left_variant_id` / `right_variant_id` plus
+`left_frame_id` / `right_frame_id` stored for ranking and rendering. Each
+variant pair contributes the same number of frame members; member order and
+left/right assignment are shuffled per batch to reduce review bias.
 
 Returns `201 { setId, batches, skipped }`. Returns 409 when no sample has
 enough completed frame data.
@@ -235,6 +240,11 @@ Aggregate encoding-frame comparison verdicts into per-sample and cross-sample
 variant rankings. `prefer_left` / `prefer_right` count as wins for the chosen
 variant, `tie` counts as 0.5 points for both variants, and `unsure` / pending
 members are reported but do not affect score.
+
+The ranking is an aggregate score over flat frame-pair verdicts, not Elo:
+multiple sampled frames from the same variant pair add multiple votes, so two
+frames agreeing on the same winner naturally produces a stronger score signal
+than split or unsure verdicts.
 
 The response intentionally omits source/output paths and scratch roots; it
 returns sample ids, variant ids, encoder settings, output sizes, encode times,
